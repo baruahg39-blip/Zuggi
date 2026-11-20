@@ -315,7 +315,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
 });
 
 // 2. Endpoint: Verify OTP
-app.post('/api/auth/verify-otp', (req, res) => {
+app.post('/api/auth/verify-otp', async (req, res) => {
   try {
     let { phone, otp } = req.body;
 
@@ -337,18 +337,35 @@ app.post('/api/auth/verify-otp', (req, res) => {
     const isDemoMatch = phone.includes('9678944132') && cleanOtp === '000000';
     const isTestMatch = phone.includes('99999') && (cleanOtp === '123456' || cleanOtp === '000000');
 
-    if (isDemoMatch || isTestMatch) {
-      otpStore.delete(phone);
-      const clean10 = normalizeTenDigitPhone(phone);
+    const issueVerifiedSession = async (verifiedPhone: string) => {
+      const clean10 = normalizeTenDigitPhone(verifiedPhone);
+      let resetToken = '';
+      let existingUser: any = null;
       if (clean10) {
         otpVerifiedStore.set(clean10, Date.now() + OTP_VERIFIED_TTL_MS);
+        resetToken = crypto.randomBytes(24).toString('hex');
+        passcodeResetTokenStore.set(clean10, {
+          token: resetToken,
+          expiresAt: Date.now() + PASSCODE_RESET_TOKEN_TTL_MS
+        });
+        existingUser = passcodeUserStore.get(clean10) || (await findSupabaseUserByPhone(clean10)) || null;
+        if (existingUser) {
+          passcodeUserStore.set(clean10, existingUser);
+        }
       }
-      console.log(`[OTP Verified] Demo/Sandbox account ${phone} authenticated.`);
-      return res.json({
+      return {
         success: true,
         verified: true,
-        phone
-      });
+        phone: verifiedPhone,
+        resetToken,
+        existingUser: sanitizeUserForClient(existingUser)
+      };
+    };
+
+    if (isDemoMatch || isTestMatch) {
+      otpStore.delete(phone);
+      console.log(`[OTP Verified] Demo/Sandbox account ${phone} authenticated.`);
+      return res.json(await issueVerifiedSession(phone));
     }
 
     const record = otpStore.get(phone);
@@ -375,19 +392,10 @@ app.post('/api/auth/verify-otp', (req, res) => {
       });
     }
 
-    // OTP matched: remove it to prevent replay attacks and grant 15-minute passcode-setup window
+    // OTP matched: remove it to prevent replay attacks and grant 15-minute passcode-setup / reset window
     otpStore.delete(phone);
-    const clean10 = normalizeTenDigitPhone(phone);
-    if (clean10) {
-      otpVerifiedStore.set(clean10, Date.now() + OTP_VERIFIED_TTL_MS);
-    }
-
     console.log(`[OTP Verified] User with phone ${phone} authenticated.`);
-    return res.json({
-      success: true,
-      verified: true,
-      phone
-    });
+    return res.json(await issueVerifiedSession(phone));
 
   } catch (error: any) {
     console.error('[Verify OTP Server Error]:', error);
@@ -401,7 +409,9 @@ app.post('/api/auth/verify-otp', (req, res) => {
 // --- PASSCODE AUTHENTICATION (No-OTP Returning Login for Shippers, Drivers & Vehicle Owners) ---
 
 const OTP_VERIFIED_TTL_MS = 15 * 60 * 1000; // 15 minutes after OTP verify to complete profile + passcode
+const PASSCODE_RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes single-use token for passcode reset
 const otpVerifiedStore = new Map<string, number>(); // clean10 -> expiresAt
+const passcodeResetTokenStore = new Map<string, { token: string; expiresAt: number }>(); // clean10 -> single-use reset token
 const passcodeUserStore = new Map<string, any>(); // clean10 -> user record with passcodeHash
 const passcodeAttemptStore = new Map<string, { count: number; lockUntil: number }>();
 
@@ -608,6 +618,89 @@ app.post('/api/auth/login-passcode', async (req, res) => {
   } catch (err: any) {
     console.error('[Passcode Login Error]:', err);
     return res.status(500).json({ success: false, message: 'Internal server error verifying passcode.' });
+  }
+});
+
+// 6. Endpoint: Reset Forgotten Passcode (requires verified OTP single-use resetToken)
+app.post('/api/auth/reset-passcode', async (req, res) => {
+  try {
+    const { phone, newPasscode, resetToken, userRecord } = req.body || {};
+    const clean10 = normalizeTenDigitPhone(phone);
+    const cleanPasscode = String(newPasscode || '').trim();
+    const providedToken = String(resetToken || '').trim();
+
+    if (!clean10) {
+      return res.status(400).json({ success: false, message: 'Valid 10-digit mobile number is required.' });
+    }
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      return res.status(400).json({ success: false, message: 'New passcode must be 4 to 6 numeric digits.' });
+    }
+
+    // Verify single-use reset token (constant-time) OR fresh OTP verification window
+    const storedTokenRecord = passcodeResetTokenStore.get(clean10);
+    let tokenAuthorized = false;
+    if (storedTokenRecord && Date.now() <= storedTokenRecord.expiresAt && providedToken) {
+      const a = Buffer.from(storedTokenRecord.token);
+      const b = Buffer.from(providedToken);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        tokenAuthorized = true;
+      }
+    }
+    const otpWindowValid = Date.now() <= (otpVerifiedStore.get(clean10) || 0);
+
+    if (!tokenAuthorized && !otpWindowValid) {
+      return res.status(403).json({
+        success: false,
+        message: 'OTP reset session expired. Please verify your mobile number via OTP again.'
+      });
+    }
+
+    const existing = passcodeUserStore.get(clean10) || (await findSupabaseUserByPhone(clean10)) || null;
+    if (!existing && (!userRecord || !userRecord.name)) {
+      return res.status(404).json({
+        success: false,
+        code: 'ACCOUNT_NOT_FOUND',
+        message: 'No registered account found for this mobile number. Please register as a new user.'
+      });
+    }
+
+    if (existing?.isBlocked || userRecord?.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: `Account suspended: ${existing?.blockedReason || userRecord?.blockedReason || 'Blocked by Super Admin'}.`
+      });
+    }
+
+    const hashed = hashPasscode(cleanPasscode);
+    const now = new Date().toISOString();
+    const mergedUser = {
+      ...(existing || {}),
+      ...(userRecord && typeof userRecord === 'object' ? userRecord : {}),
+      id: existing?.id || userRecord?.id || `usr_${clean10}`,
+      name: existing?.name || userRecord?.name || 'Zuggi Member',
+      phone: `+91 ${clean10}`,
+      role: existing?.role || userRecord?.role || 'customer',
+      hasPasscode: true,
+      passcodeHash: hashed,
+      passcodeUpdatedAt: now
+    };
+
+    // Consume reset token and clear any brute-force lockout immediately
+    passcodeResetTokenStore.delete(clean10);
+    otpVerifiedStore.delete(clean10);
+    passcodeAttemptStore.delete(clean10);
+    passcodeUserStore.set(clean10, mergedUser);
+    await upsertSupabaseRecords('vs_users', [mergedUser]);
+
+    console.log(`[Passcode Reset] Passcode reset via OTP for +91 ${clean10}`);
+    return res.json({
+      success: true,
+      message: 'Passcode reset successfully! You can now sign in with your new passcode.',
+      user: sanitizeUserForClient(mergedUser)
+    });
+  } catch (err: any) {
+    console.error('[Reset Passcode Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to reset passcode. Please try again.' });
   }
 });
 

@@ -1111,6 +1111,106 @@ class AuthService {
   }
 
   /**
+   * Reset a forgotten 4–6 digit login passcode after one-time SMS OTP verification.
+   * Updates the salted scrypt hash on the server/Supabase, clears any brute-force lockout,
+   * refreshes the local passcode digest, and signs the user in immediately.
+   */
+  public async resetUserPasscode(
+    rawPhone: string,
+    newPasscode: string,
+    resetToken: string,
+    existingUser?: User | null,
+    preferredRole: UserRole = 'customer'
+  ): Promise<User> {
+    let clean = String(rawPhone || '').replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    const cleanPasscode = String(newPasscode || '').trim();
+    if (clean.length !== 10) {
+      throw new Error('Please enter a valid 10-digit registered mobile number.');
+    }
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      throw new Error('New passcode must be 4 to 6 numeric digits.');
+    }
+
+    const localProfile = logisticsStore.getRegisteredProfile(clean);
+    const fallbackUser = existingUser || localProfile?.user || null;
+
+    let serverUser: User | null = null;
+    try {
+      const res = await fetch('/api/auth/reset-passcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: clean,
+          newPasscode: cleanPasscode,
+          resetToken,
+          userRecord: fallbackUser || undefined
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Unable to reset passcode. Please verify OTP again.');
+      }
+      serverUser = data.user || null;
+    } catch (err: any) {
+      // Only propagate real API errors; allow local fallback if backend is unreachable
+      if (err instanceof TypeError) {
+        if (!fallbackUser) {
+          throw new Error('Unable to reach server to reset passcode. Please try again.');
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    const baseUser = serverUser || fallbackUser;
+    if (!baseUser) {
+      throw new Error('No registered account found for this mobile number. Please register first.');
+    }
+
+    const resolvedRole: UserRole =
+      preferredRole === 'customer'
+        ? 'customer'
+        : isPartnerRole(baseUser.role)
+        ? baseUser.role
+        : preferredRole;
+
+    const updatedUser: User = {
+      ...localProfile?.user,
+      ...baseUser,
+      phone: `+91 ${clean}`,
+      role: resolvedRole,
+      hasPasscode: true,
+      passcodeUpdatedAt: new Date().toISOString(),
+      businessName:
+        baseUser.businessName ||
+        localProfile?.user?.businessName ||
+        (resolvedRole === 'customer' ? `${baseUser.name} Logistics` : `${baseUser.name} Transport`)
+    };
+
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('vs_logged_out');
+    }
+
+    if (isPartnerRole(resolvedRole) && localProfile?.vehicle) {
+      logisticsStore.saveVehicle(localProfile.vehicle);
+    }
+
+    const localDigest = await logisticsStore.computeLocalPasscodeDigest(clean, cleanPasscode);
+    logisticsStore.saveRegisteredProfile(clean, updatedUser, localProfile?.vehicle, {
+      dlNumber: localProfile?.dlNumber,
+      isFleetOwner: localProfile?.isFleetOwner,
+      fleetSize: localProfile?.fleetSize,
+      hasPasscode: true,
+      passcodeDigest: localDigest
+    });
+    logisticsStore.saveUser(updatedUser);
+    logisticsStore.setCurrentUser(updatedUser);
+    return updatedUser;
+  }
+
+  /**
    * Platform Owner Authentication Portal
    * Strictly verifies the owner identity (baruahg39@gmail.com)
    */

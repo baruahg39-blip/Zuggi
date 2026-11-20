@@ -9,6 +9,7 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  ArrowLeft,
   ArrowRight, 
   CheckCircle2, 
   AlertCircle,
@@ -47,12 +48,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     portalMode === 'partner' ? 'driver' : initialRole === 'driver' ? 'customer' : initialRole
   );
 
-  // Modal Mode: 'phone_otp' | 'onboarding' | 'setup_passcode' | 'owner_portal'
-  const [authView, setAuthView] = useState<'phone_otp' | 'onboarding' | 'setup_passcode' | 'owner_portal'>('phone_otp');
+  // Modal Mode: 'phone_otp' | 'onboarding' | 'setup_passcode' | 'reset_passcode' | 'owner_portal'
+  const [authView, setAuthView] = useState<'phone_otp' | 'onboarding' | 'setup_passcode' | 'reset_passcode' | 'owner_portal'>('phone_otp');
 
   // Login Mode inside phone view: 'passcode' (returning user, no OTP) | 'otp' (first-time registration or reset)
   const [loginMethod, setLoginMethod] = useState<'passcode' | 'otp'>('passcode');
   const [isResettingPasscode, setIsResettingPasscode] = useState(false);
+
+  // Dedicated 3-Step Forgot / Reset Passcode via OTP state
+  const [resetStep, setResetStep] = useState<1 | 2 | 3>(1);
+  const [resetToken, setResetToken] = useState('');
+  const [resetAccountNotFound, setResetAccountNotFound] = useState(false);
 
   // Account Detection State (auto-checks if 10-digit mobile already has a passcode)
   const [accountStatus, setAccountStatus] = useState<{
@@ -117,6 +123,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setAuthView(activeRole === 'admin' ? 'owner_portal' : 'phone_otp');
       setLoginMethod('passcode');
       setIsResettingPasscode(false);
+      setResetStep(1);
+      setResetToken('');
+      setResetAccountNotFound(false);
       setAccountStatus({ checkedPhone: '', exists: false, hasPasscode: false, isChecking: false });
       setSelectedRole(activeRole === 'admin' ? 'customer' : activeRole);
       setErrorMessage('');
@@ -132,7 +141,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   // Auto-detect whether a 10-digit phone already has a Passcode configured
   useEffect(() => {
-    if (!isOpen || authView !== 'phone_otp' || targetPortal === 'admin') return;
+    if (!isOpen || (authView !== 'phone_otp' && authView !== 'reset_passcode') || targetPortal === 'admin') return;
     if (phone.length !== 10) {
       if (accountStatus.checkedPhone) {
         setAccountStatus({ checkedPhone: '', exists: false, hasPasscode: false, isChecking: false });
@@ -188,6 +197,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setConfirmPasscode('');
     setShowNewPasscode(false);
     setIsResettingPasscode(false);
+    setResetStep(1);
+    setResetToken('');
+    setResetAccountNotFound(false);
     setAccountStatus({ checkedPhone: '', exists: false, hasPasscode: false, isChecking: false });
     setIsOtpSent(false);
     setOtpDigits(['', '', '', '', '', '']);
@@ -210,6 +222,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setAuthView('phone_otp');
     setLoginMethod('passcode');
     onClose();
+  };
+
+  const openForgotPasscodeFlow = () => {
+    setErrorMessage('');
+    setInfoMessage('');
+    setIsResettingPasscode(true);
+    setResetStep(1);
+    setResetToken('');
+    setResetAccountNotFound(false);
+    setOtpDigits(['', '', '', '', '', '']);
+    setNewPasscode('');
+    setConfirmPasscode('');
+    setPendingUser(null);
+    setAuthView('reset_passcode');
   };
 
   const handleSelectPortal = (portal: 'customer' | 'driver' | 'admin') => {
@@ -351,15 +377,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setAuthView('owner_portal');
         throw new Error('Admin access requires Platform Owner Security Passcode verification.');
       }
-      // Check permanent user profile registry first!
+      // Check permanent user profile registry (local + server/Supabase cross-device!)
       const registered = logisticsStore.getRegisteredProfile(phone);
       const cleanPhoneDigits = phone.replace(/\D/g, '').slice(-10);
       const existingStoreUser = logisticsStore.getUsers().find(
         (u) => cleanPhoneDigits && u.phone.replace(/\D/g, '').endsWith(cleanPhoneDigits)
       );
-      if (existingStoreUser?.isBlocked || registered?.user?.isBlocked) {
+      const serverExistingUser: User | null = data.existingUser || null;
+      if (existingStoreUser?.isBlocked || registered?.user?.isBlocked || serverExistingUser?.isBlocked) {
         throw new Error(
-          `Account suspended: ${existingStoreUser?.blockedReason || registered?.user?.blockedReason || 'Blocked by Super Admin'}.`
+          `Account suspended: ${
+            existingStoreUser?.blockedReason ||
+            registered?.user?.blockedReason ||
+            serverExistingUser?.blockedReason ||
+            'Blocked by Super Admin'
+          }.`
         );
       }
 
@@ -368,20 +400,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           ? existingStoreUser!.role
           : isPartnerRole(registered?.user?.role)
           ? registered!.user.role
+          : isPartnerRole(serverExistingUser?.role)
+          ? serverExistingUser!.role
           : 'driver';
       const targetRole: UserRole = targetPortal === 'driver' ? resolvedPartnerRole : targetPortal;
 
-      if (registered && registered.user && registered.user.name && registered.user.name.trim().length > 0) {
+      const resolvedBaseUser = registered?.user || serverExistingUser || null;
+      if (resolvedBaseUser && resolvedBaseUser.name && resolvedBaseUser.name.trim().length > 0) {
         // Automatically restore their saved profile with the matching portal role
         const restoredUser: User = {
-          ...registered.user,
+          ...resolvedBaseUser,
           role: targetRole,
-          isBlocked: existingStoreUser?.isBlocked ?? registered.user.isBlocked,
-          blockedReason: existingStoreUser?.blockedReason ?? registered.user.blockedReason,
-          businessName: registered.user.businessName || (targetRole === 'customer' ? `${registered.user.name} Logistics` : `${registered.user.name} Transport`)
+          isBlocked: existingStoreUser?.isBlocked ?? resolvedBaseUser.isBlocked,
+          blockedReason: existingStoreUser?.blockedReason ?? resolvedBaseUser.blockedReason,
+          businessName:
+            resolvedBaseUser.businessName ||
+            (targetRole === 'customer' ? `${resolvedBaseUser.name} Logistics` : `${resolvedBaseUser.name} Transport`)
         };
 
-        let activeVeh = registered.vehicle;
+        let activeVeh = registered?.vehicle;
         if (isPartnerRole(targetRole)) {
           if (!activeVeh) {
             const clean = phone.replace(/\D/g, '').slice(-10);
@@ -389,7 +426,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               id: `veh_${clean}`,
               ownerId: restoredUser.id,
               transporterName: restoredUser.businessName || `${restoredUser.name} Transport`,
-              registrationNumber: registered.dlNumber ? `AS-01-TC-${clean.slice(-4)}` : 'AS-01-ET-2026',
+              registrationNumber: registered?.dlNumber ? `AS-01-TC-${clean.slice(-4)}` : 'AS-01-ET-2026',
               category: 'bolero_pickup',
               bodyType: 'tarpaulin',
               capacityKg: 1750,
@@ -418,9 +455,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         // If user is resetting passcode OR hasn't set up a passcode yet, take them to quick Passcode Setup
         const alreadyHasPasscode = Boolean(
-          registered.hasPasscode || registered.passcodeDigest || restoredUser.hasPasscode || accountStatus.hasPasscode
+          registered?.hasPasscode ||
+            registered?.passcodeDigest ||
+            restoredUser.hasPasscode ||
+            serverExistingUser?.hasPasscode ||
+            accountStatus.hasPasscode
         );
         if (isResettingPasscode || !alreadyHasPasscode) {
+          if (data.resetToken) setResetToken(String(data.resetToken));
           logisticsStore.saveRegisteredProfile(phone, restoredUser, activeVeh);
           setPendingUser(restoredUser);
           setNewPasscode('');
@@ -452,6 +494,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       if (verifiedUser && verifiedUser.name && verifiedUser.name.trim().length > 0) {
         if (isResettingPasscode || !verifiedUser.hasPasscode) {
+          if (data.resetToken) setResetToken(String(data.resetToken));
           setPendingUser(verifiedUser);
           setNewPasscode('');
           setConfirmPasscode('');
@@ -480,6 +523,148 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setErrorMessage(err.message || 'Verification failed. Please check the code.');
     } finally {
       setIsVerifying(false);
+    }
+  };
+
+  // --- DEDICATED 3-STEP FORGOT / RESET PASSCODE VIA OTP HANDLERS ---
+  const handleResetRequestOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setErrorMessage('');
+    setInfoMessage('');
+    setResetAccountNotFound(false);
+
+    const clean = phone.replace(/\D/g, '').slice(-10);
+    if (!clean || clean.length !== 10) {
+      setErrorMessage('Please enter your 10-digit registered mobile number.');
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      const status = await authService.checkAccountPasscodeStatus(clean);
+      if (status.isBlocked) {
+        throw new Error(`Account suspended: ${status.blockedReason || 'Blocked by Super Admin'}.`);
+      }
+
+      const res = await fetch('/api/auth/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: clean, purpose: 'reset_passcode' })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Unable to send reset OTP right now.');
+      }
+
+      setInfoMessage(data.message || '6-digit reset OTP sent to your mobile number.');
+      setCountdown(60);
+      if (data.otp) {
+        setOtpDigits(String(data.otp).split('').slice(0, 6));
+      } else {
+        setOtpDigits(['', '', '', '', '', '']);
+      }
+      setResetStep(2);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to send reset OTP.');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleResetVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage('');
+    setResetAccountNotFound(false);
+
+    const code = otpDigits.join('');
+    if (code.length !== 6) {
+      setErrorMessage('Please enter the complete 6-digit SMS OTP code.');
+      return;
+    }
+
+    setIsVerifying(true);
+    try {
+      const res = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone, otp: code })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Incorrect or expired OTP code.');
+      }
+
+      const clean = phone.replace(/\D/g, '').slice(-10);
+      const localReg = logisticsStore.getRegisteredProfile(clean);
+      const storeMatch = logisticsStore.getUsers().find((u) => u.phone.replace(/\D/g, '').endsWith(clean));
+      const serverUser: User | null = data.existingUser || null;
+      const matchedUser = serverUser || localReg?.user || storeMatch || null;
+
+      if (matchedUser?.isBlocked) {
+        throw new Error(`Account suspended: ${matchedUser.blockedReason || 'Blocked by Super Admin'}.`);
+      }
+
+      setResetToken(String(data.resetToken || ''));
+
+      if (!matchedUser || !matchedUser.name || !matchedUser.name.trim()) {
+        setResetAccountNotFound(true);
+        setErrorMessage(
+          `No registered account found for +91 ${clean}. You can register now as a new ${
+            targetPortal === 'driver' ? 'Driver / Fleet Partner' : 'Shipper / Customer'
+          } without verifying OTP again.`
+        );
+        return;
+      }
+
+      setPendingUser(matchedUser);
+      setNewPasscode('');
+      setConfirmPasscode('');
+      setInfoMessage('');
+      setResetStep(3);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'OTP verification failed. Please check the code.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleResetSavePasscode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingPasscode) return;
+    setErrorMessage('');
+
+    const cleanPin = newPasscode.trim();
+    if (!/^\d{4,6}$/.test(cleanPin)) {
+      setErrorMessage('New passcode must be 4 to 6 numeric digits.');
+      return;
+    }
+    if (cleanPin !== confirmPasscode.trim()) {
+      setErrorMessage('Passcodes do not match. Please enter the same 4–6 digit passcode twice.');
+      return;
+    }
+
+    setIsSavingPasscode(true);
+    try {
+      const targetRole: UserRole =
+        targetPortal === 'driver'
+          ? isPartnerRole(pendingUser?.role)
+            ? pendingUser!.role
+            : 'driver'
+          : 'customer';
+      const updatedUser = await authService.resetUserPasscode(
+        phone || pendingUser?.phone || '',
+        cleanPin,
+        resetToken,
+        pendingUser,
+        targetRole
+      );
+      showToast('Passcode reset successful! Signed in with your new passcode.', 'success');
+      onLoginSuccess(updatedUser);
+      handleCloseModal();
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to reset passcode. Please try again.');
+    } finally {
+      setIsSavingPasscode(false);
     }
   };
 
@@ -870,15 +1055,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           </label>
                           <button
                             type="button"
-                            onClick={() => {
-                              setIsResettingPasscode(true);
-                              setLoginMethod('otp');
-                              setErrorMessage('');
-                              setInfoMessage('Verify your mobile number once via OTP to create or reset your Passcode.');
-                            }}
+                            onClick={openForgotPasscodeFlow}
                             className="text-[11px] font-bold text-[#E83E83] hover:underline cursor-pointer"
                           >
-                            Forgot / Set Passcode?
+                            Forgot / Reset Passcode?
                           </button>
                         </div>
                         <div className="relative">
@@ -913,8 +1093,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       {errorMessage && (
                         <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
                           <AlertCircle className="w-4 h-4 text-[#DC3545] shrink-0 mt-0.5" />
-                          <div>
+                          <div className="space-y-1.5 flex-1">
                             <p>{errorMessage}</p>
+                            <button
+                              type="button"
+                              onClick={openForgotPasscodeFlow}
+                              className="inline-flex items-center gap-1 font-extrabold text-[#E83E83] hover:underline cursor-pointer"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              <span>Reset Passcode via SMS OTP →</span>
+                            </button>
                           </div>
                         </div>
                       )}
@@ -1559,6 +1747,358 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 )}
               </button>
             </form>
+          )}
+
+          {/* VIEW 2C: DEDICATED 3-STEP FORGOT / RESET PASSCODE VIA OTP */}
+          {authView === 'reset_passcode' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthView('phone_otp');
+                    setLoginMethod('passcode');
+                    setIsResettingPasscode(false);
+                    setErrorMessage('');
+                    setInfoMessage('');
+                  }}
+                  className="inline-flex items-center gap-1 text-xs font-bold text-[#77717A] hover:text-[#171318] cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to Passcode Login</span>
+                </button>
+                <span className="text-[11px] font-bold text-[#E83E83] bg-[#FFF0F6] px-2.5 py-0.5 rounded-full">
+                  Step {resetStep} of 3
+                </span>
+              </div>
+
+              {/* 3-Step Visual Progress Bar */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {[
+                  { step: 1, label: '1. Mobile' },
+                  { step: 2, label: '2. Verify OTP' },
+                  { step: 3, label: '3. New Passcode' }
+                ].map((item) => (
+                  <div
+                    key={item.step}
+                    className={`rounded-xl px-2 py-1.5 text-center text-[11px] font-bold border transition ${
+                      resetStep === item.step
+                        ? 'bg-[#171318] text-white border-[#171318]'
+                        : resetStep > item.step
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-gray-50 text-[#77717A] border-gray-200'
+                    }`}
+                  >
+                    {item.label}
+                  </div>
+                ))}
+              </div>
+
+              {/* STEP 1: ENTER REGISTERED MOBILE NUMBER */}
+              {resetStep === 1 && (
+                <form onSubmit={handleResetRequestOtp} className="space-y-4">
+                  <div className="p-3.5 rounded-2xl bg-[#FFF0F6] border border-[#E83E83]/20 text-xs space-y-1">
+                    <div className="flex items-center gap-1.5 font-black text-[#171318]">
+                      <KeyRound className="w-4 h-4 text-[#E83E83]" />
+                      <span>Forgot Your Login Passcode?</span>
+                    </div>
+                    <p className="text-[#77717A] leading-snug">
+                      Enter your registered 10-digit mobile number. We will send a one-time 6-digit SMS OTP so you can set a new passcode.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-[#171318] block mb-1.5">
+                      Registered Mobile Number *
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 px-3 py-2.5 bg-gray-100 border border-gray-300 rounded-xl text-[#171318] text-sm font-semibold shrink-0">
+                        <span className="text-base">🇮🇳</span>
+                        <span>+91</span>
+                      </div>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={10}
+                        value={phone}
+                        onChange={(e) => handlePhoneInput(e.target.value)}
+                        placeholder="Enter 10-digit registered number"
+                        className="flex-1 px-3.5 py-2.5 bg-gray-50 border border-gray-300 focus:border-[#E83E83] rounded-xl text-[#171318] text-sm focus:outline-none tracking-wider font-mono placeholder:text-gray-400"
+                        required
+                      />
+                    </div>
+
+                    {phone.length === 10 && !accountStatus.isChecking && accountStatus.checkedPhone === phone && (
+                      accountStatus.exists ? (
+                        <div className="mt-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] flex items-center gap-2">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>
+                            Registered account found{accountStatus.name ? ` (${accountStatus.name})` : ''}. Ready to send reset OTP.
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="mt-2 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px] flex items-center justify-between gap-2">
+                          <span>No passcode found yet for +91 {phone}.</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAuthView('phone_otp');
+                              setLoginMethod('otp');
+                              setIsResettingPasscode(false);
+                              setErrorMessage('');
+                            }}
+                            className="px-2 py-0.5 rounded-lg bg-[#E83E83] text-white font-bold shrink-0 cursor-pointer"
+                          >
+                            Register New
+                          </button>
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {errorMessage && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-[#DC3545] shrink-0 mt-0.5" />
+                      <span>{errorMessage}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={isSending || countdown > 0}
+                    className="w-full py-3.5 bg-[#E83E83] hover:bg-[#d62e73] disabled:opacity-50 text-white font-bold rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-[#E83E83]/30 cursor-pointer"
+                  >
+                    {isSending ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Sending Reset OTP...</span>
+                      </>
+                    ) : countdown > 0 ? (
+                      <span>Wait {countdown}s to Resend OTP</span>
+                    ) : (
+                      <>
+                        <Phone className="w-4 h-4" />
+                        <span>Send Reset OTP</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+
+              {/* STEP 2: VERIFY 6-DIGIT RESET OTP */}
+              {resetStep === 2 && (
+                <form onSubmit={handleResetVerifyOtp} className="space-y-4">
+                  {infoMessage && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-start gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold">{infoMessage}</p>
+                        <p className="text-[11px] text-emerald-700 mt-0.5">
+                          Sent to +91 {phone}. Enter the 6-digit code below.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="text-xs font-bold text-[#171318] block mb-2 text-center">
+                      Enter 6-Digit Reset OTP
+                    </label>
+                    <div
+                      className="flex items-center justify-center gap-2"
+                      onPaste={(e) => {
+                        const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+                        if (pasted.length === 6) {
+                          e.preventDefault();
+                          setOtpDigits(pasted.split(''));
+                        }
+                      }}
+                    >
+                      {otpDigits.map((digit, idx) => (
+                        <input
+                          key={idx}
+                          id={`real-otp-${idx}`}
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={1}
+                          value={digit}
+                          onChange={(e) => handleDigitChange(idx, e.target.value)}
+                          onKeyDown={(e) => handleDigitKeyDown(idx, e)}
+                          className="w-10 sm:w-12 h-12 text-center text-lg font-bold font-mono bg-gray-50 border border-gray-300 focus:border-[#E83E83] focus:ring-1 focus:ring-[#E83E83] rounded-xl text-[#171318] focus:outline-none"
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {errorMessage && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-[#DC3545] shrink-0 mt-0.5" />
+                      <div className="space-y-2 flex-1">
+                        <p>{errorMessage}</p>
+                        {resetAccountNotFound && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const targetRole: UserRole = targetPortal === 'driver' ? 'driver' : 'customer';
+                              const newUser = authService.loginInstantWithPhone(phone, targetRole);
+                              setPendingUser(newUser);
+                              setSelectedRole(targetPortal === 'driver' ? 'driver' : 'customer');
+                              setErrorMessage('');
+                              setAuthView('onboarding');
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-[#171318] text-white font-bold text-[11px] hover:bg-black cursor-pointer"
+                          >
+                            Continue to New User Registration →
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between text-xs text-[#77717A]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetStep(1);
+                        setErrorMessage('');
+                      }}
+                      className="hover:text-[#171318] underline cursor-pointer"
+                    >
+                      Change Number
+                    </button>
+                    {countdown > 0 ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-100 text-xs font-semibold">
+                        <Clock className="w-3.5 h-3.5" /> Resend in <strong className="font-mono text-[#171318]">{countdown}s</strong>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleResetRequestOtp()}
+                        className="text-[#E83E83] font-bold hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" /> Resend OTP
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isVerifying}
+                    className="w-full py-3.5 bg-[#E83E83] hover:bg-[#d62e73] disabled:opacity-50 text-white font-bold rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-[#E83E83]/30 cursor-pointer"
+                  >
+                    {isVerifying ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Verifying Reset OTP...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4" />
+                        <span>Verify OTP &amp; Set New Passcode</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+
+              {/* STEP 3: CREATE & CONFIRM NEW 4–6 DIGIT PASSCODE */}
+              {resetStep === 3 && (
+                <form onSubmit={handleResetSavePasscode} className="space-y-4">
+                  <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs space-y-1">
+                    <div className="flex items-center gap-1.5 font-black text-emerald-900">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span>OTP Verified — Set Your New Passcode</span>
+                    </div>
+                    <p className="text-emerald-800 leading-snug">
+                      Verified <strong>+91 {phone}</strong>{pendingUser?.name ? ` (${pendingUser.name})` : ''}. Choose a new 4–6 digit numeric passcode. Any previous lockouts will be cleared automatically.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-[#171318] block mb-1.5">
+                      New 4–6 Digit Passcode *
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showNewPasscode ? 'text' : 'password'}
+                        inputMode="numeric"
+                        maxLength={6}
+                        value={newPasscode}
+                        onChange={(e) => {
+                          setNewPasscode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                          setErrorMessage('');
+                        }}
+                        placeholder="Enter 4–6 numeric digits"
+                        className="w-full px-3.5 py-2.5 pr-11 bg-gray-50 border border-gray-300 focus:border-[#E83E83] rounded-xl text-[#171318] text-sm font-mono tracking-[0.25em] focus:outline-none placeholder:tracking-normal"
+                        required
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowNewPasscode((v) => !v)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-[#171318] cursor-pointer"
+                        aria-label="Toggle passcode visibility"
+                      >
+                        {showNewPasscode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-[#171318] block mb-1.5">
+                      Confirm New Passcode *
+                    </label>
+                    <input
+                      type={showNewPasscode ? 'text' : 'password'}
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={confirmPasscode}
+                      onChange={(e) => {
+                        setConfirmPasscode(e.target.value.replace(/\D/g, '').slice(0, 6));
+                        setErrorMessage('');
+                      }}
+                      placeholder="Re-enter your new passcode"
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-300 focus:border-[#E83E83] rounded-xl text-[#171318] text-sm font-mono tracking-[0.25em] focus:outline-none placeholder:tracking-normal"
+                      required
+                    />
+                    {confirmPasscode.length >= 4 && (
+                      <p
+                        className={`text-[11px] font-semibold mt-1 ${
+                          newPasscode === confirmPasscode ? 'text-emerald-700' : 'text-rose-600'
+                        }`}
+                      >
+                        {newPasscode === confirmPasscode ? '✓ Passcodes match' : 'Passcodes do not match yet'}
+                      </p>
+                    )}
+                  </div>
+
+                  {errorMessage && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-[#DC3545] shrink-0 mt-0.5" />
+                      <span>{errorMessage}</span>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={isSavingPasscode}
+                    className="w-full py-3.5 bg-[#E83E83] hover:bg-[#d62e73] disabled:opacity-50 text-white font-bold rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-[#E83E83]/30 cursor-pointer"
+                  >
+                    {isSavingPasscode ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Updating Passcode...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-4 h-4" />
+                        <span>Reset Passcode &amp; Sign In</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              )}
+            </div>
           )}
 
           {/* VIEW 3: SUPER ADMIN PLATFORM OWNER PORTAL */}

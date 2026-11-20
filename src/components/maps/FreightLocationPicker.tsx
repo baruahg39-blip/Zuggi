@@ -33,6 +33,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { showToast } from '../shared/Toast';
+import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
+import { LiveTelemetryFallbackMap } from './LiveTelemetryFallbackMap';
 
 export interface LocationDetail {
   lat: number;
@@ -287,7 +289,7 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   onCancel,
   compact = false
 }) => {
-  const apiKey = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_GOOGLE_MAPS_API_KEY || '';
+  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
 
   // Active step: 'pickup' | 'drop' | 'preview'
   const [activeStep, setActiveStep] = useState<'pickup' | 'drop' | 'preview'>('pickup');
@@ -753,31 +755,44 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
 
       {/* MAP VIEWPORT AREA */}
       <div className="relative w-full h-[360px] sm:h-[440px] bg-gray-100 overflow-hidden">
-        <APIProvider apiKey={apiKey} language="en" region="IN">
-          <Map
-            mapId="DEMO_MAP_ID"
-            defaultCenter={{ lat: pickup.lat, lng: pickup.lng }}
-            defaultZoom={13}
-            gestureHandling="greedy"
-            disableDefaultUI={false}
-            internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-            className="w-full h-full"
-          >
-            <MapInnerController
-              activeStep={activeStep}
-              pickup={pickup}
-              drop={drop}
-              onCenterAddressResolved={handleCenterAddressResolved}
-              onReverseGeocodingStart={handleReverseGeocodingStart}
-              onMapReady={handleMapReady}
-              isGeocoding={isGeocoding}
-              routeMeta={routeMeta}
-            />
-          </Map>
-        </APIProvider>
+        {canRenderGoogleMap ? (
+          <APIProvider apiKey={apiKey} language="en" region="IN" onError={reportMapError}>
+            <Map
+              mapId="DEMO_MAP_ID"
+              defaultCenter={{ lat: pickup.lat, lng: pickup.lng }}
+              defaultZoom={13}
+              gestureHandling="greedy"
+              disableDefaultUI={false}
+              internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+              className="w-full h-full"
+            >
+              <MapInnerController
+                activeStep={activeStep}
+                pickup={pickup}
+                drop={drop}
+                onCenterAddressResolved={handleCenterAddressResolved}
+                onReverseGeocodingStart={handleReverseGeocodingStart}
+                onMapReady={handleMapReady}
+                isGeocoding={isGeocoding}
+                routeMeta={routeMeta}
+              />
+            </Map>
+          </APIProvider>
+        ) : (
+          <LiveTelemetryFallbackMap
+            pickup={{ lat: pickup.lat, lng: pickup.lng, city: pickup.city, address: pickup.formatted_address }}
+            drop={{ lat: drop.lat, lng: drop.lng, city: drop.city, address: drop.formatted_address }}
+            currentLocation={activeStep === 'drop' ? { lat: drop.lat, lng: drop.lng } : { lat: pickup.lat, lng: pickup.lng }}
+            vehicleNumber={activeStep === 'pickup' ? 'Pickup Pin' : activeStep === 'drop' ? 'Drop Pin' : 'Route Preview'}
+            speedKmh={0}
+            heading={45}
+            remainingKm={routeMeta?.distance_km}
+            reason={mapAuthError ? 'auth_error' : 'missing_key'}
+          />
+        )}
 
-        {/* FLOATING CENTERED PIN OVERLAY (Visible during Pickup and Drop setting) */}
-        {activeStep !== 'preview' && (
+        {/* FLOATING CENTERED PIN OVERLAY (Visible during Pickup and Drop setting on Google Map) */}
+        {canRenderGoogleMap && activeStep !== 'preview' && (
           <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-10 -mt-8">
             <div className="flex flex-col items-center animate-bounce duration-700">
               {/* Floating Tooltip */}

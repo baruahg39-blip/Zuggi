@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { APIProvider, Map, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps';
+import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
 import {
   Truck,
   MapPin,
   Phone,
   MessageSquare,
   Navigation,
-  Clock,
   Battery,
   Radio,
   Wifi,
@@ -14,15 +13,18 @@ import {
   RefreshCw,
   Sparkles,
   ShieldCheck,
-  CheckCircle2,
   AlertTriangle,
-  RotateCcw
+  Crosshair,
+  Maximize2
 } from 'lucide-react';
 import { TripLiveTrackingResponse, TripLocationPing, GeofenceZoneConfig } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { DEFAULT_GEOFENCE_CONFIG } from '../../utils/geofence';
 import { GeofenceOverlay } from '../maps/GeofenceOverlay';
 import { GeofenceMonitorPanel } from './GeofenceMonitorPanel';
+import { LiveTelemetryFallbackMap } from '../maps/LiveTelemetryFallbackMap';
+import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
+import { buildLocalTrackingFallback, syncLocalTripToServer } from '../../utils/trackingFallback';
 import { showToast } from '../shared/Toast';
 
 export interface ShipperLiveTrackerProps {
@@ -35,20 +37,36 @@ export interface ShipperLiveTrackerProps {
 
 // Subcomponent: Map Controller for Route Polylines and Fitting Viewport Bounds
 const TrackingMapController: React.FC<{
+  tripKey: string;
   pickup: { lat: number; lng: number };
   drop: { lat: number; lng: number };
   currentLocation: { lat: number; lng: number } | null;
   historyPings: TripLocationPing[];
   routePolyline?: string;
-}> = ({ pickup, drop, currentLocation, historyPings, routePolyline }) => {
+  fitRouteSignal: number;
+  focusVehicleSignal: number;
+}> = ({
+  tripKey,
+  pickup,
+  drop,
+  currentLocation,
+  historyPings,
+  routePolyline,
+  fitRouteSignal,
+  focusVehicleSignal
+}) => {
   const map = useMap();
+  const mapsLib = useMapsLibrary('maps');
+  const coreLib = useMapsLibrary('core');
+  const geometryLib = useMapsLibrary('geometry');
+
   const polylineRef = useRef<google.maps.Polyline | null>(null);
   const breadcrumbRef = useRef<google.maps.Polyline | null>(null);
+  const fittedTripKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!map) return;
+    if (!map || !mapsLib) return;
 
-    // Cleanup previous overlays
     if (polylineRef.current) {
       polylineRef.current.setMap(null);
       polylineRef.current = null;
@@ -58,68 +76,76 @@ const TrackingMapController: React.FC<{
       breadcrumbRef.current = null;
     }
 
-    if (window.google && window.google.maps) {
-      let pathCoordinates: google.maps.LatLngLiteral[] = [];
+    let pathCoordinates: google.maps.LatLngLiteral[] = [];
 
-      // 1. Try decoding encoded polyline if provided by Google Routes API
-      if (routePolyline && window.google.maps.geometry?.encoding) {
-        try {
-          const decoded = window.google.maps.geometry.encoding.decodePath(routePolyline);
-          pathCoordinates = decoded.map((p) => ({ lat: p.lat(), lng: p.lng() }));
-        } catch {
-          // fallback to standard coordinates
-        }
+    if (routePolyline && geometryLib?.encoding) {
+      try {
+        const decoded = geometryLib.encoding.decodePath(routePolyline);
+        pathCoordinates = decoded.map((p) => ({ lat: p.lat(), lng: p.lng() }));
+      } catch {
+        // fallback to standard coordinates
       }
+    }
 
-      // If no encoded polyline, draw a natural highway corridor curve
-      if (pathCoordinates.length === 0) {
-        const midLat = (pickup.lat + drop.lat) / 2 + 0.08;
-        const midLng = (pickup.lng + drop.lng) / 2;
-        pathCoordinates = [
-          { lat: pickup.lat, lng: pickup.lng },
-          { lat: midLat, lng: midLng },
-          { lat: drop.lat, lng: drop.lng }
-        ];
-      }
+    if (pathCoordinates.length === 0) {
+      const midLat = (pickup.lat + drop.lat) / 2 + 0.08;
+      const midLng = (pickup.lng + drop.lng) / 2;
+      pathCoordinates = [
+        { lat: pickup.lat, lng: pickup.lng },
+        { lat: midLat, lng: midLng },
+        { lat: drop.lat, lng: drop.lng }
+      ];
+    }
 
-      // Render Planned Highway Route (Pink Magenta)
-      polylineRef.current = new google.maps.Polyline({
-        path: pathCoordinates,
+    polylineRef.current = new mapsLib.Polyline({
+      path: pathCoordinates,
+      geodesic: true,
+      strokeColor: '#E83E83',
+      strokeOpacity: 0.85,
+      strokeWeight: 5,
+      map
+    });
+
+    if (historyPings && historyPings.length > 1) {
+      const historyCoords = historyPings.map((p) => ({ lat: p.lat, lng: p.lng }));
+      breadcrumbRef.current = new mapsLib.Polyline({
+        path: historyCoords,
         geodesic: true,
-        strokeColor: '#E83E83',
-        strokeOpacity: 0.85,
-        strokeWeight: 5,
+        strokeColor: '#10B981',
+        strokeOpacity: 0.95,
+        strokeWeight: 4,
         map
       });
-
-      // Render Actual Traveled GPS Breadcrumb Trail (Emerald Green)
-      if (historyPings && historyPings.length > 1) {
-        const historyCoords = historyPings.map((p) => ({ lat: p.lat, lng: p.lng }));
-        breadcrumbRef.current = new google.maps.Polyline({
-          path: historyCoords,
-          geodesic: true,
-          strokeColor: '#10B981',
-          strokeOpacity: 0.95,
-          strokeWeight: 4,
-          map
-        });
-      }
-
-      // Adjust camera viewport to fit pickup, drop, and vehicle
-      const bounds = new google.maps.LatLngBounds();
-      bounds.extend({ lat: pickup.lat, lng: pickup.lng });
-      bounds.extend({ lat: drop.lat, lng: drop.lng });
-      if (currentLocation) {
-        bounds.extend({ lat: currentLocation.lat, lng: currentLocation.lng });
-      }
-      map.fitBounds(bounds, { top: 60, right: 60, bottom: 60, left: 60 });
     }
 
     return () => {
       if (polylineRef.current) polylineRef.current.setMap(null);
       if (breadcrumbRef.current) breadcrumbRef.current.setMap(null);
     };
-  }, [map, pickup, drop, currentLocation, historyPings, routePolyline]);
+  }, [map, mapsLib, geometryLib, pickup.lat, pickup.lng, drop.lat, drop.lng, historyPings, routePolyline]);
+
+  // Fit bounds once initially per trip (and when Fit Route is clicked)
+  useEffect(() => {
+    if (!map || !coreLib) return;
+    if (fittedTripKeyRef.current === tripKey && fitRouteSignal === 0) return;
+
+    const bounds = new coreLib.LatLngBounds();
+    bounds.extend({ lat: pickup.lat, lng: pickup.lng });
+    bounds.extend({ lat: drop.lat, lng: drop.lng });
+    if (currentLocation) {
+      bounds.extend({ lat: currentLocation.lat, lng: currentLocation.lng });
+    }
+    map.fitBounds(bounds, { top: 80, right: 60, bottom: 60, left: 60 });
+    fittedTripKeyRef.current = tripKey;
+  }, [map, coreLib, tripKey, fitRouteSignal, pickup.lat, pickup.lng, drop.lat, drop.lng]);
+
+  // Focus camera directly onto the live vehicle
+  useEffect(() => {
+    if (!map || focusVehicleSignal === 0 || !currentLocation) return;
+    map.panTo({ lat: currentLocation.lat, lng: currentLocation.lng });
+    const currentZoom = map.getZoom() || 8;
+    if (currentZoom < 12) map.setZoom(12);
+  }, [map, focusVehicleSignal]);
 
   return null;
 };
@@ -131,7 +157,7 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
   className = '',
   onOpenDriverSimulator
 }) => {
-  const apiKey = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_GOOGLE_MAPS_API_KEY || '';
+  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
 
   // Determine lookup identifier: tripId, loadId, or fallback to demo trip
   const effectiveTripId = useMemo(() => {
@@ -139,11 +165,16 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
   }, [tripId, loadId]);
 
   const [trackingToken, setTrackingToken] = useState<string | null>(initialTrackingToken || null);
-  const [telemetry, setTelemetry] = useState<TripLiveTrackingResponse | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [telemetry, setTelemetry] = useState<TripLiveTrackingResponse | null>(() =>
+    buildLocalTrackingFallback(effectiveTripId, loadId)
+  );
+  const [isLoading, setIsLoading] = useState<boolean>(() => !buildLocalTrackingFallback(effectiveTripId, loadId));
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
+  const [fitRouteSignal, setFitRouteSignal] = useState<number>(0);
+  const [focusVehicleSignal, setFocusVehicleSignal] = useState<number>(0);
+  const syncedToServerRef = useRef<boolean>(false);
 
   // Marker Animation State (LERP Interpolation)
   const [animatedCoord, setAnimatedCoord] = useState<{ lat: number; lng: number } | null>(null);
@@ -218,22 +249,38 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
     try {
       if (isManualRefresh) setIsRefreshing(true);
 
-      // Pass token in authorization header or query if already retrieved
-      const headers: Record<string, string> = { 'Accept': 'application/json' };
+      const headers: Record<string, string> = { Accept: 'application/json' };
       if (trackingTokenRef.current) {
         headers['Authorization'] = `Bearer ${trackingTokenRef.current}`;
       }
 
-      const res = await fetch(`/trips/${effectiveTripId}/live-tracking`, { headers });
+      const res = await fetch(`/trips/${encodeURIComponent(effectiveTripId)}/live-tracking`, { headers });
       if (!res.ok) {
+        // Hydrate from local logisticsStore booking/load FIRST so shipper sees their actual shipment
+        const localFallback = buildLocalTrackingFallback(effectiveTripId, loadId);
+        if (localFallback) {
+          setTelemetry(localFallback);
+          if (localFallback.tracking_token) {
+            trackingTokenRef.current = localFallback.tracking_token;
+            setTrackingToken(localFallback.tracking_token);
+          }
+          setLastSyncTime(new Date());
+          setErrorMsg(null);
+          updateMarkerPosition(localFallback.latest_location);
+          if (!syncedToServerRef.current) {
+            syncedToServerRef.current = true;
+            void syncLocalTripToServer(localFallback);
+          }
+          return;
+        }
+
         if (res.status === 404 && effectiveTripId !== 'trip_demo_01') {
-          // Fallback query to demo trip if newly assigned load has not yet been initialized on server
-          const fallbackRes = await fetch(`/trips/trip_demo_01/live-tracking`);
+          const fallbackRes = await fetch('/trips/trip_demo_01/live-tracking');
           if (fallbackRes.ok) {
             const fallbackData: TripLiveTrackingResponse = await fallbackRes.json();
             setTelemetry(fallbackData);
-            trackingTokenRef.current = 'trk_sec_993821739182371928371923';
-            setTrackingToken('trk_sec_993821739182371928371923');
+            trackingTokenRef.current = fallbackData.tracking_token || 'trk_sec_993821739182371928371923';
+            setTrackingToken(trackingTokenRef.current);
             setLastSyncTime(new Date());
             setErrorMsg(null);
             updateMarkerPosition(fallbackData.latest_location);
@@ -258,34 +305,72 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
         newlyTriggered.forEach((evt) => showToast(evt.message, 'info'));
       }
 
-      // If tracking token is present in response, update token state
-      if ((data as any).tracking_token) {
-        trackingTokenRef.current = (data as any).tracking_token;
-        setTrackingToken((data as any).tracking_token);
+      if (data.tracking_token) {
+        trackingTokenRef.current = data.tracking_token;
+        setTrackingToken(data.tracking_token);
       }
 
       updateMarkerPosition(data.latest_location);
     } catch (err: any) {
-      console.warn('[ShipperLiveTracker Notice]:', err.message);
-      setErrorMsg(err.message || 'Connecting to vehicle telemetry...');
+      const localFallback = buildLocalTrackingFallback(effectiveTripId, loadId);
+      if (localFallback) {
+        setTelemetry(localFallback);
+        setLastSyncTime(new Date());
+        setErrorMsg(null);
+        updateMarkerPosition(localFallback.latest_location);
+      } else {
+        console.warn('[ShipperLiveTracker Notice]:', err.message);
+        setErrorMsg(err.message || 'Connecting to vehicle telemetry...');
+      }
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [effectiveTripId, updateMarkerPosition]);
+  }, [effectiveTripId, loadId, updateMarkerPosition]);
 
-  // Poll live telemetry every 3.5 seconds
+  // Reset animation refs when switching active trip
+  useEffect(() => {
+    syncedToServerRef.current = false;
+    targetCoordRef.current = null;
+    prevCoordRef.current = null;
+    animatedCoordRef.current = null;
+    const localInitial = buildLocalTrackingFallback(effectiveTripId, loadId);
+    if (localInitial) {
+      setTelemetry(localInitial);
+      updateMarkerPosition(localInitial.latest_location);
+      setIsLoading(false);
+    }
+  }, [effectiveTripId, loadId, updateMarkerPosition]);
+
+  // Poll live telemetry every 3.5 seconds + subscribe to local driver GPS updates
   useEffect(() => {
     fetchLiveTrackingData();
     const interval = setInterval(() => {
       fetchLiveTrackingData(false);
     }, 3500);
 
+    const unsub = logisticsStore.subscribe(() => {
+      const latestLocal = buildLocalTrackingFallback(effectiveTripId, loadId);
+      if (latestLocal?.latest_location) {
+        const localTime = new Date(latestLocal.latest_location.recorded_at).getTime();
+        setTelemetry((prev) => {
+          if (!prev) return latestLocal;
+          const prevTime = prev.latest_location ? new Date(prev.latest_location.recorded_at).getTime() : 0;
+          if (localTime > prevTime) {
+            updateMarkerPosition(latestLocal.latest_location);
+            return latestLocal;
+          }
+          return prev;
+        });
+      }
+    });
+
     return () => {
       clearInterval(interval);
+      unsub();
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [fetchLiveTrackingData]);
+  }, [fetchLiveTrackingData, effectiveTripId, loadId, updateMarkerPosition]);
 
   if (isLoading && !telemetry) {
     return (
@@ -431,97 +516,141 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
 
         {/* MAP CANVAS */}
         <div className="flex-1 w-full h-full relative">
-          {apiKey ? (
-            <APIProvider apiKey={apiKey}>
-              <Map
-                mapId="DEMO_MAP_ID"
-                style={{ width: '100%', height: '100%' }}
-                defaultCenter={
-                  animatedCoord ||
-                  (telemetry?.latest_location
-                    ? { lat: telemetry.latest_location.lat, lng: telemetry.latest_location.lng }
-                    : { lat: telemetry?.pickup.lat || 26.1445, lng: telemetry?.pickup.lng || 91.7362 })
-                }
-                defaultZoom={8}
-                gestureHandling="greedy"
-                disableDefaultUI={false}
-                internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+          {canRenderGoogleMap ? (
+            <>
+              <APIProvider
+                apiKey={apiKey}
+                language="en"
+                region="IN"
+                onError={reportMapError}
               >
-                {/* 1. Pickup Pin (Green) */}
-                {telemetry?.pickup && (
-                  <AdvancedMarker
-                    position={{ lat: telemetry.pickup.lat, lng: telemetry.pickup.lng }}
-                    title={`Pickup: ${telemetry.pickup.city} (${telemetry.pickup.address})`}
-                  >
-                    <Pin background="#10B981" borderColor="#064E3B" glyphColor="#ffffff" scale={1.1} />
-                  </AdvancedMarker>
-                )}
+                <GoogleMap
+                  mapId="DEMO_MAP_ID"
+                  style={{ width: '100%', height: '100%' }}
+                  defaultCenter={
+                    animatedCoord ||
+                    (telemetry?.latest_location
+                      ? { lat: telemetry.latest_location.lat, lng: telemetry.latest_location.lng }
+                      : { lat: telemetry?.pickup.lat || 26.1445, lng: telemetry?.pickup.lng || 91.7362 })
+                  }
+                  defaultZoom={8}
+                  gestureHandling="greedy"
+                  disableDefaultUI={false}
+                  internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+                >
+                  {/* 1. Pickup Pin (Green) */}
+                  {telemetry?.pickup && (
+                    <AdvancedMarker
+                      position={{ lat: telemetry.pickup.lat, lng: telemetry.pickup.lng }}
+                      title={`Pickup: ${telemetry.pickup.city} (${telemetry.pickup.address})`}
+                    >
+                      <Pin background="#10B981" borderColor="#064E3B" glyphColor="#ffffff" scale={1.1} />
+                    </AdvancedMarker>
+                  )}
 
-                {/* 2. Drop Pin (Red) */}
-                {telemetry?.drop && (
-                  <AdvancedMarker
-                    position={{ lat: telemetry.drop.lat, lng: telemetry.drop.lng }}
-                    title={`Destination: ${telemetry.drop.city} (${telemetry.drop.address})`}
-                  >
-                    <Pin background="#EF4444" borderColor="#7F1D1D" glyphColor="#ffffff" scale={1.1} />
-                  </AdvancedMarker>
-                )}
+                  {/* 2. Drop Pin (Red) */}
+                  {telemetry?.drop && (
+                    <AdvancedMarker
+                      position={{ lat: telemetry.drop.lat, lng: telemetry.drop.lng }}
+                      title={`Destination: ${telemetry.drop.city} (${telemetry.drop.address})`}
+                    >
+                      <Pin background="#EF4444" borderColor="#7F1D1D" glyphColor="#ffffff" scale={1.1} />
+                    </AdvancedMarker>
+                  )}
 
-                {/* 3. Smooth Moving Animated Vehicle Marker */}
-                {animatedCoord && (
-                  <AdvancedMarker
-                    position={animatedCoord}
-                    title={`${telemetry?.vehicle.vehicle_number} (Live)`}
-                  >
-                    <div className="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2">
-                      {/* Radar Pulse Wave */}
-                      <div className="w-12 h-12 rounded-full bg-[#E83E83]/30 animate-ping absolute"></div>
-                      
-                      {/* Directional Rotating Vehicle Icon */}
-                      <div
-                        className="w-10 h-10 rounded-full bg-[#E83E83] border-2 border-white shadow-2xl flex items-center justify-center text-white font-bold transition-transform duration-300"
-                        style={{ transform: `rotate(${animatedHeading}deg)` }}
-                      >
-                        <Navigation className="w-5 h-5 fill-current text-white" />
+                  {/* 3. Smooth Moving Animated Vehicle Marker */}
+                  {animatedCoord && (
+                    <AdvancedMarker
+                      position={animatedCoord}
+                      title={`${telemetry?.vehicle.vehicle_number} (Live)`}
+                    >
+                      <div className="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2">
+                        <div className="w-12 h-12 rounded-full bg-[#E83E83]/30 animate-ping absolute"></div>
+                        <div
+                          className="w-10 h-10 rounded-full bg-[#E83E83] border-2 border-white shadow-2xl flex items-center justify-center text-white font-bold transition-transform duration-300"
+                          style={{ transform: `rotate(${animatedHeading}deg)` }}
+                        >
+                          <Navigation className="w-5 h-5 fill-current text-white" />
+                        </div>
+                        <div className="absolute -bottom-6 bg-[#171318] text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-700 whitespace-nowrap shadow-md flex items-center gap-1">
+                          <span>{telemetry?.vehicle.vehicle_number}</span>
+                          <span className="text-[#10B981]">•</span>
+                          <span>{telemetry?.latest_location?.speed || 0} km/h</span>
+                        </div>
                       </div>
+                    </AdvancedMarker>
+                  )}
 
-                      {/* Floating Vehicle Tag */}
-                      <div className="absolute -bottom-6 bg-[#171318] text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-700 whitespace-nowrap shadow-md flex items-center gap-1">
-                        <span>{telemetry?.vehicle.vehicle_number}</span>
-                        <span className="text-[#10B981]">•</span>
-                        <span>{telemetry?.latest_location?.speed || 0} km/h</span>
-                      </div>
-                    </div>
-                  </AdvancedMarker>
-                )}
+                  {/* Geo-Fence Circular Zones Overlay */}
+                  {telemetry?.pickup && telemetry?.drop && (
+                    <GeofenceOverlay
+                      pickup={telemetry.pickup}
+                      delivery={telemetry.drop}
+                      pickupRadiusMeters={telemetry.geofence_config?.pickupRadiusMeters}
+                      deliveryRadiusMeters={telemetry.geofence_config?.deliveryRadiusMeters}
+                      insidePickup={telemetry.geofence_state?.insidePickup}
+                      insideDelivery={telemetry.geofence_state?.insideDelivery}
+                    />
+                  )}
 
-                {/* Geo-Fence Circular Zones Overlay */}
-                {telemetry?.pickup && telemetry?.drop && (
-                  <GeofenceOverlay
-                    pickup={telemetry.pickup}
-                    delivery={telemetry.drop}
-                    pickupRadiusMeters={telemetry.geofence_config?.pickupRadiusMeters}
-                    deliveryRadiusMeters={telemetry.geofence_config?.deliveryRadiusMeters}
-                    insidePickup={telemetry.geofence_state?.insidePickup}
-                    insideDelivery={telemetry.geofence_state?.insideDelivery}
-                  />
-                )}
+                  {/* Map Route Controller (Polyline & Fitting Bounds) */}
+                  {telemetry && (
+                    <TrackingMapController
+                      tripKey={telemetry.trip_id || effectiveTripId}
+                      pickup={telemetry.pickup}
+                      drop={telemetry.drop}
+                      currentLocation={animatedCoord || telemetry.latest_location}
+                      historyPings={telemetry.location_history}
+                      routePolyline={telemetry.route_polyline}
+                      fitRouteSignal={fitRouteSignal}
+                      focusVehicleSignal={focusVehicleSignal}
+                    />
+                  )}
+                </GoogleMap>
+              </APIProvider>
 
-                {/* Map Route Controller (Polyline & Fitting Bounds) */}
-                {telemetry && (
-                  <TrackingMapController
-                    pickup={telemetry.pickup}
-                    drop={telemetry.drop}
-                    currentLocation={animatedCoord || telemetry.latest_location}
-                    historyPings={telemetry.location_history}
-                    routePolyline={telemetry.route_polyline}
-                  />
-                )}
-              </Map>
-            </APIProvider>
+              {/* Floating Camera Controls on Google Map */}
+              <div className="absolute right-3 bottom-6 z-20 flex flex-col gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setFocusVehicleSignal((n) => n + 1)}
+                  className="px-2.5 py-2 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
+                  title="Focus camera on live vehicle"
+                >
+                  <Crosshair className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Focus Truck</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFitRouteSignal((n) => n + 1)}
+                  className="px-2.5 py-2 rounded-xl bg-[#171318]/90 hover:bg-[#241E26] text-white border border-gray-700 text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
+                  title="Fit entire route"
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Fit Route</span>
+                </button>
+              </div>
+            </>
+          ) : telemetry?.pickup && telemetry?.drop ? (
+            <LiveTelemetryFallbackMap
+              pickup={telemetry.pickup}
+              drop={telemetry.drop}
+              currentLocation={animatedCoord || telemetry.latest_location}
+              historyPings={telemetry.location_history}
+              vehicleNumber={telemetry.vehicle.vehicle_number}
+              speedKmh={telemetry.latest_location?.speed || 0}
+              heading={animatedHeading}
+              remainingKm={telemetry.eta.distance_remaining_km}
+              pickupRadiusMeters={telemetry.geofence_config?.pickupRadiusMeters}
+              deliveryRadiusMeters={telemetry.geofence_config?.deliveryRadiusMeters}
+              insidePickup={telemetry.geofence_state?.insidePickup}
+              insideDelivery={telemetry.geofence_state?.insideDelivery}
+              reason={mapAuthError ? 'auth_error' : 'missing_key'}
+            />
           ) : (
-            <div className="w-full h-full flex items-center justify-center text-white text-xs">
-              Maps API Key not configured.
+            <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 text-xs gap-2 p-6 text-center">
+              <div className="w-8 h-8 border-2 border-[#E83E83] border-t-transparent rounded-full animate-spin" />
+              <span>{errorMsg || 'Synchronizing vehicle telemetry coordinates...'}</span>
             </div>
           )}
         </div>

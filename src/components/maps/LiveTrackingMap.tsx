@@ -1,11 +1,13 @@
 // Source: Google Maps Platform Code Assist
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { APIProvider, Map, AdvancedMarker, Pin } from '@vis.gl/react-google-maps';
-import { Truck, Navigation, MapPin, ShieldCheck, Radio, LocateFixed, Clock } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
+import { Truck, Navigation, ShieldCheck, Radio, LocateFixed, Clock } from 'lucide-react';
 import { GeofenceZoneConfig, GeofenceZoneState, LocationPing, LocationPoint } from '../../types';
 import { logisticsStore, NH27_CORRIDOR_WAYPOINTS } from '../../services/store';
 import { formatMetersOrKm } from '../../utils/geofence';
 import { GeofenceOverlay } from './GeofenceOverlay';
+import { LiveTelemetryFallbackMap } from './LiveTelemetryFallbackMap';
+import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
 import { showToast } from '../shared/Toast';
 
 interface LiveTrackingMapProps {
@@ -19,6 +21,54 @@ interface LiveTrackingMapProps {
   isDriverMode?: boolean;
 }
 
+const CorridorRouteOverlay: React.FC<{
+  pickup: LocationPoint;
+  delivery: LocationPoint;
+  currentPing: LocationPing | null;
+}> = ({ pickup, delivery, currentPing }) => {
+  const map = useMap();
+  const mapsLib = useMapsLibrary('maps');
+  const coreLib = useMapsLibrary('core');
+  const polylineRef = useRef<google.maps.Polyline | null>(null);
+  const fittedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!map || !mapsLib) return;
+    if (polylineRef.current) polylineRef.current.setMap(null);
+
+    const midLat = (pickup.lat + delivery.lat) / 2 + 0.06;
+    const midLng = (pickup.lng + delivery.lng) / 2;
+    polylineRef.current = new mapsLib.Polyline({
+      path: [
+        { lat: pickup.lat, lng: pickup.lng },
+        { lat: midLat, lng: midLng },
+        { lat: delivery.lat, lng: delivery.lng }
+      ],
+      geodesic: true,
+      strokeColor: '#E83E83',
+      strokeOpacity: 0.85,
+      strokeWeight: 4,
+      map
+    });
+
+    return () => {
+      if (polylineRef.current) polylineRef.current.setMap(null);
+    };
+  }, [map, mapsLib, pickup.lat, pickup.lng, delivery.lat, delivery.lng]);
+
+  useEffect(() => {
+    if (!map || !coreLib || fittedRef.current) return;
+    const bounds = new coreLib.LatLngBounds();
+    bounds.extend({ lat: pickup.lat, lng: pickup.lng });
+    bounds.extend({ lat: delivery.lat, lng: delivery.lng });
+    if (currentPing) bounds.extend({ lat: currentPing.lat, lng: currentPing.lng });
+    map.fitBounds(bounds, { top: 80, right: 50, bottom: 50, left: 50 });
+    fittedRef.current = true;
+  }, [map, coreLib, pickup.lat, pickup.lng, delivery.lat, delivery.lng, currentPing]);
+
+  return null;
+};
+
 export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   bookingId,
   pickup,
@@ -28,16 +78,18 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   shipmentStatus,
   isDriverMode = false
 }) => {
-  const apiKey = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_GOOGLE_MAPS_API_KEY || '';
+  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
   
   const [currentPing, setCurrentPing] = useState<LocationPing | null>(() => {
     return logisticsStore.getLatestPing(bookingId) || null;
   });
+  const [gpsHistory, setGpsHistory] = useState<LocationPing[]>(() =>
+    logisticsStore.getLocationPings(bookingId)
+  );
   
   const [isGpsTransmitting, setIsGpsTransmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [simIndex, setSimIndex] = useState(5); // Kaziranga waypoint default
-  const [mapError, setMapError] = useState(false);
   const [geofenceConfig, setGeofenceConfig] = useState<GeofenceZoneConfig>(() =>
     logisticsStore.getGeofenceConfig(bookingId)
   );
@@ -52,12 +104,35 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       if (ping) {
         setCurrentPing(ping);
       }
+      setGpsHistory(logisticsStore.getLocationPings(bookingId));
       setGeofenceConfig(logisticsStore.getGeofenceConfig(bookingId));
       setGeofenceState(logisticsStore.getGeofenceState(bookingId));
     };
     update();
     const unsub = logisticsStore.subscribe(update);
     return unsub;
+  }, [bookingId]);
+
+  // Best-effort relay of driver ping to backend so Shipper view stays synced across devices
+  const relayPingToServer = useCallback((ping: LocationPing) => {
+    const booking = logisticsStore.getBookingById(bookingId);
+    const token = booking?.trackingToken;
+    if (!token) return;
+    fetch(`/trips/${encodeURIComponent(bookingId)}/location-ping`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        lat: ping.lat,
+        lng: ping.lng,
+        speed: ping.speedKmh,
+        heading: ping.heading,
+        battery_level: ping.batteryLevel ?? 90,
+        recorded_at: ping.timestamp
+      })
+    }).catch(() => {});
   }, [bookingId]);
 
   // Map center calculation
@@ -96,6 +171,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         };
         const triggered = logisticsStore.recordLocationPing(genuinePing);
         setCurrentPing(genuinePing);
+        relayPingToServer(genuinePing);
         setIsGpsTransmitting(false);
         if (triggered.length > 0) {
           triggered.forEach((evt) => showToast(evt.message, 'info'));
@@ -134,11 +210,12 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
 
     const triggered = logisticsStore.recordLocationPing(simPing);
     setCurrentPing(simPing);
+    relayPingToServer(simPing);
     if (triggered.length > 0) {
       triggered.forEach((evt) => showToast(evt.message, 'info'));
     }
     setStatusMessage(`Vehicle advanced to milestone: ${waypoint.name}`);
-  }, [bookingId, simIndex]);
+  }, [bookingId, simIndex, relayPingToServer]);
 
   // Calculate remaining distance estimate
   const remainingKm = useMemo(() => {
@@ -210,12 +287,14 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
 
       {/* Interactive Map Canvas */}
       <div className="flex-1 w-full h-full relative">
-        {apiKey && !mapError ? (
+        {canRenderGoogleMap ? (
           <APIProvider
             apiKey={apiKey}
-            onError={() => setMapError(true)}
+            language="en"
+            region="IN"
+            onError={reportMapError}
           >
-            <Map
+            <GoogleMap
               mapId="DEMO_MAP_ID"
               style={{ width: '100%', height: '100%' }}
               defaultCenter={defaultCenter}
@@ -233,6 +312,9 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
               <AdvancedMarker position={{ lat: delivery.lat, lng: delivery.lng }} title={`Destination: ${delivery.city}`}>
                 <Pin background="#ef4444" borderColor="#7f1d1d" glyphColor="#ffffff" scale={1.1} />
               </AdvancedMarker>
+
+              {/* Corridor Polyline + Initial Camera Fit */}
+              <CorridorRouteOverlay pickup={pickup} delivery={delivery} currentPing={currentPing} />
 
               {/* Geo-Fence Circular Zones */}
               <GeofenceOverlay
@@ -261,65 +343,24 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
                   </div>
                 </AdvancedMarker>
               )}
-            </Map>
+            </GoogleMap>
           </APIProvider>
         ) : (
-          /* High-Fidelity Tactical Vector Map Fallback */
-          <div className="w-full h-full bg-[#171318] flex flex-col justify-between p-6 relative overflow-hidden text-white">
-            {/* Background Grid Pattern */}
-            <div className="absolute inset-0 opacity-10 bg-[radial-gradient(#E83E83_1px,transparent_1px)] [background-size:16px_16px]"></div>
-            
-            {/* Vector Route Representation */}
-            <div className="relative z-10 my-auto py-8">
-              <div className="flex items-center justify-between text-xs text-gray-300 mb-2 px-2">
-                <span className="flex items-center gap-1 text-[#16A36A] font-bold">
-                  <MapPin className="w-3.5 h-3.5" /> {pickup.city} ({pickup.state})
-                </span>
-                <span className="font-mono text-gray-400">Corridor: NH-27 / NH-37 (442 km)</span>
-                <span className="flex items-center gap-1 text-[#E83E83] font-bold">
-                  <MapPin className="w-3.5 h-3.5" /> {delivery.city} ({delivery.state})
-                </span>
-              </div>
-
-              {/* Highway progress bar with waypoints */}
-              <div className="relative h-3 bg-gray-800 rounded-full overflow-visible border border-gray-700">
-                <div
-                  className="h-full bg-gradient-to-r from-[#16A36A] via-[#E83E83] to-[#E83E83] rounded-full transition-all duration-700"
-                  style={{ width: `${Math.min(95, Math.max(10, ((442 - remainingKm) / 442) * 100))}%` }}
-                ></div>
-
-                {/* Live vehicle indicator icon */}
-                <div
-                  className="absolute -top-3.5 -translate-x-1/2 transition-all duration-700 z-20"
-                  style={{ left: `${Math.min(95, Math.max(10, ((442 - remainingKm) / 442) * 100))}%` }}
-                >
-                  <div className="w-10 h-10 rounded-full bg-[#E83E83] border-2 border-white shadow-xl flex items-center justify-center text-white font-bold animate-pulse">
-                    <Truck className="w-5 h-5 fill-current" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Waypoint Markers */}
-              <div className="grid grid-cols-4 text-center mt-4 text-[11px] text-slate-400">
-                <div className="text-left font-medium text-emerald-400">
-                  ● Dibrugarh Yard<br /><span className="text-[9px] text-slate-500">KM 0</span>
-                </div>
-                <div className="font-medium text-slate-300">
-                  Dergaon Toll Plaza<br /><span className="text-[9px] text-slate-500">KM 160</span>
-                </div>
-                <div className="font-medium text-amber-400">
-                  Kaziranga Corridor<br /><span className="text-[9px] text-slate-500">KM 230</span>
-                </div>
-                <div className="text-right font-medium text-rose-400">
-                  ● Guwahati ICD<br /><span className="text-[9px] text-slate-500">KM 442</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="text-center text-xs text-slate-500 relative z-10 bg-slate-900/60 py-2 rounded-lg border border-slate-800">
-              Interactive Google Maps layer ready with key. Geocoding & live telemetry synchronizing.
-            </div>
-          </div>
+          <LiveTelemetryFallbackMap
+            pickup={pickup}
+            drop={delivery}
+            currentLocation={currentPing ? { lat: currentPing.lat, lng: currentPing.lng } : null}
+            historyPings={gpsHistory}
+            vehicleNumber={vehicleRegNumber}
+            speedKmh={currentPing?.speedKmh || 0}
+            heading={currentPing?.heading || 0}
+            remainingKm={remainingKm}
+            pickupRadiusMeters={geofenceConfig.pickupRadiusMeters}
+            deliveryRadiusMeters={geofenceConfig.deliveryRadiusMeters}
+            insidePickup={geofenceState.insidePickup}
+            insideDelivery={geofenceState.insideDelivery}
+            reason={mapAuthError ? 'auth_error' : 'missing_key'}
+          />
         )}
       </div>
 

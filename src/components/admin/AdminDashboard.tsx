@@ -41,6 +41,8 @@ import { AdminPaymentsTab } from './AdminPaymentsTab';
 import { AdminPartnerVerificationTab } from './AdminPartnerVerificationTab';
 import { ShipperLiveTracker } from '../tracking/ShipperLiveTracker';
 import { GeofenceOverlay } from '../maps/GeofenceOverlay';
+import { LiveTelemetryFallbackMap } from '../maps/LiveTelemetryFallbackMap';
+import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
 import { AdminAnalyticsCharts } from './AdminAnalyticsCharts';
 
 interface AdminDashboardProps {
@@ -84,7 +86,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   currentUser,
   onViewInvoice
 }) => {
-  const apiKey = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_GOOGLE_MAPS_API_KEY || '';
+  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
 
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [vehicles, setVehicles] = useState<CommercialVehicle[]>([]);
@@ -760,9 +762,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          <div className="w-full h-[460px] rounded-3xl overflow-hidden border border-gray-200 shadow-lg bg-gray-100 relative">
-            {apiKey ? (
-              <APIProvider apiKey={apiKey} language="en" region="IN">
+          <div className="w-full h-[460px] rounded-3xl overflow-hidden border border-gray-200 shadow-lg bg-[#120F15] relative">
+            {canRenderGoogleMap ? (
+              <APIProvider apiKey={apiKey} language="en" region="IN" onError={reportMapError}>
                 <GoogleMap
                   mapId="DEMO_MAP_ID"
                   internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
@@ -925,11 +927,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </GoogleMap>
               </APIProvider>
             ) : (
-              <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 text-xs p-6 text-center space-y-2">
-                <MapPin className="w-8 h-8 text-[#E83E83]" />
-                <span className="font-bold text-sm text-[#171318]">Google Maps API Key Not Configured</span>
-                <span>Configure VITE_GOOGLE_MAPS_API_KEY to render the live fleet map.</span>
-              </div>
+              <LiveTelemetryFallbackMap
+                pickup={
+                  bookings[0]?.pickup || { lat: 27.4728, lng: 94.912, city: 'Dibrugarh', address: 'Dibrugarh Transport Hub' }
+                }
+                drop={
+                  bookings[0]?.delivery || { lat: 26.1445, lng: 91.7362, city: 'Guwahati', address: 'Guwahati ICD' }
+                }
+                currentLocation={
+                  vehicles.find((v) => v.currentLocation)?.currentLocation || { lat: 26.5821, lng: 93.9632 }
+                }
+                historyPings={vehicles
+                  .filter((v) => v.currentLocation)
+                  .map((v) => ({ lat: v.currentLocation!.lat, lng: v.currentLocation!.lng }))}
+                vehicleNumber={vehicles[0]?.registrationNumber || 'Fleet Radar'}
+                speedKmh={48}
+                heading={245}
+                reason={mapAuthError ? 'auth_error' : 'missing_key'}
+              />
             )}
           </div>
 

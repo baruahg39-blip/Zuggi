@@ -601,7 +601,19 @@ app.post('/api/payments/cashfree/webhook', (req, res) => {
 
 // --- GOOGLE MAPS PLATFORM SERVER PROXY (Reverse Geocode & Routes API) ---
 
-const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '';
+function getGoogleMapsKey(): string {
+  return (process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
+}
+
+// Public browser config endpoint so setting VITE_GOOGLE_MAPS_API_KEY or GOOGLE_MAPS_API_KEY
+// in Render/Cloud environment variables takes effect immediately at runtime.
+app.get('/api/config/maps', (_req, res) => {
+  const browserKey = (process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim();
+  res.json({
+    apiKey: browserKey,
+    configured: Boolean(browserKey)
+  });
+});
 
 // Known Northeast Logistics Hubs for smart regional fallback
 const NE_LOGISTICS_HUBS = [
@@ -645,9 +657,10 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
 
     const nearest = findNearestHub(lat, lng);
 
-    if (GOOGLE_MAPS_KEY) {
+    const googleMapsKey = getGoogleMapsKey();
+    if (googleMapsKey) {
       try {
-        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&region=in&key=${GOOGLE_MAPS_KEY}`;
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&region=in&key=${googleMapsKey}`;
         const gRes = await fetch(url);
         const data = await gRes.json();
 
@@ -730,7 +743,8 @@ app.post('/api/maps/compute-route', async (req, res) => {
     }
 
     // Try Google Routes API (New)
-    if (GOOGLE_MAPS_KEY) {
+    const googleMapsKey = getGoogleMapsKey();
+    if (googleMapsKey) {
       try {
         const routesUrl = 'https://routes.googleapis.com/directions/v2:computeRoutes';
         const routeReq = {
@@ -759,7 +773,7 @@ app.post('/api/maps/compute-route', async (req, res) => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Goog-Api-Key': GOOGLE_MAPS_KEY,
+            'X-Goog-Api-Key': googleMapsKey,
             'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.description,routes.viewport'
           },
           body: JSON.stringify(routeReq)

@@ -772,6 +772,163 @@ tripsRouter.post('/:id/assign', async (req, res) => {
   }
 });
 
+// --- 1b. POST /trips/:id/sync ---
+// Silently hydrates a client-booked trip into server memory (e.g., after cold starts) without re-sending SMS.
+tripsRouter.post('/:id/sync', async (req, res) => {
+  try {
+    const tripId = req.params.id;
+    const existing = tripsDb.get(tripId);
+    if (existing) {
+      return res.status(200).json({ success: true, trip_id: existing.id, already_exists: true });
+    }
+
+    const {
+      load_id,
+      vehicle_id = `veh_${tripId.slice(-6)}`,
+      vehicle_number = 'AS-01-ZG-2026',
+      vehicle_type = 'commercial_truck',
+      driver_id = `drv_${tripId.slice(-6)}`,
+      driver_name = 'Assigned Partner Driver',
+      driver_phone = '+919678944132',
+      tracking_token,
+      tracking_source = 'MOBILE_APP',
+      status = 'IN_TRANSIT',
+      pickup,
+      drop,
+      latest_location,
+      location_history,
+      geofence_config
+    } = req.body || {};
+
+    if (!pickup || !drop || !Number.isFinite(Number(pickup.lat)) || !Number.isFinite(Number(drop.lat))) {
+      return res.status(400).json({ success: false, message: 'Valid pickup and drop coordinates are required to sync trip.' });
+    }
+
+    if (!vehiclesDb.has(vehicle_id)) {
+      vehiclesDb.set(vehicle_id, {
+        id: vehicle_id,
+        owner_id: driver_id,
+        vehicle_number,
+        vehicle_type,
+        gps_type: tracking_source,
+        is_available: false
+      });
+    }
+    if (!driversDb.has(driver_id)) {
+      driversDb.set(driver_id, {
+        id: driver_id,
+        owner_id: driver_id,
+        name: driver_name,
+        phone_number: driver_phone,
+        is_active: true
+      });
+    }
+
+    const now = new Date().toISOString();
+    const resolvedStatus: TripStatus = ['ASSIGNED', 'AT_PICKUP', 'IN_TRANSIT', 'DELIVERED'].includes(status)
+      ? status
+      : 'IN_TRANSIT';
+
+    const initialPing: LocationPingRecord = latest_location && Number.isFinite(Number(latest_location.lat))
+      ? {
+          trip_id: tripId,
+          lat: Number(latest_location.lat),
+          lng: Number(latest_location.lng),
+          speed: Number(latest_location.speed) || 0,
+          heading: Number(latest_location.heading) || 0,
+          battery_level: Number(latest_location.battery_level) || 90,
+          recorded_at: latest_location.recorded_at || now,
+          is_buffered: false
+        }
+      : {
+          trip_id: tripId,
+          lat: Number(pickup.lat),
+          lng: Number(pickup.lng),
+          speed: 0,
+          heading: 0,
+          battery_level: 92,
+          recorded_at: now,
+          is_buffered: false
+        };
+
+    const history: LocationPingRecord[] =
+      Array.isArray(location_history) && location_history.length > 0
+        ? location_history
+            .filter((p: any) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng)))
+            .map((p: any) => ({
+              trip_id: tripId,
+              lat: Number(p.lat),
+              lng: Number(p.lng),
+              speed: Number(p.speed) || 0,
+              heading: Number(p.heading) || 0,
+              battery_level: Number(p.battery_level) || 90,
+              recorded_at: p.recorded_at || now,
+              is_buffered: false
+            }))
+        : [initialPing];
+
+    const resolvedGeofenceConfig: GeofenceConfigRecord = {
+      pickupRadiusMeters: Math.max(150, Math.min(5000, Number(geofence_config?.pickupRadiusMeters) || 800)),
+      deliveryRadiusMeters: Math.max(150, Math.min(5000, Number(geofence_config?.deliveryRadiusMeters) || 500)),
+      autoUpdateStatus: geofence_config?.autoUpdateStatus !== undefined ? Boolean(geofence_config.autoUpdateStatus) : true,
+      updatedAt: now
+    };
+
+    const hydratedTrip: TripRecord = {
+      id: tripId,
+      load_id: load_id || tripId,
+      assigned_vehicle_id: vehicle_id,
+      assigned_driver_id: driver_id,
+      status: resolvedStatus,
+      tracking_token:
+        tracking_token ||
+        `trk_${crypto.createHmac('sha256', 'vahansetu_fleet_salt').update(`${tripId}_${now}`).digest('hex').slice(0, 32)}`,
+      tracking_source,
+      created_at: now,
+      updated_at: now,
+      pickup: {
+        lat: Number(pickup.lat),
+        lng: Number(pickup.lng),
+        address: pickup.address || pickup.city || 'Pickup Origin',
+        city: pickup.city || 'Origin',
+        contact_name: pickup.contact_name,
+        contact_phone: pickup.contact_phone
+      },
+      drop: {
+        lat: Number(drop.lat),
+        lng: Number(drop.lng),
+        address: drop.address || drop.city || 'Delivery Destination',
+        city: drop.city || 'Destination',
+        contact_name: drop.contact_name,
+        contact_phone: drop.contact_phone
+      },
+      route_polyline: '',
+      latest_ping: initialPing,
+      history,
+      buffered_count: 0,
+      geofence_config: resolvedGeofenceConfig,
+      geofence_state: { insidePickup: false, insideDelivery: false },
+      geofence_events: []
+    };
+
+    evaluateTripGeofenceTransitions(hydratedTrip, initialPing);
+    tripsDb.set(hydratedTrip.id, hydratedTrip);
+    tripsDb.set(hydratedTrip.load_id, hydratedTrip);
+    void persistTripToSupabase(hydratedTrip);
+
+    return res.status(200).json({
+      success: true,
+      trip_id: hydratedTrip.id,
+      tracking_token: hydratedTrip.tracking_token,
+      pickup: hydratedTrip.pickup,
+      drop: hydratedTrip.drop
+    });
+  } catch (error: any) {
+    console.error('[Sync Trip Error]', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to sync trip.' });
+  }
+});
+
 // --- 2. POST /trips/:id/location-ping ---
 // Ingests GPS coordinates (lat, lng), speed, and heading data, authenticated via tracking token.
 // Fully handles offline GPS buffering and automatic status progression.

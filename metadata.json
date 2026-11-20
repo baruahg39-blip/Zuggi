@@ -1,0 +1,10 @@
+{
+  "name": "VahanSetu Freight",
+  "description": "Premium commercial goods transportation marketplace connecting shippers with commercial vehicle owners and drivers across Assam, the Northeast, and India with live tracking and freight bidding.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

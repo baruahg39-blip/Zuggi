@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <script>
+      // Early suppression of proxy WebSocket closure and legacy Phone Auth messages per environment guidelines
+      (function() {
+        var origConsoleError = console.error;
+        console.error = function() {
+          var args = Array.prototype.slice.call(arguments);
+          var msg = args.map(function(a) {
+            return (a && (a.message || a.stack || String(a))) || '';
+          }).join(' ');
+          if (
+            msg.indexOf('WebSocket') !== -1 ||
+            msg.indexOf('closed without opened') !== -1 ||
+            msg.indexOf('@vite/client') !== -1 ||
+            msg.indexOf('reCAPTCHA has already been rendered') !== -1 ||
+            msg.indexOf('operation-not-allowed') !== -1
+          ) {
+            return;
+          }
+          origConsoleError.apply(console, args);
+        };
+
+        window.addEventListener('error', function (e) {
+          var str = (e && (e.message || (e.error && e.error.message))) || '';
+          if (
+            str.indexOf('WebSocket') !== -1 ||
+            str.indexOf('closed without opened') !== -1 ||
+            str.indexOf('vite') !== -1 ||
+            str.indexOf('operation-not-allowed') !== -1 ||
+            str.indexOf('reCAPTCHA') !== -1
+          ) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (e) {
+          var str = String((e && e.reason) || '');
+          if (
+            str.indexOf('WebSocket') !== -1 ||
+            str.indexOf('closed without opened') !== -1 ||
+            str.indexOf('vite') !== -1 ||
+            str.indexOf('operation-not-allowed') !== -1 ||
+            str.indexOf('reCAPTCHA') !== -1
+          ) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+        }, true);
+      })();
+
+      // Safely purge legacy caches without triggering unhandled ServiceWorker update rejections
+      if ('caches' in window) {
+        caches.keys().then(function(names) {
+          names.forEach(function(name) {
+            if (name !== 'vahansetu-pwa-v5') {
+              caches.delete(name).catch(function() {});
+            }
+          });
+        }).catch(function() {});
+      }
+    </script>
+    <title>Zuggi</title>
+    <meta name="description" content="Zuggi commercial goods transportation marketplace connecting shippers with verified trucks and drivers across Assam, the Northeast, and India with live GPS tracking and freight bidding." />
+    <meta property="og:title" content="Zuggi" />
+    <meta property="og:description" content="Zuggi commercial goods transportation marketplace connecting shippers with verified trucks and drivers across Assam, the Northeast, and India with live GPS tracking and freight bidding." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#171318" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Zuggi" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-[#F8F6F8] text-[#171318] antialiased selection:bg-[#E83E83] selection:text-white min-h-screen overflow-x-hidden">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

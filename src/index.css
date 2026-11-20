@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --brand-pink: #E83E83;
+    --brand-pink-hover: #D62D72;
+    --brand-black: #171318;
+    --brand-light-pink: #FFF0F6;
+    --brand-secondary: #77717A;
+    --brand-success: #16A36A;
+    --brand-warning: #E9A23B;
+    --brand-error: #DC3545;
+  }
+
+  html, body {
+    overflow-x: hidden;
+    width: 100%;
+    min-height: 100%;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: #F8F6F8;
+    color: #171318;
+  }
+  
+  code, pre {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+.safe-area-pb {
+  padding-bottom: max(env(safe-area-inset-bottom, 0.75rem), 0.75rem);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F1EDF1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D9D2D9;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #E83E83;
+}
+
+/* Touch-friendly utility helpers for Indian logistics users */
+.btn-pink-primary {
+  background-color: #E83E83;
+  color: #FFFFFF;
+  font-weight: 700;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-pink-primary:hover {
+  background-color: #D62D72;
+}
+
+.btn-pink-primary:active {
+  transform: scale(0.98);
+}
+
+/* Print styling for GST Tax Invoices and Lorry Receipts (Bilty) */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-shadow-none {
+    box-shadow: none !important;
+  }
+}

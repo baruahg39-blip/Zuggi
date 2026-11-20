@@ -1,0 +1,354 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated platform user profile with server-verified role",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["shipper", "driver", "admin"] },
+        "name": { "type": "string" },
+        "businessName": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "address": { "type": "string" },
+        "gstin": { "type": "string" },
+        "pan": { "type": "string" },
+        "isVerified": { "type": "boolean" },
+        "isBlocked": { "type": "boolean" },
+        "blockedReason": { "type": "string" },
+        "blockedAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "phone", "role", "name"]
+    },
+    "Shipper": {
+      "title": "Shipper",
+      "description": "Commercial shipper company profile and preferences",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "companyName": { "type": "string" },
+        "gstin": { "type": "string" },
+        "billingAddress": { "type": "string" },
+        "totalLoadsPosted": { "type": "number" },
+        "totalSpent": { "type": "number" },
+        "rating": { "type": "number" }
+      },
+      "required": ["userId", "companyName"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Driver or fleet owner transport profile",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "dlNumber": { "type": "string" },
+        "isFleetOwner": { "type": "boolean" },
+        "fleetSize": { "type": "number" },
+        "verificationStatus": { "type": "string", "enum": ["pending", "verified", "rejected"] },
+        "rating": { "type": "number" },
+        "completedTrips": { "type": "number" },
+        "totalEarnings": { "type": "number" },
+        "activeVehicleId": { "type": "string" }
+      },
+      "required": ["userId", "name", "verificationStatus"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Commercial freight vehicle registered under a driver or fleet owner",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "registrationNumber": { "type": "string" },
+        "category": { "type": "string" },
+        "capacityKg": { "type": "number" },
+        "permitType": { "type": "string" },
+        "currentCity": { "type": "string" },
+        "isOnline": { "type": "boolean" },
+        "isAvailable": { "type": "boolean" },
+        "isBlocked": { "type": "boolean" },
+        "blockedReason": { "type": "string" },
+        "verificationStatus": { "type": "string", "enum": ["pending", "verified", "rejected"] }
+      },
+      "required": ["id", "ownerId", "registrationNumber", "category", "capacityKg"]
+    },
+    "Load": {
+      "title": "Load",
+      "description": "Commercial freight shipment posted by shipper for marketplace bidding",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "shipperId": { "type": "string" },
+        "shipperName": { "type": "string" },
+        "shipperPhone": { "type": "string" },
+        "pickupCity": { "type": "string" },
+        "pickupAddress": { "type": "string" },
+        "dropoffCity": { "type": "string" },
+        "dropoffAddress": { "type": "string" },
+        "goodsCategory": { "type": "string" },
+        "goodsDescription": { "type": "string" },
+        "weightKg": { "type": "number" },
+        "weightTonnes": { "type": "number" },
+        "dimensions": { "type": "string" },
+        "requiredVehicleCategory": { "type": "string" },
+        "expectedBudget": { "type": "number" },
+        "status": { "type": "string", "enum": ["DRAFT", "POSTED", "BIDDING", "AWARDED", "BOOKED", "PICKUP", "IN_TRANSIT", "DELIVERED", "COMPLETED", "CANCELLED", "BLOCKED", "DISPUTED"] },
+        "isBlocked": { "type": "boolean" },
+        "blockedReason": { "type": "string" },
+        "bidsCount": { "type": "number" },
+        "lowestBid": { "type": "number" },
+        "awardedBidId": { "type": "string" },
+        "awardedDriverId": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "shipperId", "pickupCity", "dropoffCity", "goodsCategory", "weightKg", "status"]
+    },
+    "Bid": {
+      "title": "Bid",
+      "description": "Commercial freight quotation submitted by a driver for a load",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "loadId": { "type": "string" },
+        "driverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverPhone": { "type": "string" },
+        "driverRating": { "type": "number" },
+        "vehicleNumber": { "type": "string" },
+        "vehicleCategory": { "type": "string" },
+        "quoteAmount": { "type": "number" },
+        "advanceRequested": { "type": "number" },
+        "estimatedDeliveryHours": { "type": "number" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["submitted", "revised", "accepted", "rejected", "withdrawn"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "loadId", "driverId", "quoteAmount", "status"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Awarded freight transport contract between shipper and driver",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "loadId": { "type": "string" },
+        "shipperId": { "type": "string" },
+        "driverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverPhone": { "type": "string" },
+        "vehicleNumber": { "type": "string" },
+        "agreedPrice": { "type": "number" },
+        "platformCommission": { "type": "number" },
+        "advancePaid": { "type": "number" },
+        "balanceDue": { "type": "number" },
+        "status": { "type": "string", "enum": ["BOOKED", "PICKUP", "IN_TRANSIT", "DELIVERED", "COMPLETED", "CANCELLED", "DISPUTED"] },
+        "pickupTime": { "type": "string" },
+        "deliveryTime": { "type": "string" },
+        "pickupProofUrl": { "type": "string" },
+        "deliveryProofUrl": { "type": "string" },
+        "ewayBillNumber": { "type": "string" },
+        "trackingToken": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "loadId", "shipperId", "driverId", "agreedPrice", "status"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial ledger record of freight settlement or platform commission",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "payerId": { "type": "string" },
+        "payeeId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["advance", "balance", "commission", "refund"] },
+        "status": { "type": "string", "enum": ["pending", "completed", "failed"] },
+        "reference": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "bookingId", "amount", "type", "status"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User notification alert for bids, bookings, status updates",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "message", "read"]
+    },
+    "SupportTicket": {
+      "title": "SupportTicket",
+      "description": "Customer and driver complaint or operations dispute ticket",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userRole": { "type": "string" },
+        "loadId": { "type": "string" },
+        "subject": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "urgent"] },
+        "status": { "type": "string", "enum": ["open", "in_progress", "resolved"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "subject", "status"]
+    },
+    "VerificationDocument": {
+      "title": "VerificationDocument",
+      "description": "Statutory KYC and commercial vehicle legal verification document",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["driving_license", "rc", "pan", "gstin", "insurance", "fitness"] },
+        "documentNumber": { "type": "string" },
+        "documentUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "verified", "rejected"] },
+        "submittedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "type", "status"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security and administrative action ledger",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "adminId": { "type": "string" },
+        "action": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetId": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "adminId", "action", "timestamp"]
+    },
+    "PlatformSettings": {
+      "title": "PlatformSettings",
+      "description": "Owner configurable business variables and commission rates",
+      "type": "object",
+      "properties": {
+        "commissionRatePct": { "type": "number" },
+        "minBidAdvancePct": { "type": "number" },
+        "supportPhone": { "type": "string" },
+        "emergencyEscalation": { "type": "string" },
+        "maintenanceMode": { "type": "boolean" },
+        "allowedVehicleTypes": { "type": "string" }
+      },
+      "required": ["commissionRatePct", "supportPhone"]
+    },
+    "Trip": {
+      "title": "Trip",
+      "description": "Assigned freight trip with vehicle, driver, and live tracking status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "load_id": { "type": "string" },
+        "assigned_vehicle_id": { "type": "string" },
+        "assigned_driver_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["ASSIGNED", "AT_PICKUP", "IN_TRANSIT", "DELIVERED"] },
+        "tracking_token": { "type": "string" },
+        "tracking_source": { "type": "string", "enum": ["MOBILE_APP", "WEB_LINK", "HARDWARE_GPS"] },
+        "geofence_config": { "type": "object" },
+        "geofence_state": { "type": "object" },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["id", "load_id", "assigned_vehicle_id", "assigned_driver_id", "status", "tracking_token"]
+    },
+    "TripLocationPing": {
+      "title": "TripLocationPing",
+      "description": "GPS breadcrumb telemetry ping recorded for an assigned trip",
+      "type": "object",
+      "properties": {
+        "trip_id": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "speed": { "type": "number" },
+        "heading": { "type": "number" },
+        "battery_level": { "type": "number" },
+        "recorded_at": { "type": "string" },
+        "is_buffered": { "type": "boolean" }
+      },
+      "required": ["trip_id", "lat", "lng", "recorded_at"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User account documents containing role and profile"
+    },
+    "/shippers/{shipperId}": {
+      "schema": { "$ref": "#/entities/Shipper" },
+      "description": "Shipper specific business records"
+    },
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/Driver" },
+      "description": "Driver specific licensing and fleet metrics"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": { "$ref": "#/entities/Vehicle" },
+      "description": "Registered commercial transport vehicles"
+    },
+    "/loads/{loadId}": {
+      "schema": { "$ref": "#/entities/Load" },
+      "description": "Freight loads posted for marketplace bidding"
+    },
+    "/bids/{bidId}": {
+      "schema": { "$ref": "#/entities/Bid" },
+      "description": "Quotations submitted by drivers on posted loads"
+    },
+    "/bookings/{bookingId}": {
+      "schema": { "$ref": "#/entities/Booking" },
+      "description": "Awarded freight transport trips and POD state"
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Financial ledger transactions and commissions"
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "User notifications for load and trip events"
+    },
+    "/support_tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/SupportTicket" },
+      "description": "Dispute cases and customer help tickets"
+    },
+    "/verification_documents/{docId}": {
+      "schema": { "$ref": "#/entities/VerificationDocument" },
+      "description": "KYC, driving license, and RC documents"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Administrative audit trail"
+    },
+    "/platform_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/PlatformSettings" },
+      "description": "Global platform parameters"
+    },
+    "/trips/{tripId}": {
+      "schema": { "$ref": "#/entities/Trip" },
+      "description": "Assigned trips and live tracking status"
+    },
+    "/trips/{tripId}/pings/{pingId}": {
+      "schema": { "$ref": "#/entities/TripLocationPing" },
+      "description": "GPS breadcrumb telemetry pings"
+    }
+  }
+}

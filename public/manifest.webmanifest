@@ -1,0 +1,58 @@
+{
+  "id": "/",
+  "name": "Zuggi - Commercial Goods Transportation",
+  "short_name": "Zuggi",
+  "description": "India Commercial Goods Transport & Freight Exchange. Book trucks, dispatch cargo, bid on freights & live tracking.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#020617",
+  "background_color": "#020617",
+  "categories": ["logistics", "business", "transportation"],
+  "lang": "en",
+  "dir": "ltr",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Book Commercial Truck",
+      "short_name": "Book Truck",
+      "description": "Generate new freight consignment and get instant marketplace bids",
+      "url": "/?action=book",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Find Highway Loads",
+      "short_name": "Find Loads",
+      "description": "Explore return freight loads across Northeast corridors",
+      "url": "/?action=find",
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+    }
+  ]
+}

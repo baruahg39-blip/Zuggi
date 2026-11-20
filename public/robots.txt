@@ -1,6 +1,17 @@
 User-agent: *
 Allow: /
+Allow: /freight
+Allow: /freight/
+Allow: /corridors
+Allow: /corridors/
+Allow: /fleet
+Allow: /fleet/
+Allow: /about
+Allow: /contact
+Allow: /partner
 Disallow: /api/
 Disallow: /trips/
+Disallow: /track/
 
 Sitemap: https://zuggi.in/sitemap.xml
+Sitemap: https://zuggi.in/sitemap-freight.xml

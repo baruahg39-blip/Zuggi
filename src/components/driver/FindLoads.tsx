@@ -24,6 +24,11 @@ import { CommercialVehicle, LoadItem, Quotation, User, VehicleCategoryType } fro
 import { logisticsStore } from '../../services/store';
 import { PartnerOnboardingModal } from '../partner/PartnerOnboardingModal';
 import { showToast } from '../shared/Toast';
+import {
+  applyClientSeo,
+  buildClientFreightDirectoryJsonLd,
+  loadItemToPublicFreight
+} from '../../utils/seo';
 
 interface FindLoadsProps {
   currentUser: User;
@@ -104,6 +109,17 @@ export const FindLoads: React.FC<FindLoadsProps> = ({
       return true;
     });
   }, [loads, selectedOrigin, selectedDestination, selectedVehicleType, returnLoadCity]);
+
+  // Inject live freight directory ItemList JSON-LD & meta tags when browsing available loads
+  useEffect(() => {
+    const publicItems = openLoads.map(loadItemToPublicFreight);
+    applyClientSeo({
+      title: 'Live Freight Listings & Truck Loads | Zuggi Partner',
+      description: `Browse ${publicItems.length} active commercial truck loads across Assam, Northeast India & Pan-India. Submit direct transporter quotes with 0% brokerage.`,
+      canonicalPath: '/freight',
+      jsonLd: buildClientFreightDirectoryJsonLd(publicItems)
+    });
+  }, [openLoads]);
 
   // Driver's own submitted bids
   const myBids = useMemo(() => {

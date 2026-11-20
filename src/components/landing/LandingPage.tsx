@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { AppPortalMode } from '../../utils/portalMode';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
+import { navigateSpa } from '../../utils/seo';
 import highwayFleetImg from '../../assets/images/zuggi_highway_fleet_1795160250051.jpg';
 import operationsHubImg from '../../assets/images/zuggi_operations_hub_1795160248893.jpg';
 
@@ -811,27 +812,67 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </p>
             </div>
 
-            {/* Company Links */}
+            {/* Company & SEO Directory Links */}
             <div className="space-y-3">
-              <h3 className="text-xs font-bold text-white uppercase tracking-wider">Company</h3>
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider">Explore Zuggi</h3>
               <ul className="space-y-2 text-xs text-gray-400">
                 <li>
-                  <a href="#about-us" className="hover:text-white transition-colors">
-                    Know About Us
+                  <a
+                    href="/freight"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/freight');
+                    }}
+                    className="hover:text-white transition-colors"
+                  >
+                    Live Freight Listings
                   </a>
                 </li>
                 <li>
-                  <a href="#fleet-network" className="hover:text-white transition-colors">
+                  <a
+                    href="/corridors"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/corridors');
+                    }}
+                    className="hover:text-white transition-colors"
+                  >
+                    Freight Corridors
+                  </a>
+                </li>
+                <li>
+                  <a
+                    href="/fleet"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/fleet');
+                    }}
+                    className="hover:text-white transition-colors"
+                  >
                     5,000+ Fleet Network
                   </a>
                 </li>
                 <li>
-                  <a href="#how-it-works" className="hover:text-white transition-colors">
-                    Vehicle Categories
+                  <a
+                    href="/about"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/about');
+                    }}
+                    className="hover:text-white transition-colors"
+                  >
+                    Know About Us
                   </a>
                 </li>
                 <li>
-                  <a href="#reach-out" className="hover:text-white transition-colors">
+                  <a
+                    href="/contact"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/contact');
+                    }}
+                    className="hover:text-white transition-colors"
+                  >
                     Reach Out to Us
                   </a>
                 </li>

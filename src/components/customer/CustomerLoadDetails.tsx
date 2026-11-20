@@ -33,6 +33,11 @@ import { CashfreeEscrowModal } from '../payments/CashfreeEscrowModal';
 import { RaiseDisputeModal } from '../payments/RaiseDisputeModal';
 import { showToast } from '../shared/Toast';
 import { PaymentReceiptModal } from '../payments/PaymentReceiptModal';
+import {
+  applyClientSeo,
+  buildClientFreightListingJsonLd,
+  loadItemToPublicFreight
+} from '../../utils/seo';
 
 interface CustomerLoadDetailsProps {
   loadId: string;
@@ -93,6 +98,19 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [loadId]);
+
+  // Inject dynamic meta tags & Schema.org Structured Data for this individual freight listing
+  useEffect(() => {
+    if (!load) return;
+    const publicListing = loadItemToPublicFreight(load);
+    applyClientSeo({
+      title: `${publicListing.pickupCity} to ${publicListing.deliveryCity} Load (${publicListing.weightKg}kg) | Zuggi`,
+      description: `${publicListing.goodsCategoryLabel} freight from ${publicListing.pickupCity} to ${publicListing.deliveryCity} (${publicListing.estimatedDistanceKm} km). ${publicListing.requiredVehicleName} on Zuggi.`,
+      canonicalPath: `/freight/${encodeURIComponent(publicListing.id)}`,
+      ogType: 'product',
+      jsonLd: buildClientFreightListingJsonLd(publicListing)
+    });
+  }, [load]);
 
   if (!load) {
     return (

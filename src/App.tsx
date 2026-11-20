@@ -28,15 +28,32 @@ import { KycManagerModal } from './components/shared/KycManagerModal';
 import { SupportTicketModal } from './components/shared/SupportTicketModal';
 import { AuthModal } from './components/auth/AuthModal';
 import { LandingPage } from './components/landing/LandingPage';
+import { PublicRouteView } from './components/landing/PublicRouteView';
 import { MobileAppInstallModal } from './components/mobile/MobileAppInstallModal';
 import { MobileBottomNav } from './components/mobile/MobileBottomNav';
 import { ToastContainer } from './components/shared/Toast';
 import { DriverWebTrackingPage } from './components/tracking/DriverWebTrackingPage';
 import { ShieldAlert, LogIn, Lock, Truck, Building2, ArrowRight, ShieldCheck } from 'lucide-react';
 import { AppPortalMode, detectPortalMode, isPartnerRole, navigateToPortal } from './utils/portalMode';
+import { applyClientSeo } from './utils/seo';
+
+function isPublicCatalogRoute(pathname: string): boolean {
+  const clean = (pathname || '/').replace(/\/+$/, '') || '/';
+  return (
+    clean === '/freight' ||
+    clean.startsWith('/freight/') ||
+    clean === '/corridors' ||
+    clean.startsWith('/corridors/') ||
+    clean === '/fleet' ||
+    clean.startsWith('/fleet/')
+  );
+}
 
 export default function App() {
   const [portalMode, setPortalMode] = useState<AppPortalMode>(() => detectPortalMode());
+  const [currentPath, setCurrentPath] = useState<string>(() =>
+    typeof window !== 'undefined' ? window.location.pathname : '/'
+  );
   const [currentUser, setCurrentUser] = useState<User | null>(() => logisticsStore.getCurrentUser());
   const [quotaExceeded, setQuotaExceeded] = useState(false);
 
@@ -101,11 +118,14 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Sync portal mode on browser back/forward + swap PWA manifest & page title dynamically
+  // Sync portal mode and pathname on browser back/forward + swap PWA manifest & page SEO dynamically
   useEffect(() => {
-    const syncPortal = () => setPortalMode(detectPortalMode());
-    window.addEventListener('popstate', syncPortal);
-    return () => window.removeEventListener('popstate', syncPortal);
+    const syncPortalAndRoute = () => {
+      setPortalMode(detectPortalMode());
+      setCurrentPath(window.location.pathname || '/');
+    };
+    window.addEventListener('popstate', syncPortalAndRoute);
+    return () => window.removeEventListener('popstate', syncPortalAndRoute);
   }, []);
 
   useEffect(() => {
@@ -114,10 +134,55 @@ export default function App() {
     if (manifestLink) {
       manifestLink.setAttribute('href', portalMode === 'partner' ? '/manifest-partner.json' : '/manifest.json');
     }
-    document.title = portalMode === 'partner'
-      ? 'Zuggi Partner — Driver & Fleet App'
-      : 'Zuggi — Shipper & Admin Web';
-  }, [portalMode]);
+
+    // Dynamic catalog routes manage their own route-specific title, meta & JSON-LD
+    if (!currentUser && isPublicCatalogRoute(currentPath)) {
+      return;
+    }
+
+    const clean = (currentPath || '/').replace(/\/+$/, '') || '/';
+    if (!currentUser && clean === '/about') {
+      applyClientSeo({
+        title: 'About Zuggi — 5,000+ Verified Commercial Truck Network',
+        description:
+          'Learn how Zuggi connects commercial shippers directly with 5,000+ Parivahan-verified trucks across Assam, Northeast India & Pan-India with live GPS and escrow.',
+        canonicalPath: '/about',
+        robots: 'index, follow'
+      });
+      setTimeout(() => document.getElementById('about-us')?.scrollIntoView({ behavior: 'smooth' }), 120);
+      return;
+    }
+
+    if (!currentUser && clean === '/contact') {
+      applyClientSeo({
+        title: 'Contact Zuggi Freight — 24/7 Dispatch & Fleet Desk',
+        description:
+          'Reach Zuggi Freight dispatch support in Guwahati, Assam at +91 96789 44132 or support@zuggi.in for shipper bookings, truck attachment, and enterprise logistics.',
+        canonicalPath: '/contact',
+        robots: 'index, follow'
+      });
+      setTimeout(() => document.getElementById('reach-out')?.scrollIntoView({ behavior: 'smooth' }), 120);
+      return;
+    }
+
+    if (portalMode === 'partner') {
+      applyClientSeo({
+        title: 'Zuggi Partner — Driver & Fleet Owner Freight App',
+        description:
+          'Attach your commercial truck or fleet with Zuggi. Bid directly on verified loads across Assam & India with 0% brokerage, 90% pickup advance & zero empty returns.',
+        canonicalPath: '/partner',
+        robots: 'index, follow'
+      });
+    } else if (!customerActiveLoadId) {
+      applyClientSeo({
+        title: 'Zuggi — Book Verified Trucks & Commercial Freight Online',
+        description:
+          'Zuggi connects businesses with 5,000+ Parivahan-verified trucks across Assam, Northeast & Pan-India. Direct quotes, live GPS tracking, GST invoices & escrow.',
+        canonicalPath: '/',
+        robots: 'index, follow'
+      });
+    }
+  }, [portalMode, currentPath, currentUser, customerActiveLoadId]);
 
   // Reset sub-navigation states cleanly whenever active user or role changes
   useEffect(() => {
@@ -209,14 +274,22 @@ export default function App() {
             : 'flex-1 p-2.5 sm:p-5 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto w-full'
         }
       >
-        {/* If user is not logged in: Stay strictly on signed-out portal landing page */}
+        {/* If user is not logged in: Render dynamic SEO route views (/freight, /corridors, /fleet) or main landing page */}
         {!currentUser ? (
-          <LandingPage
-            portalMode={portalMode}
-            onOpenAuth={handleOpenAuthModal}
-            onOpenInstall={() => setShowInstallModal(true)}
-            onSwitchPortal={(mode) => navigateToPortal(mode)}
-          />
+          isPublicCatalogRoute(currentPath) ? (
+            <PublicRouteView
+              pathname={currentPath}
+              onOpenAuth={handleOpenAuthModal}
+              onSwitchToPartner={() => navigateToPortal('partner')}
+            />
+          ) : (
+            <LandingPage
+              portalMode={portalMode}
+              onOpenAuth={handleOpenAuthModal}
+              onOpenInstall={() => setShowInstallModal(true)}
+              onSwitchPortal={(mode) => navigateToPortal(mode)}
+            />
+          )
         ) : currentUser.isBlocked && currentUser.role !== 'admin' ? (
           <div className="min-h-[55vh] flex flex-col items-center justify-center text-center p-8 space-y-4 bg-white rounded-3xl border border-rose-200 shadow-lg max-w-xl mx-auto my-8">
             <div className="w-16 h-16 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600">

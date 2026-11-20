@@ -191,6 +191,38 @@ export async function findSupabaseUserByPhone(cleanTenDigits: string): Promise<a
   }
 }
 
+export async function listSupabaseLoads(limit = 300): Promise<Array<{ data: any; updated_at?: string }>> {
+  const client = getSupabaseClient();
+  if (!client) return [];
+  try {
+    const { data, error } = await client
+      .from('vs_loads')
+      .select('data, updated_at')
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+    if (error || !Array.isArray(data)) return [];
+    return data.filter((row: any) => row && row.data && row.data.id);
+  } catch {
+    return [];
+  }
+}
+
+export async function findSupabaseLoadById(loadId: string): Promise<{ data: any; updated_at?: string } | null> {
+  const client = getSupabaseClient();
+  if (!client || !loadId) return null;
+  try {
+    const { data, error } = await client
+      .from('vs_loads')
+      .select('data, updated_at')
+      .eq('id', loadId)
+      .limit(1);
+    if (error || !Array.isArray(data) || data.length === 0 || !data[0]?.data) return null;
+    return data[0];
+  } catch {
+    return null;
+  }
+}
+
 export async function persistTripToSupabase(trip: {
   id: string;
   load_id: string;

@@ -1,12 +1,30 @@
 import express from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { cashfreeServer } from './server/cashfree.js';
 import { tripsRouter } from './server/trips.js';
-import { supabaseRouter, findSupabaseUserByPhone, upsertSupabaseRecords } from './server/supabase.js';
+import {
+  supabaseRouter,
+  findSupabaseUserByPhone,
+  upsertSupabaseRecords,
+  listSupabaseLoads,
+  findSupabaseLoadById
+} from './server/supabase.js';
+import {
+  SEO_CORRIDORS,
+  SEO_VEHICLE_CATEGORIES,
+  mergePublicFreightListings,
+  sanitizePublicFreightListing,
+  generateSiteSitemapXml,
+  generateFreightOnlySitemapXml,
+  resolveRouteSeo,
+  injectSeoIntoHtml,
+  type PublicFreightListing
+} from './server/seo.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config(); // fallback to .env if .env.local doesn't exist
@@ -1049,12 +1067,54 @@ app.post('/api/maps/compute-route', async (req, res) => {
   }
 });
 
-// --- SEO CRAWLER ENDPOINTS (robots.txt & sitemap.xml) ---
+// --- PUBLIC FREIGHT CATALOG & SEO CRAWLER ENDPOINTS ---
 const CANONICAL_BASE_URL = (
   process.env.PRIMARY_DOMAIN
     ? `https://${process.env.PRIMARY_DOMAIN.replace(/^https?:\/\//, '')}`
     : process.env.APP_URL || 'https://zuggi.in'
 ).replace(/\/$/, '');
+
+async function fetchPublicFreightCatalog(): Promise<PublicFreightListing[]> {
+  const dbRows = await listSupabaseLoads(300);
+  return mergePublicFreightListings(dbRows);
+}
+
+app.get('/api/public/freight', async (_req, res) => {
+  try {
+    const listings = await fetchPublicFreightCatalog();
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    return res.json({
+      success: true,
+      count: listings.length,
+      listings,
+      corridors: SEO_CORRIDORS,
+      vehicles: SEO_VEHICLE_CATEGORIES
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Failed to load public freight catalog' });
+  }
+});
+
+app.get('/api/public/freight/:loadId', async (req, res) => {
+  try {
+    const loadId = String(req.params.loadId || '').trim();
+    const dbRow = await findSupabaseLoadById(loadId);
+    const catalog = await fetchPublicFreightCatalog();
+    const listing =
+      (dbRow ? sanitizePublicFreightListing(dbRow.data, dbRow.updated_at) : null) ||
+      catalog.find((l) => l.id === loadId) ||
+      null;
+
+    if (!listing) {
+      return res.status(404).json({ success: false, message: 'Freight listing not found' });
+    }
+    const related = catalog.filter((l) => l.id !== listing.id).slice(0, 6);
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    return res.json({ success: true, listing, related });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Failed to fetch freight listing' });
+  }
+});
 
 app.get('/robots.txt', (_req, res) => {
   res.type('text/plain; charset=utf-8');
@@ -1063,63 +1123,107 @@ app.get('/robots.txt', (_req, res) => {
     [
       'User-agent: *',
       'Allow: /',
+      'Allow: /freight',
+      'Allow: /freight/',
+      'Allow: /corridors',
+      'Allow: /corridors/',
+      'Allow: /fleet',
+      'Allow: /fleet/',
+      'Allow: /about',
+      'Allow: /contact',
+      'Allow: /partner',
       'Disallow: /api/',
       'Disallow: /trips/',
+      'Disallow: /track/',
       '',
-      `Sitemap: ${CANONICAL_BASE_URL}/sitemap.xml`
+      `Sitemap: ${CANONICAL_BASE_URL}/sitemap.xml`,
+      `Sitemap: ${CANONICAL_BASE_URL}/sitemap-freight.xml`
     ].join('\n')
   );
 });
 
-app.get('/sitemap.xml', (_req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
-  res.type('application/xml; charset=utf-8');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.send(`<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>${CANONICAL_BASE_URL}/</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-  <url>
-    <loc>${CANONICAL_BASE_URL}/#about</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>${CANONICAL_BASE_URL}/#fleet-network</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>${CANONICAL_BASE_URL}/#corridors</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>${CANONICAL_BASE_URL}/#contact</loc>
-    <lastmod>${today}</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.7</priority>
-  </url>
-</urlset>`);
+app.get('/sitemap.xml', async (_req, res) => {
+  try {
+    const listings = await fetchPublicFreightCatalog();
+    const xml = generateSiteSitemapXml(CANONICAL_BASE_URL, listings);
+    res.type('application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=1800');
+    res.send(xml);
+  } catch (err) {
+    console.error('[Sitemap Generator Error]', err);
+    const fallbackXml = generateSiteSitemapXml(CANONICAL_BASE_URL, mergePublicFreightListings([]));
+    res.type('application/xml; charset=utf-8');
+    res.send(fallbackXml);
+  }
 });
 
-// Mount Vite or serve static files
+app.get('/sitemap-freight.xml', async (_req, res) => {
+  try {
+    const listings = await fetchPublicFreightCatalog();
+    const xml = generateFreightOnlySitemapXml(CANONICAL_BASE_URL, listings);
+    res.type('application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1200');
+    res.send(xml);
+  } catch (err) {
+    console.error('[Freight Sitemap Error]', err);
+    const fallbackXml = generateFreightOnlySitemapXml(CANONICAL_BASE_URL, mergePublicFreightListings([]));
+    res.type('application/xml; charset=utf-8');
+    res.send(fallbackXml);
+  }
+});
+
+function getRequestPathname(req: express.Request): string {
+  return (req.originalUrl || req.url || req.path || '/').split('?')[0] || '/';
+}
+
+function isHtmlPageRequest(req: express.Request): boolean {
+  if (req.method !== 'GET') return false;
+  const pathname = getRequestPathname(req);
+  if (
+    pathname.startsWith('/api/') ||
+    pathname.startsWith('/trips/') ||
+    pathname.startsWith('/assets/') ||
+    pathname.startsWith('/src/') ||
+    pathname.startsWith('/node_modules/') ||
+    pathname.startsWith('/@')
+  ) {
+    return false;
+  }
+  // Ignore static files with extensions (e.g., .js, .css, .png, .svg, .json, .xml, .txt, .ico)
+  const lastSegment = pathname.split('/').pop() || '';
+  if (lastSegment.includes('.')) return false;
+  return true;
+}
+
+// Mount Vite or serve static files with dynamic server-side SEO & JSON-LD injection
 if (process.env.NODE_ENV !== 'production') {
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({
     server: { middlewareMode: true },
-    appType: 'spa'
+    appType: 'custom'
   });
+
   app.use(vite.middlewares);
+
+  app.use('*', async (req, res, next) => {
+    if (!isHtmlPageRequest(req)) return next();
+    try {
+      const rawTemplate = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
+      const listings = await fetchPublicFreightCatalog();
+      const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
+      const seoInjected = injectSeoIntoHtml(rawTemplate, seo);
+      const html = await vite.transformIndexHtml(req.originalUrl, seoInjected);
+      res.status(seo.httpStatus || 200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
+    } catch (e: any) {
+      vite.ssrFixStacktrace(e);
+      next(e);
+    }
+  });
 } else {
   const distDir = path.resolve(__dirname, 'dist');
+  const distIndexPath = path.join(distDir, 'index.html');
+  const cachedDistHtml = fs.existsSync(distIndexPath) ? fs.readFileSync(distIndexPath, 'utf-8') : '';
+
   app.use(
     '/assets',
     express.static(path.join(distDir, 'assets'), {
@@ -1133,10 +1237,21 @@ if (process.env.NODE_ENV !== 'production') {
       maxAge: '1h'
     })
   );
-  app.get('*', (_req, res) => {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
-    res.sendFile(path.join(distDir, 'index.html'));
+  app.get('*', async (req, res) => {
+    try {
+      const template = cachedDistHtml || fs.readFileSync(distIndexPath, 'utf-8');
+      const listings = await fetchPublicFreightCatalog();
+      const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
+      const html = injectSeoIntoHtml(template, seo);
+      res.status(seo.httpStatus || 200);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      return res.send(html);
+    } catch (err) {
+      console.error('[SSR SEO Render Fallback]', err);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.sendFile(distIndexPath);
+    }
   });
 }
 

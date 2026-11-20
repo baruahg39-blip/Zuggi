@@ -827,6 +827,67 @@ app.post('/api/maps/compute-route', async (req, res) => {
   }
 });
 
+// --- SEO CRAWLER ENDPOINTS (robots.txt & sitemap.xml) ---
+const CANONICAL_BASE_URL = (
+  process.env.PRIMARY_DOMAIN
+    ? `https://${process.env.PRIMARY_DOMAIN.replace(/^https?:\/\//, '')}`
+    : process.env.APP_URL || 'https://zuggi.in'
+).replace(/\/$/, '');
+
+app.get('/robots.txt', (_req, res) => {
+  res.type('text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.send(
+    [
+      'User-agent: *',
+      'Allow: /',
+      'Disallow: /api/',
+      'Disallow: /trips/',
+      '',
+      `Sitemap: ${CANONICAL_BASE_URL}/sitemap.xml`
+    ].join('\n')
+  );
+});
+
+app.get('/sitemap.xml', (_req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  res.type('application/xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${CANONICAL_BASE_URL}/</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>${CANONICAL_BASE_URL}/#about</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>${CANONICAL_BASE_URL}/#fleet-network</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>${CANONICAL_BASE_URL}/#corridors</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>${CANONICAL_BASE_URL}/#contact</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+</urlset>`);
+});
+
 // Mount Vite or serve static files
 if (process.env.NODE_ENV !== 'production') {
   const { createServer: createViteServer } = await import('vite');
@@ -836,9 +897,24 @@ if (process.env.NODE_ENV !== 'production') {
   });
   app.use(vite.middlewares);
 } else {
-  app.use(express.static(path.resolve(__dirname, 'dist')));
+  const distDir = path.resolve(__dirname, 'dist');
+  app.use(
+    '/assets',
+    express.static(path.join(distDir, 'assets'), {
+      maxAge: '1y',
+      immutable: true
+    })
+  );
+  app.use(
+    express.static(distDir, {
+      index: false,
+      maxAge: '1h'
+    })
+  );
   app.get('*', (_req, res) => {
-    res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+    res.sendFile(path.join(distDir, 'index.html'));
   });
 }
 

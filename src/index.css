@@ -12,6 +12,16 @@
     --brand-error: #DC3545;
   }
 
+  html {
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
   html, body {
     overflow-x: hidden;
     width: 100%;

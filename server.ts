@@ -100,6 +100,61 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// --- WEBSITE CONTACT / CALLBACK INQUIRY ENDPOINT ---
+interface ContactInquiry {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  topic: string;
+  message: string;
+  createdAt: string;
+}
+
+const contactInquiries: ContactInquiry[] = [];
+
+app.post('/api/contact', (req, res) => {
+  const { name, phone, email, topic, message } = req.body || {};
+  const cleanName = String(name || '').trim();
+  const cleanPhone = String(phone || '').replace(/[^\d+]/g, '').trim();
+  const cleanMessage = String(message || '').trim();
+
+  if (cleanName.length < 2) {
+    return res.status(400).json({ success: false, message: 'Please enter your full name.' });
+  }
+  if (cleanPhone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit phone number.' });
+  }
+  if (cleanMessage.length < 5) {
+    return res.status(400).json({ success: false, message: 'Please tell us briefly how we can help.' });
+  }
+
+  const refId = `ZUG-INQ-${Math.floor(100000 + Math.random() * 900000)}`;
+  const inquiry: ContactInquiry = {
+    id: refId,
+    name: cleanName,
+    phone: cleanPhone,
+    email: String(email || '').trim() || undefined,
+    topic: String(topic || 'General Freight Inquiry').trim(),
+    message: cleanMessage,
+    createdAt: new Date().toISOString()
+  };
+
+  contactInquiries.unshift(inquiry);
+  if (contactInquiries.length > 200) contactInquiries.pop();
+
+  console.log(`[Zuggi Contact Inquiry] ${refId} | ${inquiry.name} (${inquiry.phone}) | ${inquiry.topic}`);
+  return res.json({
+    success: true,
+    referenceId: refId,
+    message: 'Thank you for reaching out to Zuggi. Our operations team will contact you shortly.'
+  });
+});
+
+app.get('/api/contact', (_req, res) => {
+  res.json({ success: true, count: contactInquiries.length, inquiries: contactInquiries.slice(0, 50) });
+});
+
 // --- TRIP ASSIGNMENT & LIVE VEHICLE TRACKING ROUTES ---
 app.use('/trips', tripsRouter);
 app.use('/api/trips', tripsRouter);

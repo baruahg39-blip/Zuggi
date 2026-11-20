@@ -75,28 +75,75 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <>
       <header className="sticky top-0 z-40 bg-[#171318] text-white border-b border-gray-800 shadow-lg">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-3">
-          {/* Brand Logo & Name */}
-          <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-2xl bg-[#E83E83] flex items-center justify-center text-white font-black shadow-md shadow-[#E83E83]/30 shrink-0">
-              <Truck className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-base sm:text-lg font-black tracking-tight text-white">
-                  {portalMode === 'partner' ? 'Zuggi Partner' : 'Zuggi'}
-                </span>
-                <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded-full bg-[#FFF0F6] text-[#E83E83] font-black uppercase tracking-wider">
-                  {portalMode === 'partner' ? 'Driver App' : 'Freight'}
-                </span>
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-4 sm:gap-8">
+          {/* Zone 1: Brand Logo & Name */}
+          {!currentUser && portalMode === 'web' ? (
+            <a
+              href="#top"
+              className="flex items-center gap-2.5 shrink-0 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E83E83] rounded-xl"
+            >
+              <div className="w-9 h-9 rounded-xl bg-[#E83E83] flex items-center justify-center text-white shrink-0">
+                <Truck className="w-5 h-5 text-white" />
               </div>
-              <p className="text-[10px] text-gray-400 hidden sm:block">
-                {portalMode === 'partner' ? 'Driver & Fleet Owner Mobile Portal' : 'Shipper & Governance Web Portal'}
-              </p>
+              <span className="text-lg font-extrabold tracking-tight text-white whitespace-nowrap shrink-0">
+                Zuggi
+              </span>
+            </a>
+          ) : (
+            <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
+              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-2xl bg-[#E83E83] flex items-center justify-center text-white font-black shadow-md shadow-[#E83E83]/30 shrink-0">
+                <Truck className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-base sm:text-lg font-black tracking-tight text-white whitespace-nowrap shrink-0">
+                    {portalMode === 'partner' ? 'Zuggi Partner' : 'Zuggi'}
+                  </span>
+                  <span className="text-[10px] sm:text-xs px-2 py-0.5 rounded-full bg-[#FFF0F6] text-[#E83E83] font-black uppercase tracking-wider">
+                    {portalMode === 'partner' ? 'Driver App' : 'Freight'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-gray-400 hidden sm:block">
+                  {portalMode === 'partner' ? 'Driver & Fleet Owner Mobile Portal' : 'Shipper & Governance Web Portal'}
+                </p>
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Right Actions: Portal Badge, Switch Portal, Notifications, Support, Profile, Logout */}
+          {/* Zone 2: Public Website Navigation Links (Signed-Out Web Portal) */}
+          {!currentUser && portalMode === 'web' && (
+            <nav
+              aria-label="Primary website navigation"
+              className="hidden md:flex items-center gap-7 text-sm font-medium text-gray-300"
+            >
+              <a
+                href="#about-us"
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
+              >
+                About Us
+              </a>
+              <a
+                href="#fleet-network"
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
+              >
+                Fleet Network
+              </a>
+              <a
+                href="#how-it-works"
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
+              >
+                How It Works
+              </a>
+              <a
+                href="#reach-out"
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
+              >
+                Reach Out
+              </a>
+            </nav>
+          )}
+
+          {/* Zone 3: Right Actions */}
           <div className="flex items-center gap-1 sm:gap-2 shrink-0">
             {/* Active Portal Badge */}
             {currentUser && (

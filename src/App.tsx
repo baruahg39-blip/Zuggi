@@ -202,7 +202,13 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 p-2.5 sm:p-5 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto w-full">
+      <main
+        className={
+          !currentUser && portalMode === 'web'
+            ? 'flex-1 w-full'
+            : 'flex-1 p-2.5 sm:p-5 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto w-full'
+        }
+      >
         {/* If user is not logged in: Stay strictly on signed-out portal landing page */}
         {!currentUser ? (
           <LandingPage

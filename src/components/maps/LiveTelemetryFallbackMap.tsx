@@ -32,7 +32,7 @@ export interface LiveTelemetryFallbackMapProps {
   deliveryRadiusMeters?: number;
   insidePickup?: boolean;
   insideDelivery?: boolean;
-  reason?: 'missing_key' | 'auth_error';
+  reason?: 'missing_key' | 'auth_error' | 'quota_exceeded';
 }
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -564,10 +564,12 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
         </div>
       </div>
 
-      {/* Subtle status cue only when auth failed */}
-      {reason === 'auth_error' && (
+      {/* Subtle status cue only when auth or quota failed */}
+      {(reason === 'auth_error' || reason === 'quota_exceeded') && (
         <div className="bg-amber-950/90 border-t border-amber-800/70 px-3 py-1 text-[10px] text-amber-200 text-center">
-          Google Maps road tiles could not authenticate for this domain — Live GPS Telemetry Radar active.
+          {reason === 'quota_exceeded'
+            ? 'Google Maps tile quota temporarily reached — Live GPS Telemetry Radar active.'
+            : 'Google Maps road tiles could not authenticate for this domain — Live GPS Telemetry Radar active.'}
         </div>
       )}
     </div>

@@ -27,19 +27,11 @@ export const GeofenceOverlay: React.FC<GeofenceOverlayProps> = ({
   const pickupCircleRef = useRef<google.maps.Circle | null>(null);
   const deliveryCircleRef = useRef<google.maps.Circle | null>(null);
 
+  // Create circles once per map instance and clean up only on unmount / map change
   useEffect(() => {
     if (!map || !mapsLib) return;
 
-    if (pickupCircleRef.current) {
-      pickupCircleRef.current.setMap(null);
-      pickupCircleRef.current = null;
-    }
-    if (deliveryCircleRef.current) {
-      deliveryCircleRef.current.setMap(null);
-      deliveryCircleRef.current = null;
-    }
-
-    pickupCircleRef.current = new mapsLib.Circle({
+    const pickupCircle = new mapsLib.Circle({
       map,
       center: { lat: pickup.lat, lng: pickup.lng },
       radius: Math.max(150, pickupRadiusMeters),
@@ -52,7 +44,7 @@ export const GeofenceOverlay: React.FC<GeofenceOverlayProps> = ({
       zIndex: 1
     });
 
-    deliveryCircleRef.current = new mapsLib.Circle({
+    const deliveryCircle = new mapsLib.Circle({
       map,
       center: { lat: delivery.lat, lng: delivery.lng },
       radius: Math.max(150, deliveryRadiusMeters),
@@ -65,19 +57,38 @@ export const GeofenceOverlay: React.FC<GeofenceOverlayProps> = ({
       zIndex: 1
     });
 
+    pickupCircleRef.current = pickupCircle;
+    deliveryCircleRef.current = deliveryCircle;
+
     return () => {
-      if (pickupCircleRef.current) {
-        pickupCircleRef.current.setMap(null);
-        pickupCircleRef.current = null;
-      }
-      if (deliveryCircleRef.current) {
-        deliveryCircleRef.current.setMap(null);
-        deliveryCircleRef.current = null;
-      }
+      pickupCircle.setMap(null);
+      deliveryCircle.setMap(null);
+      pickupCircleRef.current = null;
+      deliveryCircleRef.current = null;
     };
+  }, [map, mapsLib]);
+
+  // Update circle coordinates, radii, and active inside states in-place without recreating overlays
+  useEffect(() => {
+    if (pickupCircleRef.current) {
+      pickupCircleRef.current.setOptions({
+        center: { lat: pickup.lat, lng: pickup.lng },
+        radius: Math.max(150, pickupRadiusMeters),
+        strokeOpacity: insidePickup ? 0.95 : 0.75,
+        strokeWeight: insidePickup ? 3 : 2,
+        fillOpacity: insidePickup ? 0.24 : 0.12
+      });
+    }
+    if (deliveryCircleRef.current) {
+      deliveryCircleRef.current.setOptions({
+        center: { lat: delivery.lat, lng: delivery.lng },
+        radius: Math.max(150, deliveryRadiusMeters),
+        strokeOpacity: insideDelivery ? 0.95 : 0.75,
+        strokeWeight: insideDelivery ? 3 : 2,
+        fillOpacity: insideDelivery ? 0.24 : 0.12
+      });
+    }
   }, [
-    map,
-    mapsLib,
     pickup.lat,
     pickup.lng,
     delivery.lat,

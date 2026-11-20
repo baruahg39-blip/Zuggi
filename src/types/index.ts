@@ -22,6 +22,9 @@ export interface User {
   blockedReason?: string;
   blockedAt?: string;
   isTestAccount?: boolean;
+  hasPasscode?: boolean;
+  passcodeHash?: string;
+  passcodeUpdatedAt?: string;
   createdAt: string;
 }
 

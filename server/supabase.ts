@@ -132,13 +132,62 @@ export async function upsertSupabaseRecords(table: SupabaseSyncTable, records: a
   const client = getSupabaseClient();
   if (!client || records.length === 0) return { ok: false, error: 'Not configured or empty' };
   try {
-    const rows = records.filter((r) => r && r.id).map((r) => buildRowForTable(table, r));
-    if (rows.length === 0) return { ok: true };
+    let prepared = records.filter((r) => r && r.id);
+    if (prepared.length === 0) return { ok: true };
+
+    // Preserve server-side passcodeHash when client-side vs_users sync runs without secret hashes
+    if (table === 'vs_users') {
+      const idsNeedingPreserve = prepared.filter((r) => !r.passcodeHash).map((r) => String(r.id));
+      if (idsNeedingPreserve.length > 0) {
+        const { data: existingRows } = await client
+          .from('vs_users')
+          .select('id, data')
+          .in('id', idsNeedingPreserve);
+        if (Array.isArray(existingRows) && existingRows.length > 0) {
+          const existingMap = new Map(existingRows.map((row: any) => [String(row.id), row.data || {}]));
+          prepared = prepared.map((rec) => {
+            if (rec.passcodeHash) return rec;
+            const prev = existingMap.get(String(rec.id));
+            if (prev?.passcodeHash) {
+              return {
+                ...rec,
+                hasPasscode: true,
+                passcodeHash: prev.passcodeHash,
+                passcodeUpdatedAt: rec.passcodeUpdatedAt || prev.passcodeUpdatedAt
+              };
+            }
+            return rec;
+          });
+        }
+      }
+    }
+
+    const rows = prepared.map((r) => buildRowForTable(table, r));
     const { error } = await client.from(table).upsert(rows, { onConflict: 'id' });
     if (error) return { ok: false, error: error.message };
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Supabase upsert failed' };
+  }
+}
+
+export async function findSupabaseUserByPhone(cleanTenDigits: string): Promise<any | null> {
+  const client = getSupabaseClient();
+  if (!client || !cleanTenDigits || cleanTenDigits.length !== 10) return null;
+  try {
+    const { data, error } = await client
+      .from('vs_users')
+      .select('data')
+      .or(`phone.ilike.%${cleanTenDigits}%`)
+      .order('updated_at', { ascending: false })
+      .limit(5);
+
+    if (error || !Array.isArray(data) || data.length === 0) return null;
+    // Prefer the record that already has a passcodeHash configured
+    const withPasscode = data.find((r: any) => r?.data?.passcodeHash);
+    return (withPasscode || data[0])?.data || null;
+  } catch {
+    return null;
   }
 }
 

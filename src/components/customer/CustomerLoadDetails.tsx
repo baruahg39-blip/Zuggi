@@ -26,7 +26,6 @@ import {
 } from 'lucide-react';
 import { Booking, LoadItem, Quotation, TripFeedback } from '../../types';
 import { logisticsStore } from '../../services/store';
-import { LiveTrackingMap } from '../maps/LiveTrackingMap';
 import { ShipperLiveTrackingScreen } from '../tracking/ShipperLiveTrackingScreen';
 import { DriverGpsSimulatorModal } from '../tracking/DriverGpsSimulatorModal';
 import { TripFeedbackModal } from './TripFeedbackModal';

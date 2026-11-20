@@ -1,11 +1,12 @@
 import express from 'express';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { cashfreeServer } from './server/cashfree.js';
 import { tripsRouter } from './server/trips.js';
-import { supabaseRouter } from './server/supabase.js';
+import { supabaseRouter, findSupabaseUserByPhone, upsertSupabaseRecords } from './server/supabase.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config(); // fallback to .env if .env.local doesn't exist
@@ -320,6 +321,10 @@ app.post('/api/auth/verify-otp', (req, res) => {
 
     if (isDemoMatch || isTestMatch) {
       otpStore.delete(phone);
+      const clean10 = normalizeTenDigitPhone(phone);
+      if (clean10) {
+        otpVerifiedStore.set(clean10, Date.now() + OTP_VERIFIED_TTL_MS);
+      }
       console.log(`[OTP Verified] Demo/Sandbox account ${phone} authenticated.`);
       return res.json({
         success: true,
@@ -352,8 +357,12 @@ app.post('/api/auth/verify-otp', (req, res) => {
       });
     }
 
-    // OTP matched: remove it to prevent replay attacks
+    // OTP matched: remove it to prevent replay attacks and grant 15-minute passcode-setup window
     otpStore.delete(phone);
+    const clean10 = normalizeTenDigitPhone(phone);
+    if (clean10) {
+      otpVerifiedStore.set(clean10, Date.now() + OTP_VERIFIED_TTL_MS);
+    }
 
     console.log(`[OTP Verified] User with phone ${phone} authenticated.`);
     return res.json({
@@ -368,6 +377,219 @@ app.post('/api/auth/verify-otp', (req, res) => {
       success: false,
       message: 'Internal server error verifying OTP.'
     });
+  }
+});
+
+// --- PASSCODE AUTHENTICATION (No-OTP Returning Login for Shippers, Drivers & Vehicle Owners) ---
+
+const OTP_VERIFIED_TTL_MS = 15 * 60 * 1000; // 15 minutes after OTP verify to complete profile + passcode
+const otpVerifiedStore = new Map<string, number>(); // clean10 -> expiresAt
+const passcodeUserStore = new Map<string, any>(); // clean10 -> user record with passcodeHash
+const passcodeAttemptStore = new Map<string, { count: number; lockUntil: number }>();
+
+function normalizeTenDigitPhone(raw: string): string {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length > 10 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length > 10) digits = digits.slice(-10);
+  return digits.length === 10 ? digits : '';
+}
+
+function hashPasscode(passcode: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(passcode, salt, 32).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+function verifyPasscodeHash(passcode: string, storedHash: string): boolean {
+  if (!storedHash || !storedHash.startsWith('scrypt:')) return false;
+  const parts = storedHash.split(':');
+  if (parts.length !== 3) return false;
+  const [, salt, expectedHex] = parts;
+  try {
+    const derived = crypto.scryptSync(passcode, salt, 32);
+    const expected = Buffer.from(expectedHex, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeUserForClient(user: any) {
+  if (!user) return null;
+  const { passcodeHash: _hidden, ...safeUser } = user;
+  return {
+    ...safeUser,
+    hasPasscode: Boolean(user.passcodeHash || user.hasPasscode)
+  };
+}
+
+// 3. Endpoint: Check if mobile number already has a registered account + passcode
+app.post('/api/auth/check-account', async (req, res) => {
+  try {
+    const clean10 = normalizeTenDigitPhone(req.body?.phone);
+    if (!clean10) {
+      return res.status(400).json({ success: false, message: 'Valid 10-digit mobile number is required.' });
+    }
+
+    let userRecord = passcodeUserStore.get(clean10) || null;
+    if (!userRecord || !userRecord.passcodeHash) {
+      const dbUser = await findSupabaseUserByPhone(clean10);
+      if (dbUser) {
+        userRecord = dbUser;
+        passcodeUserStore.set(clean10, dbUser);
+      }
+    }
+
+    if (!userRecord) {
+      return res.json({
+        success: true,
+        exists: false,
+        hasPasscode: false
+      });
+    }
+
+    return res.json({
+      success: true,
+      exists: true,
+      hasPasscode: Boolean(userRecord.passcodeHash || userRecord.hasPasscode),
+      name: userRecord.name || '',
+      role: userRecord.role || 'customer',
+      isBlocked: Boolean(userRecord.isBlocked),
+      blockedReason: userRecord.blockedReason || undefined
+    });
+  } catch (err: any) {
+    console.error('[Check Account Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to check account status.' });
+  }
+});
+
+// 4. Endpoint: Set or Reset Login Passcode (requires recent OTP verification)
+app.post('/api/auth/set-passcode', async (req, res) => {
+  try {
+    const { phone, passcode, userRecord } = req.body || {};
+    const clean10 = normalizeTenDigitPhone(phone);
+    const cleanPasscode = String(passcode || '').trim();
+
+    if (!clean10) {
+      return res.status(400).json({ success: false, message: 'Valid 10-digit mobile number is required.' });
+    }
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Passcode must be 4 to 6 numeric digits.'
+      });
+    }
+
+    const verifiedUntil = otpVerifiedStore.get(clean10) || 0;
+    if (Date.now() > verifiedUntil) {
+      return res.status(403).json({
+        success: false,
+        message: 'OTP verification expired. Please verify your mobile number via OTP first.'
+      });
+    }
+
+    const existing = passcodeUserStore.get(clean10) || (await findSupabaseUserByPhone(clean10)) || {};
+    const hashed = hashPasscode(cleanPasscode);
+    const now = new Date().toISOString();
+
+    const mergedUser = {
+      ...existing,
+      ...(userRecord && typeof userRecord === 'object' ? userRecord : {}),
+      id: (userRecord?.id || existing?.id || `usr_${clean10}`),
+      phone: `+91 ${clean10}`,
+      hasPasscode: true,
+      passcodeHash: hashed,
+      passcodeUpdatedAt: now
+    };
+
+    passcodeUserStore.set(clean10, mergedUser);
+    passcodeAttemptStore.delete(clean10);
+    await upsertSupabaseRecords('vs_users', [mergedUser]);
+
+    console.log(`[Passcode Set] Login passcode configured for +91 ${clean10} (${mergedUser.role || 'customer'})`);
+    return res.json({
+      success: true,
+      message: 'Login passcode saved! You can now sign in without OTP.',
+      user: sanitizeUserForClient(mergedUser)
+    });
+  } catch (err: any) {
+    console.error('[Set Passcode Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save login passcode.' });
+  }
+});
+
+// 5. Endpoint: Sign In directly with Mobile Number + Passcode (No OTP required)
+app.post('/api/auth/login-passcode', async (req, res) => {
+  try {
+    const { phone, passcode } = req.body || {};
+    const clean10 = normalizeTenDigitPhone(phone);
+    const cleanPasscode = String(passcode || '').trim();
+
+    if (!clean10) {
+      return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit mobile number.' });
+    }
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      return res.status(400).json({ success: false, message: 'Please enter your 4 to 6-digit numeric passcode.' });
+    }
+
+    // Brute-force protection (5 failed attempts -> 60s lock)
+    const attempt = passcodeAttemptStore.get(clean10);
+    if (attempt && attempt.lockUntil > Date.now()) {
+      const waitSec = Math.ceil((attempt.lockUntil - Date.now()) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: `Too many incorrect passcode attempts. Try again in ${waitSec}s or reset via OTP.`
+      });
+    }
+
+    let userRecord = passcodeUserStore.get(clean10) || null;
+    if (!userRecord || !userRecord.passcodeHash) {
+      const dbUser = await findSupabaseUserByPhone(clean10);
+      if (dbUser) {
+        userRecord = dbUser;
+        passcodeUserStore.set(clean10, dbUser);
+      }
+    }
+
+    if (!userRecord || !userRecord.passcodeHash) {
+      return res.status(404).json({
+        success: false,
+        code: 'NO_PASSCODE',
+        message: 'No passcode found for this mobile number. Please verify once with OTP to set up your passcode.'
+      });
+    }
+
+    if (userRecord.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: `Account suspended: ${userRecord.blockedReason || 'Blocked by Super Admin'}.`
+      });
+    }
+
+    const matched = verifyPasscodeHash(cleanPasscode, userRecord.passcodeHash);
+    if (!matched) {
+      const nextCount = (attempt?.count || 0) + 1;
+      const lockUntil = nextCount >= 5 ? Date.now() + 60 * 1000 : 0;
+      passcodeAttemptStore.set(clean10, { count: nextCount >= 5 ? 0 : nextCount, lockUntil });
+      return res.status(401).json({
+        success: false,
+        message:
+          lockUntil > 0
+            ? 'Too many incorrect passcode attempts. Locked for 60 seconds, or reset via OTP.'
+            : `Incorrect passcode. ${5 - nextCount} attempt${5 - nextCount === 1 ? '' : 's'} remaining.`
+      });
+    }
+
+    passcodeAttemptStore.delete(clean10);
+    console.log(`[Passcode Login] +91 ${clean10} authenticated without OTP.`);
+    return res.json({
+      success: true,
+      user: sanitizeUserForClient(userRecord)
+    });
+  } catch (err: any) {
+    console.error('[Passcode Login Error]:', err);
+    return res.status(500).json({ success: false, message: 'Internal server error verifying passcode.' });
   }
 });
 

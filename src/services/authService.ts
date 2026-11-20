@@ -748,6 +748,7 @@ class AuthService {
     vehicleCategory?: string;
     isFleetOwner?: boolean;
     fleetSize?: number;
+    passcode?: string;
   }): Promise<User> {
     // SECURITY ENFORCEMENT: Public onboarding can NEVER create an admin
     if ((profile.role as string) === 'admin') {
@@ -762,6 +763,9 @@ class AuthService {
     if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) cleanPhone = cleanPhone.slice(2);
     if (cleanPhone.length > 10) cleanPhone = cleanPhone.slice(-10);
 
+    const hasPasscode = Boolean(profile.passcode && /^\d{4,6}$/.test(profile.passcode.trim()));
+    const nowIso = new Date().toISOString();
+
     const updatedUser: User = {
       id: profile.userId,
       name: profile.name,
@@ -774,7 +778,9 @@ class AuthService {
       gstin: profile.gstin,
       pan: profile.pan,
       isVerified: true,
-      createdAt: new Date().toISOString()
+      hasPasscode,
+      passcodeUpdatedAt: hasPasscode ? nowIso : undefined,
+      createdAt: nowIso
     };
 
     let vehicleObj: CommercialVehicle | undefined;
@@ -821,7 +827,11 @@ class AuthService {
       logisticsStore.saveVehicle(vehicleObj);
     }
 
-    // Save to permanent profile registry (preserved across logout and restores on next OTP verification)
+    const localDigest = hasPasscode
+      ? await logisticsStore.computeLocalPasscodeDigest(cleanPhone, profile.passcode!.trim())
+      : undefined;
+
+    // Save to permanent profile registry (preserved across logout and restores on passcode or OTP sign-in)
     logisticsStore.saveRegisteredProfile(
       cleanPhone,
       updatedUser,
@@ -829,7 +839,9 @@ class AuthService {
       {
         dlNumber: profile.dlNumber,
         isFleetOwner: profile.isFleetOwner,
-        fleetSize: profile.fleetSize
+        fleetSize: profile.fleetSize,
+        hasPasscode,
+        passcodeDigest: localDigest
       }
     );
 
@@ -870,7 +882,232 @@ class AuthService {
 
     logisticsStore.saveUser(updatedUser);
     logisticsStore.setCurrentUser(updatedUser);
+
+    if (hasPasscode && profile.passcode) {
+      await this.setupUserPasscode(cleanPhone, profile.passcode.trim(), updatedUser);
+    }
+
     return updatedUser;
+  }
+
+  /**
+   * Checks whether a mobile number already has a registered account and login passcode.
+   * Combines backend Supabase lookup with local registry so returning users can log in with no OTP.
+   */
+  public async checkAccountPasscodeStatus(rawPhone: string): Promise<{
+    exists: boolean;
+    hasPasscode: boolean;
+    name?: string;
+    role?: UserRole;
+    isBlocked?: boolean;
+    blockedReason?: string;
+  }> {
+    let clean = rawPhone.replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    if (clean.length !== 10) return { exists: false, hasPasscode: false };
+
+    const localProfile = logisticsStore.getRegisteredProfile(clean);
+    try {
+      const res = await fetch('/api/auth/check-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: clean })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.exists) {
+          return {
+            exists: true,
+            hasPasscode: Boolean(data.hasPasscode || localProfile?.hasPasscode || localProfile?.passcodeDigest),
+            name: data.name || localProfile?.user?.name,
+            role: (data.role as UserRole) || localProfile?.user?.role,
+            isBlocked: Boolean(data.isBlocked || localProfile?.user?.isBlocked),
+            blockedReason: data.blockedReason || localProfile?.user?.blockedReason
+          };
+        }
+      }
+    } catch {
+      // Fall back to local registry if network is unreachable
+    }
+
+    if (localProfile?.user?.name) {
+      return {
+        exists: true,
+        hasPasscode: Boolean(localProfile.hasPasscode || localProfile.passcodeDigest || localProfile.user.hasPasscode),
+        name: localProfile.user.name,
+        role: localProfile.user.role,
+        isBlocked: localProfile.user.isBlocked,
+        blockedReason: localProfile.user.blockedReason
+      };
+    }
+
+    return { exists: false, hasPasscode: false };
+  }
+
+  /**
+   * Saves a hashed 4-6 digit passcode on both the Express/Supabase backend and local registry.
+   */
+  public async setupUserPasscode(rawPhone: string, passcode: string, userRecord: User): Promise<User> {
+    let clean = rawPhone.replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+
+    const cleanPasscode = passcode.trim();
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      throw new Error('Passcode must be 4 to 6 numeric digits.');
+    }
+
+    const updatedUser: User = {
+      ...userRecord,
+      phone: `+91 ${clean}`,
+      hasPasscode: true,
+      passcodeUpdatedAt: new Date().toISOString()
+    };
+
+    const res = await fetch('/api/auth/set-passcode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: clean,
+        passcode: cleanPasscode,
+        userRecord: updatedUser
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.message || 'Unable to save passcode. Please verify via OTP and try again.');
+    }
+
+    await logisticsStore.setLocalPasscode(clean, cleanPasscode);
+    logisticsStore.saveUser(updatedUser);
+    logisticsStore.setCurrentUser(updatedUser);
+    return updatedUser;
+  }
+
+  /**
+   * Direct returning-user login using Mobile Number + Passcode (NO OTP required).
+   */
+  public async loginWithPasscode(
+    rawPhone: string,
+    passcode: string,
+    preferredRole: UserRole = 'customer'
+  ): Promise<User> {
+    if (preferredRole === 'admin') {
+      throw new Error('Admin access requires Platform Owner Security Passcode verification.');
+    }
+
+    let clean = rawPhone.replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    if (clean.length !== 10) {
+      throw new Error('Please enter a valid 10-digit mobile number.');
+    }
+
+    const cleanPasscode = passcode.trim();
+    if (!/^\d{4,6}$/.test(cleanPasscode)) {
+      throw new Error('Please enter your 4 to 6-digit numeric passcode.');
+    }
+
+    let authenticatedUser: User | null = null;
+    let serverError: string | null = null;
+    let serverStatus = 0;
+
+    try {
+      const res = await fetch('/api/auth/login-passcode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: clean, passcode: cleanPasscode })
+      });
+      serverStatus = res.status;
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && data?.user) {
+        authenticatedUser = data.user as User;
+      } else {
+        serverError = data?.message || 'Invalid mobile number or passcode.';
+      }
+    } catch {
+      // Offline / network fallback checked below against local registry digest
+    }
+
+    // If server returned 401 (wrong passcode) or 429 (locked) or 403 (blocked), do NOT bypass
+    if (!authenticatedUser && (serverStatus === 401 || serverStatus === 429 || serverStatus === 403)) {
+      throw new Error(serverError || 'Incorrect passcode.');
+    }
+
+    // Local registry fallback when server restarted without Supabase or offline
+    const localProfile = logisticsStore.getRegisteredProfile(clean);
+    if (!authenticatedUser && localProfile?.user && localProfile?.passcodeDigest) {
+      const localMatch = await logisticsStore.verifyLocalPasscode(clean, cleanPasscode);
+      if (!localMatch) {
+        throw new Error('Incorrect passcode. Please try again or reset via OTP.');
+      }
+      authenticatedUser = localProfile.user;
+    }
+
+    if (!authenticatedUser) {
+      throw new Error(
+        serverError ||
+          'No passcode found for this mobile number. Please register once with OTP and documents first.'
+      );
+    }
+
+    const existingStoreUser = logisticsStore
+      .getUsers()
+      .find((u) => u.phone.replace(/\D/g, '').endsWith(clean));
+
+    if (authenticatedUser.isBlocked || existingStoreUser?.isBlocked || localProfile?.user?.isBlocked) {
+      throw new Error(
+        `Account suspended: ${
+          existingStoreUser?.blockedReason ||
+          authenticatedUser.blockedReason ||
+          localProfile?.user?.blockedReason ||
+          'Blocked by Super Admin'
+        }.`
+      );
+    }
+
+    const resolvedRole: UserRole =
+      preferredRole === 'customer'
+        ? 'customer'
+        : authenticatedUser.role === 'vehicle_owner' ||
+          authenticatedUser.role === 'transporter' ||
+          authenticatedUser.role === 'fleet_partner' ||
+          authenticatedUser.role === 'driver'
+        ? authenticatedUser.role
+        : preferredRole;
+
+    const restoredUser: User = {
+      ...localProfile?.user,
+      ...authenticatedUser,
+      phone: `+91 ${clean}`,
+      role: resolvedRole,
+      hasPasscode: true,
+      businessName:
+        authenticatedUser.businessName ||
+        localProfile?.user?.businessName ||
+        (resolvedRole === 'customer' ? `${authenticatedUser.name} Logistics` : `${authenticatedUser.name} Transport`)
+    };
+
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('vs_logged_out');
+    }
+
+    if (resolvedRole !== 'customer' && localProfile?.vehicle) {
+      logisticsStore.saveVehicle(localProfile.vehicle);
+    }
+
+    const localDigest = await logisticsStore.computeLocalPasscodeDigest(clean, cleanPasscode);
+    logisticsStore.saveRegisteredProfile(clean, restoredUser, localProfile?.vehicle, {
+      dlNumber: localProfile?.dlNumber,
+      isFleetOwner: localProfile?.isFleetOwner,
+      fleetSize: localProfile?.fleetSize,
+      hasPasscode: true,
+      passcodeDigest: localDigest
+    });
+    logisticsStore.saveUser(restoredUser);
+    logisticsStore.setCurrentUser(restoredUser);
+    return restoredUser;
   }
 
   /**

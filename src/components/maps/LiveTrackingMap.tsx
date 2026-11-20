@@ -1,10 +1,11 @@
 // Source: Google Maps Platform Code Assist
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
-import { Truck, Navigation, ShieldCheck, Radio, LocateFixed, Clock } from 'lucide-react';
+import { Truck, Navigation, ShieldCheck, Radio, LocateFixed, Clock, Crosshair, Maximize2 } from 'lucide-react';
 import { GeofenceZoneConfig, GeofenceZoneState, LocationPing, LocationPoint } from '../../types';
 import { logisticsStore, NH27_CORRIDOR_WAYPOINTS } from '../../services/store';
 import { formatMetersOrKm } from '../../utils/geofence';
+import { buildLocalTrackingFallback, syncLocalTripToServer } from '../../utils/trackingFallback';
 import { GeofenceOverlay } from './GeofenceOverlay';
 import { LiveTelemetryFallbackMap } from './LiveTelemetryFallbackMap';
 import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
@@ -22,28 +23,41 @@ interface LiveTrackingMapProps {
 }
 
 const CorridorRouteOverlay: React.FC<{
+  bookingId: string;
   pickup: LocationPoint;
   delivery: LocationPoint;
   currentPing: LocationPing | null;
-}> = ({ pickup, delivery, currentPing }) => {
+  gpsHistory: LocationPing[];
+  autoFollow: boolean;
+  fitRouteSignal: number;
+  focusVehicleSignal: number;
+}> = ({
+  bookingId,
+  pickup,
+  delivery,
+  currentPing,
+  gpsHistory,
+  autoFollow,
+  fitRouteSignal,
+  focusVehicleSignal
+}) => {
   const map = useMap();
   const mapsLib = useMapsLibrary('maps');
   const coreLib = useMapsLibrary('core');
-  const polylineRef = useRef<google.maps.Polyline | null>(null);
-  const fittedRef = useRef<boolean>(false);
 
+  const corridorLineRef = useRef<google.maps.Polyline | null>(null);
+  const breadcrumbLineRef = useRef<google.maps.Polyline | null>(null);
+  const fittedBookingIdRef = useRef<string | null>(null);
+  const lastPannedKeyRef = useRef<string | null>(null);
+  const latestPingRef = useRef<LocationPing | null>(currentPing);
+  latestPingRef.current = currentPing;
+
+  // Create planned corridor & breadcrumb polylines once per map instance
   useEffect(() => {
     if (!map || !mapsLib) return;
-    if (polylineRef.current) polylineRef.current.setMap(null);
 
-    const midLat = (pickup.lat + delivery.lat) / 2 + 0.06;
-    const midLng = (pickup.lng + delivery.lng) / 2;
-    polylineRef.current = new mapsLib.Polyline({
-      path: [
-        { lat: pickup.lat, lng: pickup.lng },
-        { lat: midLat, lng: midLng },
-        { lat: delivery.lat, lng: delivery.lng }
-      ],
+    const corridorLine = new mapsLib.Polyline({
+      path: [],
       geodesic: true,
       strokeColor: '#E83E83',
       strokeOpacity: 0.85,
@@ -51,20 +65,89 @@ const CorridorRouteOverlay: React.FC<{
       map
     });
 
-    return () => {
-      if (polylineRef.current) polylineRef.current.setMap(null);
-    };
-  }, [map, mapsLib, pickup.lat, pickup.lng, delivery.lat, delivery.lng]);
+    const breadcrumbLine = new mapsLib.Polyline({
+      path: [],
+      geodesic: true,
+      strokeColor: '#10B981',
+      strokeOpacity: 0.92,
+      strokeWeight: 4,
+      map
+    });
 
+    corridorLineRef.current = corridorLine;
+    breadcrumbLineRef.current = breadcrumbLine;
+
+    return () => {
+      corridorLine.setMap(null);
+      breadcrumbLine.setMap(null);
+      corridorLineRef.current = null;
+      breadcrumbLineRef.current = null;
+    };
+  }, [map, mapsLib]);
+
+  // Update planned corridor path in-place without tearing down polyline
   useEffect(() => {
-    if (!map || !coreLib || fittedRef.current) return;
+    if (!corridorLineRef.current) return;
+    const midLat = (pickup.lat + delivery.lat) / 2 + 0.06;
+    const midLng = (pickup.lng + delivery.lng) / 2;
+    corridorLineRef.current.setPath([
+      { lat: pickup.lat, lng: pickup.lng },
+      { lat: midLat, lng: midLng },
+      { lat: delivery.lat, lng: delivery.lng }
+    ]);
+  }, [pickup.lat, pickup.lng, delivery.lat, delivery.lng, map, mapsLib]);
+
+  // Update traveled GPS breadcrumb trail in-place whenever new coordinates arrive
+  useEffect(() => {
+    if (!breadcrumbLineRef.current) return;
+    const pts = gpsHistory.map((p) => ({ lat: p.lat, lng: p.lng }));
+    if (
+      currentPing &&
+      (pts.length === 0 ||
+        pts[pts.length - 1].lat !== currentPing.lat ||
+        pts[pts.length - 1].lng !== currentPing.lng)
+    ) {
+      pts.push({ lat: currentPing.lat, lng: currentPing.lng });
+    }
+    breadcrumbLineRef.current.setPath(pts.length > 1 ? pts : []);
+  }, [gpsHistory, currentPing?.lat, currentPing?.lng, map, mapsLib]);
+
+  // Initial route bounds fit per booking (and on explicit Fit Route click)
+  useEffect(() => {
+    if (!map || !coreLib) return;
+    if (fittedBookingIdRef.current === bookingId && fitRouteSignal === 0) return;
+
     const bounds = new coreLib.LatLngBounds();
     bounds.extend({ lat: pickup.lat, lng: pickup.lng });
     bounds.extend({ lat: delivery.lat, lng: delivery.lng });
-    if (currentPing) bounds.extend({ lat: currentPing.lat, lng: currentPing.lng });
-    map.fitBounds(bounds, { top: 80, right: 50, bottom: 50, left: 50 });
-    fittedRef.current = true;
-  }, [map, coreLib, pickup.lat, pickup.lng, delivery.lat, delivery.lng, currentPing]);
+    if (latestPingRef.current) {
+      bounds.extend({ lat: latestPingRef.current.lat, lng: latestPingRef.current.lng });
+    }
+    map.fitBounds(bounds, { top: 80, right: 55, bottom: 55, left: 55 });
+    fittedBookingIdRef.current = bookingId;
+  }, [map, coreLib, bookingId, fitRouteSignal, pickup.lat, pickup.lng, delivery.lat, delivery.lng]);
+
+  // Smoothly pan camera to follow live vehicle coordinates when auto-follow is active
+  useEffect(() => {
+    if (!map || !currentPing || !autoFollow) return;
+    const coordKey = `${bookingId}:${currentPing.lat.toFixed(6)},${currentPing.lng.toFixed(6)}`;
+    if (lastPannedKeyRef.current === coordKey) return;
+    const hadPriorCoord = lastPannedKeyRef.current !== null && lastPannedKeyRef.current.startsWith(`${bookingId}:`);
+    lastPannedKeyRef.current = coordKey;
+    // Skip panning on very first mount so initial fitBounds remains visible; pan smoothly on every live move
+    if (hadPriorCoord) {
+      map.panTo({ lat: currentPing.lat, lng: currentPing.lng });
+    }
+  }, [map, bookingId, currentPing?.lat, currentPing?.lng, autoFollow]);
+
+  // Focus camera directly onto the live vehicle on button click
+  useEffect(() => {
+    if (!map || focusVehicleSignal === 0) return;
+    const target = latestPingRef.current || { lat: pickup.lat, lng: pickup.lng };
+    map.panTo({ lat: target.lat, lng: target.lng });
+    const currentZoom = map.getZoom() || 8;
+    if (currentZoom < 12) map.setZoom(12);
+  }, [map, focusVehicleSignal, pickup.lat, pickup.lng]);
 
   return null;
 };
@@ -75,21 +158,24 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   delivery,
   vehicleRegNumber = 'AS-01-QC-4910',
   driverName = 'Manoj Das',
-  shipmentStatus,
-  isDriverMode = false
+  shipmentStatus: _shipmentStatus,
+  isDriverMode: _isDriverMode = false
 }) => {
-  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
-  
+  const { apiKey, canRenderGoogleMap, fallbackReason, reportMapError } = useGoogleMapsApiKey();
+
   const [currentPing, setCurrentPing] = useState<LocationPing | null>(() => {
     return logisticsStore.getLatestPing(bookingId) || null;
   });
   const [gpsHistory, setGpsHistory] = useState<LocationPing[]>(() =>
     logisticsStore.getLocationPings(bookingId)
   );
-  
+
   const [isGpsTransmitting, setIsGpsTransmitting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [simIndex, setSimIndex] = useState(5); // Kaziranga waypoint default
+  const [autoFollow, setAutoFollow] = useState<boolean>(true);
+  const [fitRouteSignal, setFitRouteSignal] = useState<number>(0);
+  const [focusVehicleSignal, setFocusVehicleSignal] = useState<number>(0);
   const [geofenceConfig, setGeofenceConfig] = useState<GeofenceZoneConfig>(() =>
     logisticsStore.getGeofenceConfig(bookingId)
   );
@@ -97,13 +183,11 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
     logisticsStore.getGeofenceState(bookingId)
   );
 
-  // Sync state from store
+  // Sync live location state from store (resetting cleanly if bookingId changes)
   useEffect(() => {
     const update = () => {
       const ping = logisticsStore.getLatestPing(bookingId);
-      if (ping) {
-        setCurrentPing(ping);
-      }
+      setCurrentPing(ping || null);
       setGpsHistory(logisticsStore.getLocationPings(bookingId));
       setGeofenceConfig(logisticsStore.getGeofenceConfig(bookingId));
       setGeofenceState(logisticsStore.getGeofenceState(bookingId));
@@ -114,10 +198,19 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   }, [bookingId]);
 
   // Best-effort relay of driver ping to backend so Shipper view stays synced across devices
-  const relayPingToServer = useCallback((ping: LocationPing) => {
+  const relayPingToServer = useCallback(async (ping: LocationPing) => {
     const booking = logisticsStore.getBookingById(bookingId);
-    const token = booking?.trackingToken;
+    let token = booking?.trackingToken;
+
+    if (!token) {
+      const localFallback = buildLocalTrackingFallback(bookingId, booking?.loadId);
+      if (localFallback) {
+        await syncLocalTripToServer(localFallback);
+        token = localFallback.tracking_token || logisticsStore.getBookingById(bookingId)?.trackingToken;
+      }
+    }
     if (!token) return;
+
     fetch(`/trips/${encodeURIComponent(bookingId)}/location-ping`, {
       method: 'POST',
       headers: {
@@ -135,16 +228,17 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
     }).catch(() => {});
   }, [bookingId]);
 
-  // Map center calculation
-  const defaultCenter = useMemo(() => {
-    if (currentPing) {
-      return { lat: currentPing.lat, lng: currentPing.lng };
+  // Keep initial defaultCenter stable per bookingId so <GoogleMap> never churns on coordinate updates
+  const initialCenter = useMemo(() => {
+    const latest = logisticsStore.getLatestPing(bookingId);
+    if (latest) {
+      return { lat: latest.lat, lng: latest.lng };
     }
     return {
       lat: (pickup.lat + delivery.lat) / 2,
       lng: (pickup.lng + delivery.lng) / 2
     };
-  }, [currentPing, pickup, delivery]);
+  }, [bookingId, pickup.lat, pickup.lng, delivery.lat, delivery.lng]);
 
   // Transmit genuine device GPS if authorized (Workflow C requirement)
   const handleTransmitGenuineDeviceGps = useCallback(() => {
@@ -171,7 +265,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         };
         const triggered = logisticsStore.recordLocationPing(genuinePing);
         setCurrentPing(genuinePing);
-        relayPingToServer(genuinePing);
+        void relayPingToServer(genuinePing);
         setIsGpsTransmitting(false);
         if (triggered.length > 0) {
           triggered.forEach((evt) => showToast(evt.message, 'info'));
@@ -188,7 +282,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
     );
-  }, [bookingId]);
+  }, [bookingId, relayPingToServer]);
 
   // Advance along highway simulation corridor
   const handleAdvanceSimulation = useCallback(() => {
@@ -210,7 +304,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
 
     const triggered = logisticsStore.recordLocationPing(simPing);
     setCurrentPing(simPing);
-    relayPingToServer(simPing);
+    void relayPingToServer(simPing);
     if (triggered.length > 0) {
       triggered.forEach((evt) => showToast(evt.message, 'info'));
     }
@@ -288,63 +382,110 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       {/* Interactive Map Canvas */}
       <div className="flex-1 w-full h-full relative">
         {canRenderGoogleMap ? (
-          <APIProvider
-            apiKey={apiKey}
-            language="en"
-            region="IN"
-            onError={reportMapError}
-          >
-            <GoogleMap
-              mapId="DEMO_MAP_ID"
-              style={{ width: '100%', height: '100%' }}
-              defaultCenter={defaultCenter}
-              defaultZoom={8}
-              gestureHandling="greedy"
-              disableDefaultUI={false}
-              internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+          <>
+            <APIProvider
+              apiKey={apiKey}
+              language="en"
+              region="IN"
+              onError={reportMapError}
             >
-              {/* Pickup Marker */}
-              <AdvancedMarker position={{ lat: pickup.lat, lng: pickup.lng }} title={`Pickup: ${pickup.city}`}>
-                <Pin background="#10b981" borderColor="#064e3b" glyphColor="#ffffff" scale={1.1} />
-              </AdvancedMarker>
-
-              {/* Delivery Marker */}
-              <AdvancedMarker position={{ lat: delivery.lat, lng: delivery.lng }} title={`Destination: ${delivery.city}`}>
-                <Pin background="#ef4444" borderColor="#7f1d1d" glyphColor="#ffffff" scale={1.1} />
-              </AdvancedMarker>
-
-              {/* Corridor Polyline + Initial Camera Fit */}
-              <CorridorRouteOverlay pickup={pickup} delivery={delivery} currentPing={currentPing} />
-
-              {/* Geo-Fence Circular Zones */}
-              <GeofenceOverlay
-                pickup={pickup}
-                delivery={delivery}
-                pickupRadiusMeters={geofenceConfig.pickupRadiusMeters}
-                deliveryRadiusMeters={geofenceConfig.deliveryRadiusMeters}
-                insidePickup={geofenceState.insidePickup}
-                insideDelivery={geofenceState.insideDelivery}
-              />
-
-              {/* Live Vehicle Marker */}
-              {currentPing && (
-                <AdvancedMarker
-                  position={{ lat: currentPing.lat, lng: currentPing.lng }}
-                  title={`${vehicleRegNumber} - In Transit`}
-                >
-                  <div className="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2">
-                    <div className="w-10 h-10 rounded-full bg-[#E83E83]/30 animate-ping absolute"></div>
-                    <div className="w-9 h-9 rounded-full bg-[#E83E83] border-2 border-white shadow-xl flex items-center justify-center text-white font-bold">
-                      <Truck className="w-5 h-5 text-white fill-current" />
-                    </div>
-                    <div className="absolute -bottom-6 bg-[#171318] text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-700 whitespace-nowrap shadow-md">
-                      {vehicleRegNumber}
-                    </div>
-                  </div>
+              <GoogleMap
+                mapId="DEMO_MAP_ID"
+                style={{ width: '100%', height: '100%' }}
+                defaultCenter={initialCenter}
+                defaultZoom={8}
+                gestureHandling="greedy"
+                disableDefaultUI={false}
+                onDragstart={() => setAutoFollow(false)}
+                internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
+              >
+                {/* Pickup Marker */}
+                <AdvancedMarker position={{ lat: pickup.lat, lng: pickup.lng }} title={`Pickup: ${pickup.city}`}>
+                  <Pin background="#10b981" borderColor="#064e3b" glyphColor="#ffffff" scale={1.1} />
                 </AdvancedMarker>
-              )}
-            </GoogleMap>
-          </APIProvider>
+
+                {/* Delivery Marker */}
+                <AdvancedMarker position={{ lat: delivery.lat, lng: delivery.lng }} title={`Destination: ${delivery.city}`}>
+                  <Pin background="#ef4444" borderColor="#7f1d1d" glyphColor="#ffffff" scale={1.1} />
+                </AdvancedMarker>
+
+                {/* Corridor + Traveled Breadcrumb Polylines & Reactive Live Camera Controller */}
+                <CorridorRouteOverlay
+                  bookingId={bookingId}
+                  pickup={pickup}
+                  delivery={delivery}
+                  currentPing={currentPing}
+                  gpsHistory={gpsHistory}
+                  autoFollow={autoFollow}
+                  fitRouteSignal={fitRouteSignal}
+                  focusVehicleSignal={focusVehicleSignal}
+                />
+
+                {/* Geo-Fence Circular Zones */}
+                <GeofenceOverlay
+                  pickup={pickup}
+                  delivery={delivery}
+                  pickupRadiusMeters={geofenceConfig.pickupRadiusMeters}
+                  deliveryRadiusMeters={geofenceConfig.deliveryRadiusMeters}
+                  insidePickup={geofenceState.insidePickup}
+                  insideDelivery={geofenceState.insideDelivery}
+                />
+
+                {/* Live Vehicle Marker */}
+                {currentPing && (
+                  <AdvancedMarker
+                    position={{ lat: currentPing.lat, lng: currentPing.lng }}
+                    title={`${vehicleRegNumber} - In Transit`}
+                  >
+                    <div className="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2">
+                      <div className="w-10 h-10 rounded-full bg-[#E83E83]/30 animate-ping absolute"></div>
+                      <div
+                        className="w-9 h-9 rounded-full bg-[#E83E83] border-2 border-white shadow-xl flex items-center justify-center text-white font-bold transition-transform duration-300"
+                        style={{ transform: `rotate(${currentPing.heading || 0}deg)` }}
+                      >
+                        <Truck className="w-5 h-5 text-white fill-current" />
+                      </div>
+                      <div className="absolute -bottom-6 bg-[#171318] text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-700 whitespace-nowrap shadow-md">
+                        {vehicleRegNumber}
+                      </div>
+                    </div>
+                  </AdvancedMarker>
+                )}
+              </GoogleMap>
+            </APIProvider>
+
+            {/* Floating Camera Controls on Google Map */}
+            <div className="absolute right-3 bottom-6 z-20 flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setAutoFollow(true);
+                  setFocusVehicleSignal((n) => n + 1);
+                }}
+                className={`px-2.5 py-2 rounded-xl text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer transition ${
+                  autoFollow
+                    ? 'bg-[#E83E83] hover:bg-[#d62e73] text-white'
+                    : 'bg-[#171318]/90 hover:bg-[#241E26] text-white border border-gray-700'
+                }`}
+                title="Focus camera and auto-follow live vehicle coordinates"
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{autoFollow ? 'Following Truck' : 'Focus Truck'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAutoFollow(false);
+                  setFitRouteSignal((n) => n + 1);
+                }}
+                className="px-2.5 py-2 rounded-xl bg-[#171318]/90 hover:bg-[#241E26] text-white border border-gray-700 text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
+                title="Fit entire pickup-to-delivery route"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Fit Route</span>
+              </button>
+            </div>
+          </>
         ) : (
           <LiveTelemetryFallbackMap
             pickup={pickup}
@@ -359,7 +500,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
             deliveryRadiusMeters={geofenceConfig.deliveryRadiusMeters}
             insidePickup={geofenceState.insidePickup}
             insideDelivery={geofenceState.insideDelivery}
-            reason={mapAuthError ? 'auth_error' : 'missing_key'}
+            reason={fallbackReason}
           />
         )}
       </div>

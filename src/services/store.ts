@@ -717,6 +717,8 @@ class LogisticsStore {
     dlNumber?: string;
     isFleetOwner?: boolean;
     fleetSize?: number;
+    hasPasscode?: boolean;
+    passcodeDigest?: string;
   } | null {
     if (typeof window === 'undefined') return null;
     let clean = phone.replace(/\D/g, '');
@@ -734,11 +736,75 @@ class LogisticsStore {
     }
   }
 
+  public async computeLocalPasscodeDigest(phone: string, passcode: string): Promise<string> {
+    let clean = phone.replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    const payload = `zuggi_pin_v1:${clean}:${passcode.trim()}`;
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      const encoded = new TextEncoder().encode(payload);
+      const buf = await crypto.subtle.digest('SHA-256', encoded);
+      return Array.from(new Uint8Array(buf))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+    // Lightweight fallback hash when SubtleCrypto is unavailable in insecure context
+    let h = 2166136261;
+    for (let i = 0; i < payload.length; i++) {
+      h ^= payload.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return `fnv:${(h >>> 0).toString(16)}`;
+  }
+
+  public async setLocalPasscode(phone: string, passcode: string): Promise<string | null> {
+    if (typeof window === 'undefined') return null;
+    let clean = phone.replace(/\D/g, '');
+    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    if (!clean || clean.length < 10) return null;
+
+    const digest = await this.computeLocalPasscodeDigest(clean, passcode);
+    const existing = this.getRegisteredProfile(clean);
+    if (existing?.user) {
+      this.saveRegisteredProfile(
+        clean,
+        {
+          ...existing.user,
+          hasPasscode: true,
+          passcodeUpdatedAt: new Date().toISOString()
+        },
+        existing.vehicle,
+        {
+          dlNumber: existing.dlNumber,
+          isFleetOwner: existing.isFleetOwner,
+          fleetSize: existing.fleetSize,
+          hasPasscode: true,
+          passcodeDigest: digest
+        }
+      );
+    }
+    return digest;
+  }
+
+  public async verifyLocalPasscode(phone: string, passcode: string): Promise<boolean> {
+    const profile = this.getRegisteredProfile(phone);
+    if (!profile?.passcodeDigest) return false;
+    const digest = await this.computeLocalPasscodeDigest(phone, passcode);
+    return digest === profile.passcodeDigest;
+  }
+
   public saveRegisteredProfile(
     phone: string,
     user: User,
     vehicle?: CommercialVehicle,
-    extra?: { dlNumber?: string; isFleetOwner?: boolean; fleetSize?: number }
+    extra?: {
+      dlNumber?: string;
+      isFleetOwner?: boolean;
+      fleetSize?: number;
+      hasPasscode?: boolean;
+      passcodeDigest?: string;
+    }
   ) {
     if (typeof window === 'undefined') return;
     let clean = phone.replace(/\D/g, '');
@@ -755,16 +821,22 @@ class LogisticsStore {
     }
 
     const existing = registry[clean];
+    const hasPasscode = Boolean(
+      extra?.hasPasscode ?? user.hasPasscode ?? existing?.hasPasscode ?? existing?.user?.hasPasscode
+    );
 
     registry[clean] = {
       user: {
         ...user,
-        phone: `+91 ${clean}`
+        phone: `+91 ${clean}`,
+        hasPasscode
       },
       vehicle: vehicle || existing?.vehicle,
       dlNumber: extra?.dlNumber || existing?.dlNumber,
       isFleetOwner: extra?.isFleetOwner ?? existing?.isFleetOwner,
       fleetSize: extra?.fleetSize ?? existing?.fleetSize,
+      hasPasscode,
+      passcodeDigest: extra?.passcodeDigest || existing?.passcodeDigest,
       updatedAt: new Date().toISOString()
     };
 

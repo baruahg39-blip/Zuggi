@@ -624,6 +624,9 @@ export function buildSitemapEntries(baseUrl: string, listings: PublicFreightList
   push({ loc: `${cleanBase}/partner`, lastmod: today, changefreq: 'weekly', priority: '0.85' });
   push({ loc: `${cleanBase}/about`, lastmod: today, changefreq: 'monthly', priority: '0.75' });
   push({ loc: `${cleanBase}/contact`, lastmod: today, changefreq: 'monthly', priority: '0.7' });
+  push({ loc: `${cleanBase}/privacy`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
+  push({ loc: `${cleanBase}/terms`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
+  push({ loc: `${cleanBase}/refund-policy`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
 
   // 2. Dynamic individual freight listings (/freight/:loadId)
   for (const load of listings) {
@@ -1282,6 +1285,90 @@ export function resolveRouteSeo(
       robots: 'index, follow',
       jsonLd: null,
       prerenderHtml: null
+    };
+  }
+
+  // 9b. Legal Policy Pages (pre-rendered so Cashfree KYC & Google Play crawlers read full policy HTML)
+  if (pathname === '/privacy') {
+    const bodyHtml = `<article style="background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;line-height:1.7;">
+      <h2>1. Data Collected &amp; Purpose</h2>
+      <p>Zuggi Freight (zuggi.in, partner.zuggi.in, Android app in.zuggi.partner) collects mobile number (OTP verified), hashed login passcode, KYC documents (GSTIN, PAN, Driving License, Vehicle RC, Insurance, Permit), shipment pickup/delivery details, and Cashfree payment references strictly to operate commercial truck bookings and escrow settlements.</p>
+      <h2>2. Live Trip GPS Location Disclosure</h2>
+      <p>For assigned drivers during active trips only, Zuggi collects foreground/background GPS coordinates to provide live vehicle tracking and geofence notifications to the shipper. Tracking stops once delivery is verified via e-POD and Delivery OTP. Location data is never sold to third parties.</p>
+      <h2>3. Payments &amp; Data Security</h2>
+      <p>Online payments and two-stage escrow settlements are processed by Cashfree Payments India Private Limited. Zuggi never stores raw card numbers or UPI PINs. Passcodes are stored using salted scrypt cryptographic hashes.</p>
+      <h2>4. Account Deletion &amp; Grievance Officer</h2>
+      <p>To request account/data deletion (processed within 7 working days) or raise privacy grievances, email <a href="mailto:support@zuggi.in">support@zuggi.in</a> or <a href="mailto:nodal.officer@zuggi.in">nodal.officer@zuggi.in</a>, call <a href="tel:+919678944132">+91 96789 44132</a>. Office: Beltola, GS Road, Guwahati, Assam 781028, India.</p>
+    </article>`;
+    return {
+      title: 'Privacy Policy | Zuggi Commercial Freight & Partner App',
+      description:
+        'Read Zuggi Freight Privacy Policy covering mobile OTP, passcode security, Parivahan KYC, live trip GPS tracking, Cashfree escrow payments, and data deletion.',
+      canonicalUrl: `${cleanBase}/privacy`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow',
+      jsonLd: null,
+      prerenderHtml: renderPrerenderShell(
+        'Zuggi Freight — Privacy Policy',
+        'How Zuggi protects shipper, driver, and fleet partner data across zuggi.in, partner.zuggi.in, and the Zuggi Partner Android App.',
+        bodyHtml,
+        cleanBase
+      )
+    };
+  }
+
+  if (pathname === '/terms') {
+    const bodyHtml = `<article style="background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;line-height:1.7;">
+      <h2>1. Commercial Freight Marketplace</h2>
+      <p>Zuggi connects commercial shippers with Parivahan-verified truck owners, drivers, and fleet operators across Assam, Northeast India, and pan-India routes with direct quotations, live GPS tracking, GST invoicing, and two-stage escrow protection.</p>
+      <h2>2. KYC, Permits &amp; Prohibited Cargo</h2>
+      <p>Users must complete one-time OTP verification and valid KYC/vehicle compliance checks. Shippers must provide valid GST e-Way bills where applicable. Explosives, narcotics, contraband, and undeclared hazardous materials are strictly prohibited.</p>
+      <h2>3. Escrow Settlement &amp; Jurisdiction</h2>
+      <p>Escrow bookings settle 90% pickup advance upon verified loading and 10% balance upon Delivery OTP and e-POD confirmation. Governed by the laws of India with exclusive jurisdiction in the courts of Guwahati, Assam.</p>
+    </article>`;
+    return {
+      title: 'Terms & Conditions | Zuggi Commercial Goods Transport',
+      description:
+        'Terms of service for shippers, fleet owners, and drivers using zuggi.in and Zuggi Partner App: bookings, KYC, e-Way bills, escrow settlements, and liability.',
+      canonicalUrl: `${cleanBase}/terms`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow',
+      jsonLd: null,
+      prerenderHtml: renderPrerenderShell(
+        'Zuggi Freight — Terms & Conditions',
+        'Commercial platform terms governing freight bookings, vehicle compliance, e-Way bills, and escrow settlements on zuggi.in.',
+        bodyHtml,
+        cleanBase
+      )
+    };
+  }
+
+  if (pathname === '/refund-policy') {
+    const bodyHtml = `<article style="background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;line-height:1.7;">
+      <h2>1. Cancellation Rules</h2>
+      <p>100% free cancellation before vehicle assignment. Free cancellation within 30 minutes of assignment before driver dispatch. If cancelled after dispatch, a transparent empty-run compensation may apply and the remaining escrow balance is refunded.</p>
+      <h2>2. Refund Timeline (5–7 Business Days)</h2>
+      <p>All approved refunds are credited back to the original payment source (UPI, Bank Account, or Card via Cashfree Payments) within 5 to 7 business days. Duplicate or failed payment debits reverse automatically within 3 to 5 business days.</p>
+      <h2>3. Disputes &amp; Support</h2>
+      <p>Escrow disputes are reviewed using GPS telemetry and e-POD evidence within 48 business hours. Contact <a href="mailto:support@zuggi.in">support@zuggi.in</a> or <a href="tel:+919678944132">+91 96789 44132</a>.</p>
+    </article>`;
+    return {
+      title: 'Cancellation & Refund Policy | Zuggi Freight Escrow',
+      description:
+        'Zuggi Freight cancellation rules, two-stage escrow settlements, dispute review, and 5–7 business day refund timelines via Cashfree Payments.',
+      canonicalUrl: `${cleanBase}/refund-policy`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow',
+      jsonLd: null,
+      prerenderHtml: renderPrerenderShell(
+        'Zuggi Freight — Cancellation & Refund Policy',
+        'Clear shipper cancellation rules, transporter no-show protection, and 5–7 business day Cashfree refund timelines.',
+        bodyHtml,
+        cleanBase
+      )
     };
   }
 

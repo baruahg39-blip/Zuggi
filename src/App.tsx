@@ -29,6 +29,7 @@ import { SupportTicketModal } from './components/shared/SupportTicketModal';
 import { AuthModal } from './components/auth/AuthModal';
 import { LandingPage } from './components/landing/LandingPage';
 import { PublicRouteView } from './components/landing/PublicRouteView';
+import { LegalPagesView } from './components/landing/LegalPagesView';
 import { MobileAppInstallModal } from './components/mobile/MobileAppInstallModal';
 import { MobileBottomNav } from './components/mobile/MobileBottomNav';
 import { ToastContainer } from './components/shared/Toast';
@@ -47,6 +48,11 @@ function isPublicCatalogRoute(pathname: string): boolean {
     clean === '/fleet' ||
     clean.startsWith('/fleet/')
   );
+}
+
+function isLegalRoute(pathname: string): boolean {
+  const clean = (pathname || '/').replace(/\/+$/, '').toLowerCase();
+  return clean === '/privacy' || clean === '/terms' || clean === '/refund-policy';
 }
 
 export default function App() {
@@ -135,8 +141,8 @@ export default function App() {
       manifestLink.setAttribute('href', portalMode === 'partner' ? '/manifest-partner.json' : '/manifest.json');
     }
 
-    // Dynamic catalog routes manage their own route-specific title, meta & JSON-LD
-    if (!currentUser && isPublicCatalogRoute(currentPath)) {
+    // Dynamic catalog & legal routes manage their own route-specific title, meta & JSON-LD
+    if (isLegalRoute(currentPath) || (!currentUser && isPublicCatalogRoute(currentPath))) {
       return;
     }
 
@@ -274,8 +280,10 @@ export default function App() {
             : 'flex-1 p-2.5 sm:p-5 lg:p-8 pb-24 md:pb-8 max-w-7xl mx-auto w-full'
         }
       >
-        {/* If user is not logged in: Render dynamic SEO route views (/freight, /corridors, /fleet) or main landing page */}
-        {!currentUser ? (
+        {/* Legal Policy Pages (/privacy, /terms, /refund-policy) accessible whether signed out or signed in */}
+        {isLegalRoute(currentPath) ? (
+          <LegalPagesView pathname={currentPath} isSignedIn={Boolean(currentUser)} />
+        ) : !currentUser ? (
           isPublicCatalogRoute(currentPath) ? (
             <PublicRouteView
               pathname={currentPath}

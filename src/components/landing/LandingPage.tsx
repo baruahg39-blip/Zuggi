@@ -950,6 +950,38 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
           <div className="pt-6 border-t border-gray-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-gray-500">
             <p>© {new Date().getFullYear()} Zuggi Freight. All rights reserved.</p>
+            <div className="flex flex-wrap items-center justify-center gap-4 text-gray-400">
+              <a
+                href="/privacy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/privacy');
+                }}
+                className="hover:text-white transition-colors"
+              >
+                Privacy Policy
+              </a>
+              <a
+                href="/terms"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/terms');
+                }}
+                className="hover:text-white transition-colors"
+              >
+                Terms &amp; Conditions
+              </a>
+              <a
+                href="/refund-policy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/refund-policy');
+                }}
+                className="hover:text-white transition-colors"
+              >
+                Cancellation &amp; Refund Policy
+              </a>
+            </div>
             <p>Parivahan Verified · Escrow Protected · GST Compliant</p>
           </div>
         </div>

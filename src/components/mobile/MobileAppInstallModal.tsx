@@ -60,8 +60,12 @@ export const MobileAppInstallModal: React.FC<MobileAppInstallModalProps> = ({
         {/* Header */}
         <div className="p-5 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-600 to-amber-400 flex items-center justify-center text-slate-950 font-black shadow-lg shadow-amber-500/20">
-              <Smartphone className="w-5 h-5 text-slate-950" />
+            <div className="w-11 h-11 rounded-xl bg-[#060309] border border-white/15 overflow-hidden flex items-center justify-center shadow-lg shadow-[#E83E83]/25 shrink-0">
+              <img
+                src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                alt="Zuggi App Icon"
+                className="w-full h-full object-contain p-0.5"
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">

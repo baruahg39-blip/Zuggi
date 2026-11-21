@@ -212,8 +212,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </div>
 
           <div className="flex items-center gap-3.5">
-            <div className="w-14 h-14 rounded-2xl bg-[#E83E83] flex items-center justify-center shadow-lg shadow-[#E83E83]/30 shrink-0">
-              <Truck className="w-7 h-7 text-white" />
+            <div className="w-16 h-16 rounded-2xl bg-[#060309] border border-white/15 overflow-hidden flex items-center justify-center shadow-lg shadow-[#E83E83]/25 shrink-0">
+              <img
+                src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                alt="Zuggi Partner App Icon"
+                className="w-full h-full object-contain p-1"
+              />
             </div>
             <div>
               <h1 className="text-2xl font-black tracking-tight text-white">Zuggi Partner</h1>
@@ -802,8 +806,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             {/* Brand Column */}
             <div className="space-y-3">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-[#E83E83] flex items-center justify-center text-white shrink-0">
-                  <Truck className="w-4 h-4" />
+                <div className="w-10 h-10 rounded-xl bg-[#060309] border border-white/10 overflow-hidden flex items-center justify-center shrink-0">
+                  <img
+                    src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                    alt="Zuggi Logo"
+                    className="w-full h-full object-contain p-0.5"
+                  />
                 </div>
                 <span className="text-lg font-extrabold text-white tracking-tight">Zuggi</span>
               </div>

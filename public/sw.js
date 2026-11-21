@@ -1,13 +1,16 @@
-const CACHE_NAME = 'vahansetu-pwa-v5';
+const CACHE_NAME = 'zuggi-pwa-v6';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
   '/manifest-partner.json',
-  '/icon.svg',
+  '/favicon.ico',
+  '/favicon.png',
+  '/favicon-48x48.png',
+  '/apple-touch-icon.png',
   '/pwa-192x192.png',
   '/pwa-512x512.png',
-  '/favicon.png'
+  '/pwa-maskable-512x512.png'
 ];
 
 // Install: Pre-cache critical PWA assets and activate immediately

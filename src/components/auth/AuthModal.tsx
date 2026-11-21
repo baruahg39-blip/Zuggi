@@ -851,8 +851,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         {/* Modal Header */}
         <div className="p-4 sm:p-5 bg-[#171318] text-white flex items-center justify-between border-b border-gray-800">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-[#E83E83] flex items-center justify-center text-white font-black shadow-md shadow-[#E83E83]/30">
-              <Truck className="w-5 h-5 text-white" />
+            <div className="w-11 h-11 rounded-2xl bg-[#060309] border border-white/15 overflow-hidden flex items-center justify-center shadow-md shadow-[#E83E83]/25 shrink-0">
+              <img
+                src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                alt="Zuggi Logo"
+                className="w-full h-full object-contain p-0.5"
+              />
             </div>
             <div>
               <div className="flex items-center gap-2">

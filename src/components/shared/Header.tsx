@@ -82,8 +82,12 @@ export const Header: React.FC<HeaderProps> = ({
               href="#top"
               className="flex items-center gap-2.5 shrink-0 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E83E83] rounded-xl"
             >
-              <div className="w-9 h-9 rounded-xl bg-[#E83E83] flex items-center justify-center text-white shrink-0">
-                <Truck className="w-5 h-5 text-white" />
+              <div className="w-10 h-10 rounded-xl bg-[#060309] border border-white/10 overflow-hidden flex items-center justify-center shrink-0 shadow-md shadow-[#E83E83]/20">
+                <img
+                  src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                  alt="Zuggi Logo"
+                  className="w-full h-full object-contain p-0.5"
+                />
               </div>
               <span className="text-lg font-extrabold tracking-tight text-white whitespace-nowrap shrink-0">
                 Zuggi
@@ -91,8 +95,12 @@ export const Header: React.FC<HeaderProps> = ({
             </a>
           ) : (
             <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-2xl bg-[#E83E83] flex items-center justify-center text-white font-black shadow-md shadow-[#E83E83]/30 shrink-0">
-                <Truck className="w-5 h-5 text-white" />
+              <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-2xl bg-[#060309] border border-white/10 overflow-hidden flex items-center justify-center shadow-md shadow-[#E83E83]/25 shrink-0">
+                <img
+                  src="/assets/aistudio/Zuggi_Pink_Delivery_Logo_bf3220a3.png"
+                  alt="Zuggi Logo"
+                  className="w-full h-full object-contain p-0.5"
+                />
               </div>
               <div>
                 <div className="flex items-center gap-1.5">

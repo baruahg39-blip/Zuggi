@@ -11,14 +11,22 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['favicon.png', 'apple-touch-icon.png', 'icon.svg'],
+        includeAssets: [
+          'favicon.ico',
+          'favicon.png',
+          'favicon-48x48.png',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png'
+        ],
         manifest: {
           id: '/',
           name: 'Zuggi - Commercial Goods Transportation',
           short_name: 'Zuggi',
           description: 'India Commercial Goods Transport & Freight Exchange. Book trucks, dispatch cargo, bid on freights & live tracking.',
-          theme_color: '#171318',
-          background_color: '#171318',
+          theme_color: '#060309',
+          background_color: '#060309',
           display: 'standalone',
           orientation: 'portrait',
           start_url: '/',

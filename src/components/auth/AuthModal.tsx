@@ -418,38 +418,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             (targetRole === 'customer' ? `${resolvedBaseUser.name} Logistics` : `${resolvedBaseUser.name} Transport`)
         };
 
-        let activeVeh = registered?.vehicle;
-        if (isPartnerRole(targetRole)) {
-          if (!activeVeh) {
-            const clean = phone.replace(/\D/g, '').slice(-10);
-            activeVeh = {
-              id: `veh_${clean}`,
-              ownerId: restoredUser.id,
-              transporterName: restoredUser.businessName || `${restoredUser.name} Transport`,
-              registrationNumber: registered?.dlNumber ? `AS-01-TC-${clean.slice(-4)}` : 'AS-01-ET-2026',
-              category: 'bolero_pickup',
-              bodyType: 'tarpaulin',
-              capacityKg: 1750,
-              modelName: 'Mahindra Bolero Maxi Truck',
-              fuelType: 'diesel',
-              permitType: 'all_northeast',
-              currentLocation: {
-                lat: 26.1445,
-                lng: 91.7362,
-                address: `${restoredUser.city || 'Guwahati'} Transport Hub`,
-                city: restoredUser.city || 'Guwahati'
-              },
-              isOnline: true,
-              isAvailable: true,
-              verificationStatus: 'verified',
-              documents: [],
-              driverName: restoredUser.name,
-              driverPhone: restoredUser.phone,
-              driverRating: 4.9,
-              completedTrips: 18,
-              photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-            };
-          }
+        const activeVeh = registered?.vehicle;
+        if (isPartnerRole(targetRole) && activeVeh) {
           logisticsStore.saveVehicle(activeVeh);
         }
 
@@ -480,7 +450,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         logisticsStore.setCurrentUser(restoredUser);
         showToast(
           targetRole === 'customer'
-            ? 'Signed in to Customer & Shipper Portal'
+            ? 'Signed in — Ready to Book a Truck'
             : 'Signed in to Driver & Fleet Portal',
           'success'
         );
@@ -504,7 +474,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }
         showToast(
           targetRole === 'customer'
-            ? 'Signed in to Customer & Shipper Portal'
+            ? 'Signed in — Ready to Book a Truck'
             : 'Signed in to Driver & Fleet Portal',
           'success'
         );
@@ -610,7 +580,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setResetAccountNotFound(true);
         setErrorMessage(
           `No registered account found for +91 ${clean}. You can register now as a new ${
-            targetPortal === 'driver' ? 'Driver / Fleet Partner' : 'Shipper / Customer'
+            targetPortal === 'driver' ? 'Driver / Fleet Partner' : 'Book a Truck'
           } without verifying OTP again.`
         );
         return;
@@ -900,7 +870,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               }`}
             >
               <Building2 className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">Shipper / Customer</span>
+              <span className="truncate">Book a Truck</span>
             </button>
 
             <button
@@ -939,7 +909,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <>
                     <Building2 className="w-5 h-5 text-[#E83E83] shrink-0 mt-0.5" />
                     <div>
-                      <h4 className="text-xs font-black text-[#171318]">Customer / Shipper Portal Sign-In</h4>
+                      <h4 className="text-xs font-black text-[#171318]">Book a Truck — Sign In</h4>
                       <p className="text-[11px] text-[#77717A] mt-0.5 leading-snug">
                         Post freight loads, compare live driver quotes, book commercial trucks, and track shipments across Northeast India.
                       </p>
@@ -1090,7 +1060,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           </button>
                         </div>
                         <p className="text-[11px] text-[#77717A] mt-1.5">
-                          Registered Shippers, Customers, Drivers & Vehicle Owners can sign in anytime with Passcode — no SMS OTP required.
+                          Registered Truck Booking Accounts, Drivers & Fleet Owners can sign in anytime with Passcode — no SMS OTP required.
                         </p>
                       </div>
 
@@ -1256,7 +1226,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         >
                           <span className="flex items-center gap-1.5">
                             <Building2 className="w-3.5 h-3.5 text-[#E83E83]" />
-                            <span>Brahmaputra Agro Consignor (Customer Portal)</span>
+                            <span>Brahmaputra Agro (Book a Truck Demo)</span>
                           </span>
                           <span className="font-mono text-[10px] text-gray-500">+91 99999 11111</span>
                         </button>
@@ -1401,7 +1371,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
                 <div>
                   <div className="font-bold text-xs text-[#171318]">
-                    {selectedRole === 'customer' ? 'Shipper / Cargo Owner Account (Web)' : 'Driver / Fleet Partner Account (Mobile)'}
+                    {selectedRole === 'customer' ? 'Book a Truck Account (Web)' : 'Driver / Fleet Partner Account (Mobile)'}
                   </div>
                   <p className="text-[10px] text-[#77717A] mt-0.5">
                     {selectedRole === 'customer'
@@ -2195,7 +2165,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className="w-full py-2 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
                   >
                     <Phone className="w-3.5 h-3.5 text-[#E83E83]" />
-                    <span>Return to Shipper Phone OTP</span>
+                    <span>Return to Book a Truck Sign-In</span>
                   </button>
                 </div>
               </form>

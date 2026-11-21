@@ -24,13 +24,16 @@ import {
   Radio,
   Send,
   Eye,
-  Zap
+  Zap,
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import { User, CommercialVehicle, Booking, LoadItem, VehicleCategoryType } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { TripAssignModal } from './TripAssignModal';
 import { DriverGpsSimulatorModal } from '../tracking/DriverGpsSimulatorModal';
 import { ShipperLiveTrackingScreen } from '../tracking/ShipperLiveTrackingScreen';
+import { PartnerOnboardingModal } from '../partner/PartnerOnboardingModal';
 import { showToast as emitAppToast } from '../shared/Toast';
 import { exportAdminMasterReportCsv } from '../../utils/csvExport';
 
@@ -80,10 +83,17 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
   const [showLiveTrackingModal, setShowLiveTrackingModal] = useState<boolean>(false);
   const [liveTrackingTripId, setLiveTrackingTripId] = useState<string>('trip_demo_01');
 
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+  const [partnerEligibility, setPartnerEligibility] = useState(() =>
+    logisticsStore.checkPartnerBookingEligibility(currentUser.id)
+  );
+
   const vehicleCategories = logisticsStore.getVehicleCategories();
 
   useEffect(() => {
     const update = () => {
+      setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
       const ownedVehicles = logisticsStore.getVehicles().filter(
         (v) =>
           v.ownerId === currentUser.id ||
@@ -107,6 +117,7 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
       setDrivers(allUsers.filter((u) => u.role === 'driver' && !u.isBlocked));
     };
     update();
+    logisticsStore.refreshPartnerVerificationStatus(currentUser).then(() => update());
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [currentUser.id, currentUser.businessName]);
@@ -143,9 +154,9 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
         lat: 26.1445,
         lng: 91.7362
       },
-      isOnline: true,
-      isAvailable: true,
-      verificationStatus: 'verified',
+      isOnline: false,
+      isAvailable: false,
+      verificationStatus: 'pending',
       documents: [],
       assignedDriverId: newDriverId || undefined,
       driverName: assignedDrv?.name,
@@ -158,7 +169,7 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
     logisticsStore.saveVehicle(newVeh);
     setNewRegNo('');
     setNewModel('');
-    showToast(`Vehicle ${newVeh.registrationNumber} added to fleet successfully!`);
+    showToast(`Vehicle ${newVeh.registrationNumber} submitted for Admin RC verification!`, 'info');
     setActiveTab('fleet');
   };
 
@@ -174,7 +185,7 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
       phone: driverPhone.trim(),
       state: 'Assam',
       city: 'Guwahati',
-      isVerified: true,
+      isVerified: false,
       createdAt: new Date().toISOString()
     };
 
@@ -182,14 +193,40 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
     setDriverName('');
     setDriverPhone('');
     setShowAddDriverModal(false);
-    showToast(`Driver ${newDrv.name} registered and added to fleet!`);
+    showToast(`Driver ${newDrv.name} added! Pending Admin KYC verification.`, 'info');
+  };
+
+  const handleRefreshApproval = async () => {
+    setIsCheckingStatus(true);
+    try {
+      const status = await logisticsStore.refreshPartnerVerificationStatus(currentUser);
+      setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
+      if (status.isVerified) {
+        showToast('Fleet account verified & approved! Load bidding is now unlocked.', 'success');
+      } else {
+        showToast('Still pending Admin verification & approval.', 'info');
+      }
+    } finally {
+      setIsCheckingStatus(false);
+    }
   };
 
   const handlePlaceBid = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedLoadForBid || bidAmount <= 0) return;
 
+    if (!partnerEligibility.isEligible) {
+      showToast(`Pending Admin approval: ${partnerEligibility.reason}`, 'error');
+      setSelectedLoadForBid(null);
+      setIsOnboardingOpen(true);
+      return;
+    }
+
     const chosenVeh = vehicles.find((v) => v.id === selectedVehicleForBid) || vehicles[0];
+    if (!chosenVeh) {
+      showToast('Please register a commercial vehicle and wait for Admin RC verification first.', 'error');
+      return;
+    }
 
     try {
       logisticsStore.submitQuotation({
@@ -197,12 +234,12 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
         transporterId: currentUser.id,
         transporterName: currentUser.businessName || currentUser.name || 'Fleet Operator',
         transporterPhone: currentUser.phone || '9876543210',
-        vehicleId: chosenVeh?.id || 'veh_01',
-        vehicleRegNumber: chosenVeh?.registrationNumber || 'AS-01-EE-4491',
-        vehicleCategory: chosenVeh?.category || selectedLoadForBid.requiredVehicleCategory,
-        driverName: chosenVeh?.driverName || currentUser.name,
-        driverRating: chosenVeh?.driverRating || 5.0,
-        driverCompletedTrips: chosenVeh?.completedTrips || 0,
+        vehicleId: chosenVeh.id,
+        vehicleRegNumber: chosenVeh.registrationNumber,
+        vehicleCategory: chosenVeh.category || selectedLoadForBid.requiredVehicleCategory,
+        driverName: chosenVeh.driverName || currentUser.name,
+        driverRating: chosenVeh.driverRating || 5.0,
+        driverCompletedTrips: chosenVeh.completedTrips || 0,
         quoteAmountInr: bidAmount,
         chargeBreakdown: {
           baseFreight: Math.round(bidAmount * 0.90),
@@ -224,7 +261,12 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
   };
 
   const handleInstantAcceptLoad = (load: LoadItem) => {
-    const chosenVeh = vehicles.find((v) => v.isAvailable && !v.isBlocked) || vehicles[0];
+    if (!partnerEligibility.isEligible) {
+      showToast(`Load access locked: ${partnerEligibility.reason}`, 'error');
+      setIsOnboardingOpen(true);
+      return;
+    }
+    const chosenVeh = vehicles.find((v) => v.isAvailable && !v.isBlocked && v.verificationStatus === 'verified') || vehicles[0];
     const res = logisticsStore.instantAcceptLoad(load.id, currentUser, chosenVeh?.id);
     if (!res.success || !res.bookingId) {
       showToast(res.message || 'Unable to accept load.', 'error');
@@ -249,6 +291,52 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-20">
+      <PartnerOnboardingModal
+        currentUser={currentUser}
+        isOpen={isOnboardingOpen}
+        onClose={() => setIsOnboardingOpen(false)}
+        onSuccess={() => setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id))}
+      />
+
+      {!partnerEligibility.isEligible && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-3xl p-5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm sm:text-base font-black text-[#171318]">
+                  Fleet Account Pending Backend Verification &amp; Admin Approval
+                </h2>
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-950 font-black uppercase">
+                  {partnerEligibility.status.replace('_', ' ')}
+                </span>
+              </div>
+              <p className="text-xs text-amber-950/90 leading-relaxed">{partnerEligibility.reason}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleRefreshApproval}
+              disabled={isCheckingStatus}
+              className="px-3.5 py-2 rounded-xl bg-white hover:bg-amber-100 border border-amber-300 text-amber-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCheckingStatus ? 'animate-spin' : ''}`} />
+              <span>Check Status</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsOnboardingOpen(true)}
+              className="px-4 py-2 rounded-xl bg-[#E83E83] hover:bg-[#D62D72] text-white text-xs font-extrabold cursor-pointer"
+            >
+              Upload KYC Docs
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {successMsg && (
         <div className="fixed top-18 right-4 z-50 bg-[#16A36A] text-white px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2 border border-emerald-400">

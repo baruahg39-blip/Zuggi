@@ -21,6 +21,32 @@ const ALLOWED_SYNC_TABLES = new Set<SupabaseSyncTable>([
 let cachedClient: SupabaseClient | null = null;
 let cachedConfigKey = '';
 
+const PARTNER_ROLES = new Set(['driver', 'vehicle_owner', 'fleet_partner', 'transporter']);
+
+export function isPartnerRole(role: unknown): boolean {
+  return PARTNER_ROLES.has(String(role || '').toLowerCase());
+}
+
+// Server-side in-memory admin session tokens (issued by /api/auth/admin-session)
+export const adminSessionTokens = new Set<string>();
+
+export function verifyAdminTokenFromReq(req: express.Request): boolean {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const custom = String(req.headers['x-zuggi-admin-token'] || '').trim();
+  const token = bearer || custom;
+  return Boolean(token && adminSessionTokens.has(token));
+}
+
+function isSandboxTestPartnerRecord(rec: any): boolean {
+  if (!rec) return false;
+  if (rec.isTestAccount === true || rec.isTestBid === true || rec.isTestBooking === true) return true;
+  const phone = String(rec.phone || rec.transporterPhone || rec.driverPhone || '');
+  if (phone.includes('99999')) return true;
+  const id = String(rec.id || rec.transporterId || rec.driverId || '');
+  return id.startsWith('test_') || id === 'user_driver_01' || id === 'user_owner_01' || id === 'user_fleet_01';
+}
+
 function normalizeSupabaseUrl(rawUrl: string): string {
   return rawUrl
     .trim()
@@ -128,38 +154,86 @@ function buildRowForTable(table: SupabaseSyncTable, record: any): Record<string,
   }
 }
 
-export async function upsertSupabaseRecords(table: SupabaseSyncTable, records: any[]): Promise<{ ok: boolean; error?: string }> {
+export async function upsertSupabaseRecords(
+  table: SupabaseSyncTable,
+  records: any[],
+  options?: { isAdmin?: boolean }
+): Promise<{ ok: boolean; error?: string }> {
   const client = getSupabaseClient();
   if (!client || records.length === 0) return { ok: false, error: 'Not configured or empty' };
+  const isAdmin = Boolean(options?.isAdmin);
   try {
     let prepared = records.filter((r) => r && r.id);
     if (prepared.length === 0) return { ok: true };
 
-    // Preserve server-side passcodeHash when client-side vs_users sync runs without secret hashes
+    // Preserve server-side passcodeHash AND prevent non-admin self-verification or privilege escalation on vs_users
     if (table === 'vs_users') {
-      const idsNeedingPreserve = prepared.filter((r) => !r.passcodeHash).map((r) => String(r.id));
-      if (idsNeedingPreserve.length > 0) {
-        const { data: existingRows } = await client
-          .from('vs_users')
-          .select('id, data')
-          .in('id', idsNeedingPreserve);
-        if (Array.isArray(existingRows) && existingRows.length > 0) {
-          const existingMap = new Map(existingRows.map((row: any) => [String(row.id), row.data || {}]));
-          prepared = prepared.map((rec) => {
-            if (rec.passcodeHash) return rec;
-            const prev = existingMap.get(String(rec.id));
-            if (prev?.passcodeHash) {
-              return {
-                ...rec,
-                hasPasscode: true,
-                passcodeHash: prev.passcodeHash,
-                passcodeUpdatedAt: rec.passcodeUpdatedAt || prev.passcodeUpdatedAt
-              };
-            }
-            return rec;
-          });
+      const ids = prepared.map((r) => String(r.id));
+      const { data: existingRows } = await client
+        .from('vs_users')
+        .select('id, data')
+        .in('id', ids);
+      const existingMap = new Map(
+        (Array.isArray(existingRows) ? existingRows : []).map((row: any) => [String(row.id), row.data || {}])
+      );
+
+      prepared = prepared.map((rec) => {
+        const prev = existingMap.get(String(rec.id)) || {};
+        const next: Record<string, any> = { ...rec };
+
+        // Preserve server-side passcodeHash if omitted by client sync
+        if (!next.passcodeHash && prev.passcodeHash) {
+          next.hasPasscode = true;
+          next.passcodeHash = prev.passcodeHash;
+          next.passcodeUpdatedAt = next.passcodeUpdatedAt || prev.passcodeUpdatedAt;
         }
-      }
+
+        if (!isAdmin) {
+          // Non-admin clients can never self-assign admin role
+          if (String(next.role || '').toLowerCase() === 'admin' && String(prev.role || '').toLowerCase() !== 'admin') {
+            next.role = prev.role || 'customer';
+          }
+          // Preserve server-controlled block flags
+          if (typeof prev.isBlocked === 'boolean') {
+            next.isBlocked = prev.isBlocked;
+            next.blockedReason = prev.blockedReason;
+          }
+          // Strictly enforce backend Admin approval for partner roles (drivers, owners, fleet partners)
+          if (isPartnerRole(next.role) && !isSandboxTestPartnerRecord(next)) {
+            next.isVerified = prev.isVerified === true;
+          }
+        }
+
+        return next;
+      });
+    }
+
+    // Prevent non-admin clients from self-verifying commercial vehicles
+    if (table === 'vs_vehicles' && !isAdmin) {
+      const ids = prepared.map((r) => String(r.id));
+      const { data: existingRows } = await client
+        .from('vs_vehicles')
+        .select('id, data')
+        .in('id', ids);
+      const existingMap = new Map(
+        (Array.isArray(existingRows) ? existingRows : []).map((row: any) => [String(row.id), row.data || {}])
+      );
+
+      prepared = prepared.map((rec) => {
+        const prev = existingMap.get(String(rec.id));
+        if (isSandboxTestPartnerRecord(rec) || String(rec.id).startsWith('veh_0') || String(rec.id).startsWith('veh_test_')) {
+          return rec;
+        }
+        const authoritativeStatus = prev?.verificationStatus || 'pending';
+        return {
+          ...rec,
+          verificationStatus: authoritativeStatus,
+          isBlocked: typeof prev?.isBlocked === 'boolean' ? prev.isBlocked : Boolean(rec.isBlocked),
+          blockedReason: prev?.blockedReason ?? rec.blockedReason,
+          isOnline: authoritativeStatus === 'verified' ? Boolean(rec.isOnline) : false,
+          isAvailable: authoritativeStatus === 'verified' ? rec.isAvailable !== false : false
+        };
+      });
     }
 
     const rows = prepared.map((r) => buildRowForTable(table, r));
@@ -168,6 +242,38 @@ export async function upsertSupabaseRecords(table: SupabaseSyncTable, records: a
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Supabase upsert failed' };
+  }
+}
+
+export async function findSupabaseUserById(userId: string): Promise<any | null> {
+  const client = getSupabaseClient();
+  if (!client || !userId) return null;
+  try {
+    const { data, error } = await client
+      .from('vs_users')
+      .select('data')
+      .eq('id', userId)
+      .limit(1);
+    if (error || !Array.isArray(data) || data.length === 0) return null;
+    return data[0]?.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function findSupabaseVehiclesByOwner(ownerId: string): Promise<any[]> {
+  const client = getSupabaseClient();
+  if (!client || !ownerId) return [];
+  try {
+    const { data, error } = await client
+      .from('vs_vehicles')
+      .select('data')
+      .eq('owner_id', ownerId)
+      .limit(50);
+    if (error || !Array.isArray(data)) return [];
+    return data.map((r: any) => r.data).filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -407,7 +513,33 @@ supabaseRouter.post('/sync', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid or unsupported table name.' });
   }
   const list = Array.isArray(records) ? records : record ? [record] : [];
-  const result = await upsertSupabaseRecords(table, list);
+  const isAdmin = verifyAdminTokenFromReq(req);
+
+  // Backend enforcement: block unverified drivers/owners from submitting quotes or accepting loads
+  if (!isAdmin && (table === 'vs_quotations' || table === 'vs_bookings')) {
+    for (const item of list) {
+      if (!item || isSandboxTestPartnerRecord(item)) continue;
+      const partnerId = String(item.transporterId || item.driverId || '').trim();
+      if (!partnerId) continue;
+      const dbUser = await findSupabaseUserById(partnerId);
+      if (dbUser && isPartnerRole(dbUser.role) && dbUser.isVerified !== true) {
+        return res.status(403).json({
+          success: false,
+          code: 'PARTNER_UNVERIFIED',
+          message: 'Backend verification required: Admin approval is mandatory before bidding on or accepting loads.'
+        });
+      }
+      if (dbUser?.isBlocked) {
+        return res.status(403).json({
+          success: false,
+          code: 'PARTNER_BLOCKED',
+          message: `Account suspended: ${dbUser.blockedReason || 'Blocked by Admin'}.`
+        });
+      }
+    }
+  }
+
+  const result = await upsertSupabaseRecords(table, list, { isAdmin });
   if (!result.ok) {
     return res.status(202).json({ success: false, deferred: true, message: result.error });
   }

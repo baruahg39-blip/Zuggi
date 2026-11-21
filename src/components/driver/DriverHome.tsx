@@ -18,7 +18,9 @@ import {
   ExternalLink,
   MessageSquare,
   Radio,
-  Zap
+  Zap,
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import { Booking, CommercialVehicle, LoadItem, User } from '../../types';
 import { logisticsStore } from '../../services/store';
@@ -53,6 +55,7 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
   const [partnerEligibility, setPartnerEligibility] = useState(() => 
     logisticsStore.checkPartnerBookingEligibility(currentUser.id)
   );
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
 
   // Active section for the driver tabs: 'trips' | 'pickup' | 'navigation' | 'status' | 'support' | 'highway_alerts'
@@ -89,6 +92,8 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
       setOpenLoads(availableLoads);
     };
     update();
+    // Sync authoritative backend Admin approval status on dashboard open
+    logisticsStore.refreshPartnerVerificationStatus(currentUser).then(() => update());
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [currentUser.id, currentUser.isTestAccount]);
@@ -101,10 +106,36 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
     setTimeout(() => setFeedbackMsg(null), 3500);
   };
 
+  const handleRefreshApprovalStatus = async () => {
+    setIsCheckingStatus(true);
+    try {
+      const status = await logisticsStore.refreshPartnerVerificationStatus(currentUser);
+      setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
+      if (status.isVerified) {
+        showToast('Account approved! You can now go online, bid, and accept loads.', 'success');
+      } else if (status.isBlocked) {
+        showToast('Account is currently suspended by Admin.', 'error');
+      } else {
+        showToast('Still pending backend Admin verification. Please check back soon.', 'info');
+      }
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
   const handleToggleOnline = () => {
+    if (!partnerEligibility.isEligible) {
+      showToast('Pending Admin verification: you cannot go online until approved.', 'error');
+      setIsOnboardingOpen(true);
+      return;
+    }
     if (primaryVehicle) {
       if (primaryVehicle.isBlocked) {
         showToast(`Vehicle blocked: ${primaryVehicle.blockedReason || 'Contact Admin'}`, 'error');
+        return;
+      }
+      if (primaryVehicle.verificationStatus !== 'verified') {
+        showToast(`Truck ${primaryVehicle.registrationNumber} is pending Admin RC verification.`, 'error');
         return;
       }
       logisticsStore.toggleVehicleOnline(primaryVehicle.id, !isOnline);
@@ -113,6 +144,11 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
   };
 
   const handleInstantAccept = (loadId: string) => {
+    if (!partnerEligibility.isEligible) {
+      showToast(`Load access locked: ${partnerEligibility.reason}`, 'error');
+      setIsOnboardingOpen(true);
+      return;
+    }
     const res = logisticsStore.instantAcceptLoad(loadId, currentUser, primaryVehicle?.id);
     if (!res.success || !res.bookingId) {
       showToast(res.message || 'Could not start ride.', 'error');
@@ -164,14 +200,20 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-lg font-black text-white">
-                  {isOnline ? 'Ready for Loads' : 'Offline / On Break'}
+                  {!partnerEligibility.isEligible
+                    ? 'Verification Pending'
+                    : isOnline
+                    ? 'Ready for Loads'
+                    : 'Offline / On Break'}
                 </span>
                 <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-bold uppercase ${
-                  isOnline 
+                  !partnerEligibility.isEligible
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    : isOnline 
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' 
                     : 'bg-rose-500/20 text-[#E83E83] border border-[#E83E83]/30'
                 }`}>
-                  {isOnline ? 'Online' : 'Paused'}
+                  {!partnerEligibility.isEligible ? 'Pending Admin' : isOnline ? 'Online' : 'Paused'}
                 </span>
               </div>
               <p className="text-xs text-gray-300 mt-0.5">
@@ -277,6 +319,53 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
           </button>
         </div>
       </div>
+
+      {/* BACKEND ADMIN VERIFICATION LOCK BANNER (New / Unverified Drivers & Owners) */}
+      {!partnerEligibility.isEligible && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-3xl p-5 shadow-sm space-y-3">
+          <div className="flex items-start gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-sm">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div className="flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-black text-[#171318]">
+                  Account Pending Backend Verification &amp; Admin Approval
+                </h2>
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-950 font-black uppercase">
+                  {partnerEligibility.status.replace('_', ' ')}
+                </span>
+              </div>
+              <p className="text-xs text-amber-950/90 leading-relaxed">
+                {partnerEligibility.reason}
+              </p>
+              <p className="text-[11px] text-amber-900/80 font-semibold">
+                Going online, bidding on freight, and accepting loads stay locked until Zuggi Admin verifies your Driving License, Vehicle RC, and KYC documents.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={() => setIsOnboardingOpen(true)}
+              className="px-4 py-2.5 rounded-xl bg-[#E83E83] hover:bg-[#D62D72] text-white text-xs font-extrabold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>Upload / Complete KYC Documents</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleRefreshApprovalStatus}
+              disabled={isCheckingStatus}
+              className="px-4 py-2.5 rounded-xl bg-white hover:bg-amber-100 border border-amber-300 text-amber-950 text-xs font-bold transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCheckingStatus ? 'animate-spin' : ''}`} />
+              <span>{isCheckingStatus ? 'Checking...' : 'Check Approval Status'}</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* SECTION 1: MY ASSIGNED TRIPS */}
       {activeDriverTab === 'trips' && (

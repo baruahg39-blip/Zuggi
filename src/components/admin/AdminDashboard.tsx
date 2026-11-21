@@ -317,6 +317,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [bookings, bookingStatusFilter, qLower, vehicles, users]);
 
   // Action Handlers
+  const handleApprovePartner = async (userId: string, approved: boolean) => {
+    const res = await logisticsStore.approvePartnerByAdmin(userId, approved);
+    showToast(res.message);
+  };
+
   const handleApproveVehicle = (vehicleId: string) => {
     logisticsStore.updateVehicleVerification(vehicleId, 'verified');
     showToast(`Vehicle ${vehicleId} verified & approved.`);
@@ -1367,11 +1372,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="font-bold text-sm text-[#171318]">{u.name}</span>
-                        {u.isVerified && (
+                        {u.isVerified ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 text-[#16A36A] font-bold">
                             Verified
                           </span>
-                        )}
+                        ) : ['driver', 'vehicle_owner', 'fleet_partner', 'transporter'].includes(u.role) ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 font-bold">
+                            Pending Admin Approval
+                          </span>
+                        ) : null}
                         {u.isBlocked && (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-100 text-[#DC3545] font-bold">
                             BLOCKED: {u.blockedReason || 'Suspended'}
@@ -1384,10 +1393,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
                     <span className="font-bold uppercase text-[10px] px-2.5 py-1 rounded-full bg-gray-100 text-[#171318]">
                       {u.role.replace('_', ' ')}
                     </span>
+
+                    {['driver', 'vehicle_owner', 'fleet_partner', 'transporter'].includes(u.role) && !u.isBlocked && (
+                      u.isVerified ? (
+                        <button
+                          onClick={() => handleApprovePartner(u.id, false)}
+                          className="px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 font-bold cursor-pointer"
+                          title="Move partner back to pending verification"
+                        >
+                          Revoke
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleApprovePartner(u.id, true)}
+                          className="px-3 py-1.5 rounded-xl bg-[#16A36A] hover:bg-emerald-700 text-white font-bold cursor-pointer flex items-center gap-1 shadow-xs"
+                          title="Verify KYC & unlock load bidding/acceptance"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Approve Partner</span>
+                        </button>
+                      )
+                    )}
 
                     {u.role !== 'admin' && (
                       u.isBlocked ? (

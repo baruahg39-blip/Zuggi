@@ -670,7 +670,7 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                     onChange={(e) => setHelpersNeeded(Number(e.target.value))}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100"
                   >
-                    <option value={0}>No helpers needed (Shipper handles)</option>
+                    <option value={0}>No helpers needed (Self-handled)</option>
                     <option value={1}>1 Helper (+₹450)</option>
                     <option value={2}>2 Helpers (+₹900)</option>
                     <option value={4}>4 Helpers (+₹1,800)</option>

@@ -112,7 +112,7 @@ export const Header: React.FC<HeaderProps> = ({
                   </span>
                 </div>
                 <p className="text-[10px] text-gray-400 hidden sm:block">
-                  {portalMode === 'partner' ? 'Driver & Fleet Owner Mobile Portal' : 'Shipper & Governance Web Portal'}
+                  {portalMode === 'partner' ? 'Driver & Fleet Owner Mobile Portal' : 'Book a Truck & Freight Dispatch'}
                 </p>
               </div>
             </div>
@@ -159,7 +159,7 @@ export const Header: React.FC<HeaderProps> = ({
                 {currentUser.role === 'customer' && (
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-950/80 text-blue-300 border border-blue-800/80 text-[11px] font-bold">
                     <Building2 className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Customer / Shipper</span>
+                    <span>Book a Truck</span>
                   </span>
                 )}
                 {(currentUser.role === 'driver' || currentUser.role === 'vehicle_owner' || currentUser.role === 'fleet_partner' || currentUser.role === 'transporter') && (
@@ -195,13 +195,13 @@ export const Header: React.FC<HeaderProps> = ({
                 onClick={() => {
                   const switched = authService.switchRole('customer');
                   logisticsStore.setCurrentUser(switched);
-                  showToast('Viewing as Shipper', 'info');
+                  showToast('Viewing Book a Truck Portal', 'info');
                 }}
                 className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-white/10 hover:bg-blue-600/30 border border-white/10 hover:border-blue-500/50 text-gray-200 hover:text-blue-300 text-xs font-bold transition cursor-pointer active:scale-95 shadow-xs"
-                title="Switch to Customer / Shipper Portal"
+                title="Switch to Book a Truck Portal"
               >
                 <Building2 className="w-3.5 h-3.5 text-blue-400" />
-                <span className="hidden sm:inline">View as Shipper</span>
+                <span className="hidden sm:inline">Book a Truck View</span>
                 <ArrowRightLeft className="w-3 h-3 text-blue-400 sm:hidden" />
               </button>
             )}
@@ -255,7 +255,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <div className="hidden md:block text-left text-xs">
                     <div className="font-bold text-white truncate max-w-[110px]">{currentUser.name}</div>
                     <div className="text-[10px] text-gray-400 truncate max-w-[110px] capitalize">
-                      {currentUser.role.replace('_', ' ')}
+                      {currentUser.role === 'customer' ? 'Book a Truck' : currentUser.role.replace('_', ' ')}
                     </div>
                   </div>
                 </button>

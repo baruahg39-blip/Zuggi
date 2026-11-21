@@ -55,7 +55,7 @@ export const KycManagerModal: React.FC<KycManagerModalProps> = ({
               <div className="flex items-center gap-2">
                 <h3 className="text-base font-bold text-white">KYC & Statutory Verification</h3>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold uppercase">
-                  Verified Shipper
+                  Verified Account
                 </span>
               </div>
               <p className="text-xs text-slate-400">

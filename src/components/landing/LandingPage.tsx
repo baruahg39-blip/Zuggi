@@ -63,7 +63,7 @@ const ABOUT_PILLARS = [
     number: '02.',
     title: 'Direct Fleet Pricing Without Middlemen',
     description:
-      'Shippers post consignments in under a minute and compare transparent quotes directly from verified fleet owners and drivers.'
+      'Book a truck in under a minute and compare transparent quotes directly from verified fleet owners and drivers.'
   },
   {
     number: '03.',
@@ -268,7 +268,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-xs flex items-center justify-between gap-3">
           <div className="text-xs">
             <p className="font-bold text-[#171318]">Booking a truck to ship goods?</p>
-            <p className="text-[11px] text-[#77717A]">Shippers &amp; Admins sign in on the Web Portal.</p>
+            <p className="text-[11px] text-[#77717A]">Book a truck or manage dispatch on the Web Portal.</p>
           </div>
           <button
             type="button"
@@ -357,18 +357,18 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
           {/* Primary Portal Cards: Shipper & Admin */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-4xl mx-auto items-stretch">
-            {/* Card 1: Customer / Shipper */}
+            {/* Card 1: Book a Truck */}
             <div className="bg-white rounded-3xl p-6 sm:p-8 border border-gray-200 hover:border-[#E83E83]/50 transition-colors flex flex-col justify-between shadow-sm">
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="w-12 h-12 rounded-2xl bg-[#FFF0F6] text-[#E83E83] flex items-center justify-center">
                     <Building2 className="w-6 h-6" />
                   </div>
-                  <span className="text-xs font-semibold text-[#5E5861]">Consignor & Business Portal</span>
+                  <span className="text-xs font-semibold text-[#5E5861]">Instant Truck Booking</span>
                 </div>
 
                 <div>
-                  <h2 className="text-xl font-extrabold text-[#171318]">Customer / Shipper</h2>
+                  <h2 className="text-xl font-extrabold text-[#171318]">Book a Truck</h2>
                   <p className="text-sm text-[#5E5861] mt-2 leading-relaxed">
                     Post commercial loads in 30 seconds, compare competitive fleet quotes, track live truck GPS & geofence arrivals, and download GST invoices.
                   </p>
@@ -387,7 +387,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   onClick={() => onOpenAuth('customer')}
                   className="w-full py-3.5 px-5 rounded-xl bg-[#E83E83] hover:bg-[#D62D72] active:scale-[0.99] text-white font-bold text-sm flex items-center justify-center gap-2 transition cursor-pointer whitespace-nowrap"
                 >
-                  <span>Sign In as Shipper</span>
+                  <span>Book a Truck Now</span>
                   <ArrowRight className="w-4 h-4 shrink-0" />
                 </button>
               </div>
@@ -933,7 +933,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     onClick={() => onOpenAuth('customer')}
                     className="hover:text-white transition-colors cursor-pointer"
                   >
-                    Shipper / Customer Sign In
+                    Book a Truck
                   </button>
                 </li>
                 <li>

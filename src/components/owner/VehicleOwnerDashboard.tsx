@@ -21,11 +21,14 @@ import {
   Trash2,
   MapPin,
   ChevronRight,
-  Zap
+  Zap,
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import { Booking, CommercialVehicle, LoadItem, Quotation, User } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { showToast } from '../shared/Toast';
+import { PartnerOnboardingModal } from '../partner/PartnerOnboardingModal';
 
 interface VehicleOwnerDashboardProps {
   currentUser: User;
@@ -63,8 +66,15 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
   const [originFilter, setOriginFilter] = useState('all');
   const [destFilter, setDestFilter] = useState('all');
 
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(false);
+  const [partnerEligibility, setPartnerEligibility] = useState(() =>
+    logisticsStore.checkPartnerBookingEligibility(currentUser.id)
+  );
+
   useEffect(() => {
     const update = () => {
+      setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
       setVehicles(
         logisticsStore.getVehicles().filter(
           (v) =>
@@ -79,6 +89,7 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
       setBookings(logisticsStore.getBookings().filter((b) => b.transporterId === currentUser.id || b.driverId === currentUser.id));
     };
     update();
+    logisticsStore.refreshPartnerVerificationStatus(currentUser).then(() => update());
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [currentUser.id, currentUser.businessName, currentUser.name]);
@@ -122,13 +133,38 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
     ['assigned', 'en_route_pickup', 'at_pickup', 'loading', 'in_transit', 'at_destination'].includes(b.status)
   );
 
+  const handleRefreshApproval = async () => {
+    setIsCheckingStatus(true);
+    try {
+      const status = await logisticsStore.refreshPartnerVerificationStatus(currentUser);
+      setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
+      if (status.isVerified) {
+        showToast('Account verified & approved! You can now bid on and accept loads.', 'success');
+      } else {
+        showToast('Still pending Admin verification & approval.', 'info');
+      }
+    } finally {
+      setIsCheckingStatus(false);
+    }
+  };
+
   // Submit quotation
   const handlePlaceBid = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedLoad || bidAmount <= 0) return;
 
+    if (!partnerEligibility.isEligible) {
+      showToast(`Pending Admin approval: ${partnerEligibility.reason}`, 'error');
+      setSelectedLoad(null);
+      setIsOnboardingOpen(true);
+      return;
+    }
+
     const chosenVehicle = vehicles.find((v) => v.id === bidVehicleId) || vehicles[0];
-    const vehReg = chosenVehicle ? chosenVehicle.registrationNumber : 'AS-03-CC-8822';
+    if (!chosenVehicle) {
+      showToast('Please register a commercial vehicle and wait for Admin RC verification first.', 'error');
+      return;
+    }
 
     try {
       logisticsStore.submitQuotation({
@@ -136,12 +172,12 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
         transporterId: currentUser.id,
         transporterName: currentUser.businessName || currentUser.name,
         transporterPhone: currentUser.phone,
-        vehicleId: chosenVehicle?.id || 'veh_owner_01',
-        vehicleRegNumber: vehReg,
-        vehicleCategory: chosenVehicle?.category || selectedLoad.requiredVehicleCategory,
-        driverName: chosenVehicle?.driverName || currentUser.name,
-        driverRating: chosenVehicle?.driverRating || 5.0,
-        driverCompletedTrips: chosenVehicle?.completedTrips || 0,
+        vehicleId: chosenVehicle.id,
+        vehicleRegNumber: chosenVehicle.registrationNumber,
+        vehicleCategory: chosenVehicle.category || selectedLoad.requiredVehicleCategory,
+        driverName: chosenVehicle.driverName || currentUser.name,
+        driverRating: chosenVehicle.driverRating || 5.0,
+        driverCompletedTrips: chosenVehicle.completedTrips || 0,
         quoteAmountInr: bidAmount,
         chargeBreakdown: {
           baseFreight: Math.round(bidAmount * 0.90),
@@ -165,7 +201,12 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
   };
 
   const handleInstantAccept = (load: LoadItem) => {
-    const chosenVehicle = vehicles.find((v) => v.isAvailable && !v.isBlocked) || vehicles[0];
+    if (!partnerEligibility.isEligible) {
+      showToast(`Load access locked: ${partnerEligibility.reason}`, 'error');
+      setIsOnboardingOpen(true);
+      return;
+    }
+    const chosenVehicle = vehicles.find((v) => v.isAvailable && !v.isBlocked && v.verificationStatus === 'verified') || vehicles[0];
     const res = logisticsStore.instantAcceptLoad(load.id, currentUser, chosenVehicle?.id);
     if (!res.success || !res.bookingId) {
       showToast(res.message || 'Could not accept ride.', 'error');
@@ -199,9 +240,9 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
         address: `${currentUser.city || 'Guwahati'} Transport Yard`,
         city: currentUser.city || 'Guwahati'
       },
-      isOnline: true,
-      isAvailable: true,
-      verificationStatus: 'verified',
+      isOnline: false,
+      isAvailable: false,
+      verificationStatus: 'pending',
       documents: [],
       assignedDriverId: currentUser.id,
       driverName: currentUser.name,
@@ -212,7 +253,7 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
     };
 
     logisticsStore.saveVehicle(newVeh);
-    showToast(`Vehicle ${newVeh.registrationNumber} registered & online!`, 'success');
+    showToast(`Vehicle ${newVeh.registrationNumber} submitted for Admin RC verification!`, 'info');
     setShowAddVehicleModal(false);
     setNewRegNumber('');
     setNewModel('');
@@ -220,6 +261,52 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-20">
+      <PartnerOnboardingModal
+        currentUser={currentUser}
+        isOpen={isOnboardingOpen}
+        onClose={() => setIsOnboardingOpen(false)}
+        onSuccess={() => setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id))}
+      />
+
+      {!partnerEligibility.isEligible && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-3xl p-5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-sm sm:text-base font-black text-[#171318]">
+                  Vehicle Owner Account Pending Backend Verification
+                </h2>
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-amber-200 text-amber-950 font-black uppercase">
+                  {partnerEligibility.status.replace('_', ' ')}
+                </span>
+              </div>
+              <p className="text-xs text-amber-950/90 leading-relaxed">{partnerEligibility.reason}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleRefreshApproval}
+              disabled={isCheckingStatus}
+              className="px-3.5 py-2 rounded-xl bg-white hover:bg-amber-100 border border-amber-300 text-amber-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCheckingStatus ? 'animate-spin' : ''}`} />
+              <span>Check Status</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsOnboardingOpen(true)}
+              className="px-4 py-2 rounded-xl bg-[#E83E83] hover:bg-[#D62D72] text-white text-xs font-extrabold cursor-pointer"
+            >
+              Upload KYC Docs
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Banner with Clean Pink Highlight */}
       <div className="bg-white rounded-3xl p-6 sm:p-7 border border-[#F2E8EE] shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-5">
         <div className="space-y-1.5">

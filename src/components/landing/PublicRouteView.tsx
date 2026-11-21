@@ -433,7 +433,7 @@ export const PublicRouteView: React.FC<PublicRouteViewProps> = ({
                 onClick={() => onOpenAuth('customer')}
                 className="inline-flex items-center gap-2 px-6 py-3.5 rounded-xl bg-[#171318] text-white text-sm font-extrabold hover:bg-black transition cursor-pointer"
               >
-                Post a Similar Load (Shipper)
+                Book a Truck for Similar Load
               </button>
             </div>
           </div>
@@ -488,7 +488,7 @@ export const PublicRouteView: React.FC<PublicRouteViewProps> = ({
               Live Commercial Freight Listings
             </h1>
             <p className="text-sm text-[#77717A] max-w-2xl">
-              Direct shipper consignments across Assam, Northeast India, and Pan-India corridors. Inspect specs and bid directly with 0% brokerage.
+              Direct commercial freight bookings across Assam, Northeast India, and Pan-India corridors. Inspect specs and bid directly with 0% brokerage.
             </p>
           </div>
           <div className="flex flex-wrap gap-2.5">
@@ -497,7 +497,7 @@ export const PublicRouteView: React.FC<PublicRouteViewProps> = ({
               onClick={() => onOpenAuth('customer')}
               className="px-5 py-2.5 rounded-xl bg-[#E83E83] text-white text-xs sm:text-sm font-extrabold hover:bg-[#D12E70] transition cursor-pointer"
             >
-              Post a Freight Load
+              Book a Truck
             </button>
             <button
               type="button"

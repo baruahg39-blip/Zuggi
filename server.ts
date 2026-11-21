@@ -10,9 +10,14 @@ import { tripsRouter } from './server/trips.js';
 import {
   supabaseRouter,
   findSupabaseUserByPhone,
+  findSupabaseUserById,
+  findSupabaseVehiclesByOwner,
   upsertSupabaseRecords,
   listSupabaseLoads,
-  findSupabaseLoadById
+  findSupabaseLoadById,
+  isPartnerRole,
+  adminSessionTokens,
+  verifyAdminTokenFromReq
 } from './server/supabase.js';
 import {
   SEO_CORRIDORS,
@@ -41,13 +46,39 @@ app.use(express.json({
   }
 }));
 
-// Permissive CORS middleware for PWA analyzers, PWABuilder, and browser packaging tools
+// Scoped CORS middleware: allow wildcard for public PWA/SEO/health endpoints, keep auth/admin/db same-origin
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, POST, PUT, DELETE');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+  const isSensitiveApi =
+    req.path.startsWith('/api/admin') ||
+    req.path.startsWith('/api/auth') ||
+    req.path.startsWith('/api/db');
+
+  if (!isSensitiveApi) {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, POST, PUT, DELETE');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+  } else {
+    const origin = req.headers.origin;
+    const host = req.headers.host;
+    if (origin && host) {
+      try {
+        const parsedOrigin = new URL(origin);
+        if (parsedOrigin.host === host) {
+          res.header('Access-Control-Allow-Origin', origin);
+          res.header('Vary', 'Origin');
+          res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+          res.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, x-zuggi-admin-token');
+        }
+      } catch {
+        // Ignore malformed Origin header
+      }
+    }
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
   }
   next();
 });
@@ -521,11 +552,25 @@ app.post('/api/auth/set-passcode', async (req, res) => {
     const hashed = hashPasscode(cleanPasscode);
     const now = new Date().toISOString();
 
+    const rawRole = String(userRecord?.role || existing?.role || 'customer').toLowerCase();
+    // Never allow public onboarding/passcode setup to self-assign admin role
+    const safeRole = rawRole === 'admin' ? (existing?.role === 'admin' ? 'admin' : 'customer') : rawRole;
+    const isTestPhone = clean10.startsWith('99999');
+
+    // CRITICAL: New drivers/owners/fleet partners MUST start unverified until Admin approves them on backend
+    const authoritativeVerified = isPartnerRole(safeRole)
+      ? (isTestPhone ? true : existing?.isVerified === true)
+      : true;
+
     const mergedUser = {
       ...existing,
       ...(userRecord && typeof userRecord === 'object' ? userRecord : {}),
       id: (userRecord?.id || existing?.id || `usr_${clean10}`),
+      role: safeRole,
       phone: `+91 ${clean10}`,
+      isVerified: authoritativeVerified,
+      isBlocked: Boolean(existing?.isBlocked),
+      blockedReason: existing?.blockedReason,
       hasPasscode: true,
       passcodeHash: hashed,
       passcodeUpdatedAt: now
@@ -533,7 +578,7 @@ app.post('/api/auth/set-passcode', async (req, res) => {
 
     passcodeUserStore.set(clean10, mergedUser);
     passcodeAttemptStore.delete(clean10);
-    await upsertSupabaseRecords('vs_users', [mergedUser]);
+    await upsertSupabaseRecords('vs_users', [mergedUser], { isAdmin: false });
 
     console.log(`[Passcode Set] Login passcode configured for +91 ${clean10} (${mergedUser.role || 'customer'})`);
     return res.json({
@@ -748,6 +793,191 @@ app.post('/api/auth/request-account-deletion', async (req, res) => {
     message:
       'Your Zuggi account deletion request has been logged. Login access is revoked immediately and personal profile/KYC data will be permanently erased within 7 working days (excluding statutory GST/tax invoices required by Indian law).'
   });
+});
+
+// 7. Endpoint: Issue in-memory Admin Session Bearer Token for backend approvals
+const adminLoginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+
+app.post('/api/auth/admin-session', (req, res) => {
+  const clientKey = String(req.ip || req.headers['x-forwarded-for'] || 'local').split(',')[0].trim();
+  const attemptState = adminLoginAttempts.get(clientKey);
+  if (attemptState && attemptState.lockedUntil > Date.now()) {
+    return res.status(429).json({
+      success: false,
+      message: 'Too many failed admin login attempts. Please try again in 10 minutes.'
+    });
+  }
+
+  const recordFailure = () => {
+    const prev = adminLoginAttempts.get(clientKey) || { count: 0, lockedUntil: 0 };
+    const nextCount = prev.count + 1;
+    adminLoginAttempts.set(clientKey, {
+      count: nextCount,
+      lockedUntil: nextCount >= 5 ? Date.now() + 10 * 60 * 1000 : 0
+    });
+  };
+
+  const { email, passcode } = req.body || {};
+  const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || 'baruahg39@gmail.com').trim().toLowerCase();
+  const providedEmail = String(email || '').trim().toLowerCase();
+  const providedPasscode = String(passcode || '').trim();
+  const configuredPasscode = (process.env.ZUGGI_ADMIN_PASSCODE || '').trim();
+
+  if (providedEmail !== ownerEmail) {
+    recordFailure();
+    return res.status(403).json({ success: false, message: 'Unauthorized admin identity.' });
+  }
+
+  if (configuredPasscode) {
+    const a = Buffer.from(providedPasscode);
+    const b = Buffer.from(configuredPasscode);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      recordFailure();
+      return res.status(401).json({ success: false, message: 'Invalid admin passcode.' });
+    }
+  } else if (!providedPasscode) {
+    recordFailure();
+    return res.status(401).json({ success: false, message: 'Admin credential required.' });
+  }
+
+  adminLoginAttempts.delete(clientKey);
+  const token = crypto.randomBytes(32).toString('hex');
+  adminSessionTokens.add(token);
+  return res.json({ success: true, token });
+});
+
+// 8. Endpoint: Authoritative Partner Verification Status (checked by Driver/Owner app)
+app.get('/api/partner/verification-status', async (req, res) => {
+  try {
+    const userId = String(req.query.userId || '').trim();
+    const clean10 = normalizeTenDigitPhone(String(req.query.phone || ''));
+
+    if (!userId && !clean10) {
+      return res.status(400).json({ success: false, message: 'userId or phone is required.' });
+    }
+
+    let userRecord: any = clean10 ? passcodeUserStore.get(clean10) || null : null;
+    const dbById = userId ? await findSupabaseUserById(userId) : null;
+    const dbByPhone = !dbById && clean10 ? await findSupabaseUserByPhone(clean10) : null;
+    const authoritativeUser = dbById || dbByPhone || userRecord;
+
+    if (!authoritativeUser) {
+      return res.json({
+        success: true,
+        found: false,
+        isVerified: false,
+        isBlocked: false,
+        verifiedVehicleCount: 0,
+        totalVehicleCount: 0,
+        status: 'PENDING_APPROVAL'
+      });
+    }
+
+    if (clean10 && dbById) {
+      passcodeUserStore.set(clean10, { ...(userRecord || {}), ...dbById });
+    }
+
+    const vehicles = await findSupabaseVehiclesByOwner(String(authoritativeUser.id || userId));
+    const verifiedVehicles = vehicles.filter((v: any) => v.verificationStatus === 'verified' && !v.isBlocked);
+    const isVerified = authoritativeUser.isVerified === true;
+    const isBlocked = Boolean(authoritativeUser.isBlocked);
+
+    return res.json({
+      success: true,
+      found: true,
+      userId: authoritativeUser.id,
+      isVerified,
+      isBlocked,
+      blockedReason: authoritativeUser.blockedReason || undefined,
+      verifiedVehicleCount: verifiedVehicles.length,
+      totalVehicleCount: vehicles.length,
+      vehicles: vehicles.map((v: any) => ({
+        id: v.id,
+        registrationNumber: v.registrationNumber,
+        verificationStatus: v.verificationStatus || 'pending',
+        isBlocked: Boolean(v.isBlocked)
+      })),
+      status: isBlocked ? 'SUSPENDED' : isVerified ? 'APPROVED' : 'PENDING_APPROVAL'
+    });
+  } catch (err: any) {
+    console.error('[Partner Verification Status Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to check verification status.' });
+  }
+});
+
+// 9. Endpoint: Admin Partner / Vehicle Approval (Backend Source of Truth)
+app.post('/api/admin/partners/verify', async (req, res) => {
+  if (!verifyAdminTokenFromReq(req)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Admin authentication required to approve or revoke partner verification.'
+    });
+  }
+
+  try {
+    const { userId, phone, approved, notes, vehicleId } = req.body || {};
+    const clean10 = normalizeTenDigitPhone(phone);
+    const isApproved = Boolean(approved);
+
+    let targetUser =
+      (userId ? await findSupabaseUserById(String(userId)) : null) ||
+      (clean10 ? await findSupabaseUserByPhone(clean10) : null) ||
+      (clean10 ? passcodeUserStore.get(clean10) : null);
+
+    if (!targetUser && !vehicleId) {
+      return res.status(404).json({ success: false, message: 'Partner account not found on backend.' });
+    }
+
+    if (targetUser) {
+      const updatedUser = {
+        ...targetUser,
+        isVerified: isApproved,
+        verifiedAt: isApproved ? new Date().toISOString() : undefined,
+        verificationNotes: notes ? String(notes).slice(0, 400) : undefined
+      };
+      const targetPhone10 = normalizeTenDigitPhone(updatedUser.phone || phone);
+      if (targetPhone10) {
+        const memPrev = passcodeUserStore.get(targetPhone10) || {};
+        passcodeUserStore.set(targetPhone10, { ...memPrev, ...updatedUser });
+      }
+      await upsertSupabaseRecords('vs_users', [updatedUser], { isAdmin: true });
+
+      // Update partner vehicles in Supabase as well
+      const ownerVehicles = await findSupabaseVehiclesByOwner(String(updatedUser.id));
+      const vehiclesToUpdate = vehicleId
+        ? ownerVehicles.filter((v: any) => v.id === vehicleId)
+        : ownerVehicles;
+
+      if (vehiclesToUpdate.length > 0) {
+        const nextVehicles = vehiclesToUpdate.map((v: any) => ({
+          ...v,
+          verificationStatus: isApproved ? 'verified' : 'pending',
+          isOnline: isApproved ? v.isOnline : false,
+          isAvailable: isApproved ? true : false
+        }));
+        await upsertSupabaseRecords('vs_vehicles', nextVehicles, { isAdmin: true });
+      }
+
+      console.log(
+        `[ADMIN PARTNER VERIFY] ${updatedUser.name || updatedUser.id} (${updatedUser.phone || ''}) -> ${
+          isApproved ? 'APPROVED' : 'PENDING/REVOKED'
+        }`
+      );
+      return res.json({
+        success: true,
+        isVerified: isApproved,
+        user: sanitizeUserForClient(updatedUser),
+        message: isApproved
+          ? 'Partner approved on backend! Driver/Owner can now bid on and accept loads.'
+          : 'Partner verification revoked. Load access locked until re-approved.'
+      });
+    }
+
+    return res.json({ success: true, isVerified: isApproved });
+  } catch (err: any) {
+    console.error('[Admin Partner Verify Error]:', err);
+    return res.status(500).json({ success: false, message: 'Failed to update partner verification.' });
+  }
 });
 
 // --- API Endpoint: Real-time Northeast India Logistics Intelligence & Fuel Trends ---

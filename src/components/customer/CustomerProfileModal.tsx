@@ -128,12 +128,12 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm sm:text-base font-extrabold text-white">
-                  {isShipper && 'Shipper Business Profile'}
+                  {isShipper && 'Truck Booking Profile'}
                   {isDriver && 'Driver & Fleet Profile'}
                   {isAdmin && 'Platform Owner Profile'}
                 </h3>
                 <span className="text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-wider bg-[#FFF0F6] text-[#E83E83]">
-                  {currentUser.role.replace('_', ' ')}
+                  {isShipper ? 'Book a Truck' : currentUser.role.replace('_', ' ')}
                 </span>
               </div>
               <p className="text-[11px] text-gray-400">
@@ -181,25 +181,25 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
           <div className="p-3.5 rounded-2xl bg-gray-50 border border-gray-200 flex items-center justify-between">
             <div>
               <span className="font-extrabold text-[#171318] block text-xs">
-                {portalMode === 'partner' ? 'Partner Mobile App Account' : 'Shipper & Governance Web Account'}
+                {portalMode === 'partner' ? 'Partner Mobile App Account' : 'Zuggi Truck Booking Account'}
               </span>
               <span className="text-[10px] text-[#77717A]">
                 {isShipper
-                  ? 'Signed in as Customer / Shipper on Web'
+                  ? 'Signed in to Book a Truck on Web'
                   : 'Signed in as Driver / Fleet Owner in Mobile App'}
               </span>
             </div>
             <span className="px-2.5 py-1 rounded-xl bg-[#FFF0F6] text-[#E83E83] text-[10px] font-black uppercase">
-              {currentUser.role.replace('_', ' ')}
+              {isShipper ? 'Book a Truck' : currentUser.role.replace('_', ' ')}
             </span>
           </div>
 
-          {/* VIEW A: SHIPPER FORM */}
+          {/* VIEW A: TRUCK BOOKING ACCOUNT FORM */}
           {isShipper && (
             <form onSubmit={handleSave} className="space-y-4">
               {/* Account Type Toggle */}
               <div>
-                <label className="text-[#77717A] block mb-1.5 font-bold text-[11px]">Shipper Category</label>
+                <label className="text-[#77717A] block mb-1.5 font-bold text-[11px]">Account Type</label>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
@@ -210,7 +210,7 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
                         : 'bg-gray-50 border-gray-200 text-[#77717A]'
                     }`}
                   >
-                    Individual Consignor
+                    Individual / Personal
                   </button>
                   <button
                     type="button"

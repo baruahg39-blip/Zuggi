@@ -115,6 +115,15 @@ class LogisticsStore {
   private listeners: Set<() => void> = new Set();
   private unsubscribers: Array<() => void> = [];
   private supabaseBootstrapped = false;
+  private adminSessionToken: string | null = null;
+
+  public setAdminSessionToken(token: string | null) {
+    this.adminSessionToken = token;
+  }
+
+  public getAdminSessionToken(): string | null {
+    return this.adminSessionToken;
+  }
 
   constructor() {
     this.purgeLegacyDemoData();
@@ -262,9 +271,13 @@ class LogisticsStore {
   ) {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     const body = Array.isArray(payload) ? { table, records: payload } : { table, record: payload };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.adminSessionToken) {
+      headers['Authorization'] = `Bearer ${this.adminSessionToken}`;
+    }
     fetch('/api/db/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body)
     }).catch(() => {});
   }
@@ -908,7 +921,7 @@ class LogisticsStore {
     const vehicles = this.getVehicles();
     const v = vehicles.find((item) => item.id === vehicleId);
     if (v) {
-      if (isOnline && v.isBlocked) {
+      if (isOnline && (v.isBlocked || v.verificationStatus !== 'verified')) {
         return;
       }
       v.isOnline = isOnline;
@@ -1110,10 +1123,22 @@ class LogisticsStore {
     const currentUser = this.getCurrentUser();
     const isTestBid = !!(currentUser?.isTestAccount || (currentUser?.phone && currentUser.phone.includes('99999')));
     
-    // Strict Booking Permission: Enforce approved partner status
+    // Strict Booking Permission: Enforce approved partner status & verified vehicle
     const eligibility = this.checkPartnerBookingEligibility(quoteData.transporterId);
     if (!eligibility.isEligible && !isTestBid) {
       throw new Error(`Bidding restricted: ${eligibility.reason}`);
+    }
+    if (!isTestBid) {
+      const selectedVehicle = this.getVehicleById(quoteData.vehicleId);
+      if (!selectedVehicle) {
+        throw new Error('Please register your commercial vehicle and wait for Admin RC verification before bidding.');
+      }
+      if (selectedVehicle.isBlocked) {
+        throw new Error(`Vehicle ${selectedVehicle.registrationNumber} is blocked by Admin.`);
+      }
+      if (selectedVehicle.verificationStatus !== 'verified') {
+        throw new Error(`Vehicle ${selectedVehicle.registrationNumber} is pending Admin RC verification. Bidding unlocks once approved.`);
+      }
     }
 
     const load = this.getLoadById(quoteData.loadId);
@@ -1557,12 +1582,16 @@ class LogisticsStore {
       };
     }
 
+    const isSandboxPartner = Boolean(
+      partnerUser.isTestAccount || (partnerUser.phone && partnerUser.phone.includes('99999'))
+    );
+
     const vehicles = this.getVehicles();
     let assignedVehicle =
-      (preferredVehicleId ? vehicles.find((v) => v.id === preferredVehicleId) : undefined) ||
-      vehicles.find((v) => v.ownerId === partnerUser.id && v.isAvailable && !v.isBlocked) ||
-      vehicles.find((v) => v.ownerId === partnerUser.id && !v.isBlocked) ||
-      vehicles.find((v) => v.assignedDriverId === partnerUser.id && !v.isBlocked);
+      (preferredVehicleId ? vehicles.find((v) => v.id === preferredVehicleId && (v.ownerId === partnerUser.id || v.assignedDriverId === partnerUser.id || isSandboxPartner)) : undefined) ||
+      vehicles.find((v) => v.ownerId === partnerUser.id && v.isAvailable && !v.isBlocked && v.verificationStatus === 'verified') ||
+      vehicles.find((v) => v.ownerId === partnerUser.id && !v.isBlocked && v.verificationStatus === 'verified') ||
+      vehicles.find((v) => v.assignedDriverId === partnerUser.id && !v.isBlocked && v.verificationStatus === 'verified');
 
     if (assignedVehicle?.isBlocked) {
       return {
@@ -1571,7 +1600,20 @@ class LogisticsStore {
       };
     }
 
+    if (assignedVehicle && !isSandboxPartner && assignedVehicle.verificationStatus !== 'verified') {
+      return {
+        success: false,
+        message: `Vehicle ${assignedVehicle.registrationNumber} is still pending Admin RC verification. Load acceptance unlocks after approval.`
+      };
+    }
+
     if (!assignedVehicle) {
+      if (!isSandboxPartner) {
+        return {
+          success: false,
+          message: 'No Admin-verified commercial vehicle found on your account. Please register your truck & RC documents and wait for backend Admin approval.'
+        };
+      }
       const cleanPhone = (partnerUser.phone || '9999').replace(/\D/g, '').slice(-4);
       assignedVehicle = {
         id: `veh_${partnerUser.id}_${Date.now().toString().slice(-4)}`,
@@ -3745,8 +3787,219 @@ class LogisticsStore {
       linkId: app.id
     });
 
+    // Persist authoritative backend verification status to Express + Supabase
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined' && (review.action === 'APPROVED' || review.action === 'REACTIVATED' || review.action === 'REJECTED' || review.action === 'SUSPENDED')) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (this.adminSessionToken) {
+        headers['Authorization'] = `Bearer ${this.adminSessionToken}`;
+      }
+      fetch('/api/admin/partners/verify', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: app.userId,
+          phone: app.phone,
+          approved: review.action === 'APPROVED' || review.action === 'REACTIVATED',
+          notes: review.notes
+        })
+      }).catch(() => {});
+    }
+
     this.triggerChange();
     return { success: true, message: `Application ${app.fullName} updated to ${app.status}.` };
+  }
+
+  /**
+   * Direct Admin 1-Click Partner Verification / Revocation (Users & Drivers Tab)
+   * Updates user.isVerified, partner's vehicles, matching PartnerApplication, and backend Supabase.
+   */
+  public async approvePartnerByAdmin(
+    userId: string,
+    approved: boolean,
+    notes?: string
+  ): Promise<{ success: boolean; message: string }> {
+    const users = this.getUsers();
+    const user = users.find((u) => u.id === userId);
+    if (!user) return { success: false, message: 'Partner account not found.' };
+
+    user.isVerified = approved;
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    this.syncToSupabase('vs_users', user);
+
+    // Sync matching vehicles
+    const vehicles = this.getVehicles();
+    const touchedVehicles: CommercialVehicle[] = [];
+    vehicles.forEach((v) => {
+      if (v.ownerId === userId || v.assignedDriverId === userId) {
+        v.verificationStatus = approved ? 'verified' : 'pending';
+        if (!approved) {
+          v.isOnline = false;
+          v.isAvailable = false;
+        } else {
+          v.isAvailable = true;
+        }
+        v.documents = (v.documents || []).map((d) => ({
+          ...d,
+          verificationStatus: approved ? 'verified' : 'pending',
+          verifiedAt: approved ? new Date().toISOString() : undefined
+        }));
+        touchedVehicles.push(v);
+      }
+    });
+    if (touchedVehicles.length > 0) {
+      localStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(vehicles));
+      this.syncToSupabase('vs_vehicles', touchedVehicles);
+    }
+
+    // Update matching PartnerApplication if present
+    const apps = this.getPartnerApplications();
+    const app = apps.find((a) => a.userId === userId || (user.phone && a.phone === user.phone));
+    if (app) {
+      app.status = approved ? 'APPROVED' : 'UNDER_REVIEW';
+      app.updatedAt = new Date().toISOString();
+      if (notes) app.adminNotes = notes;
+      localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+    }
+
+    // Persist directly to backend authoritative endpoint
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (this.adminSessionToken) {
+          headers['Authorization'] = `Bearer ${this.adminSessionToken}`;
+        }
+        await fetch('/api/admin/partners/verify', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            userId: user.id,
+            phone: user.phone,
+            approved,
+            notes
+          })
+        });
+      } catch {
+        // Local sync already applied
+      }
+    }
+
+    this.addNotification({
+      recipientRole: 'driver',
+      recipientId: user.id,
+      title: approved ? 'Account Verified & Approved!' : 'Account Verification Pending',
+      message: approved
+        ? 'Your Zuggi Partner KYC and vehicle documents are verified. You can now go online, bid, and accept loads.'
+        : notes || 'Your partner account has been moved back to pending verification.',
+      type: 'alert',
+      linkId: user.id
+    });
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: approved
+        ? `${user.name} approved! They can now bid on and accept loads.`
+        : `${user.name} verification revoked (pending re-approval).`
+    };
+  }
+
+  /**
+   * Poll authoritative backend verification status so driver/owner phones unlock immediately when Admin approves.
+   */
+  public async refreshPartnerVerificationStatus(user: User): Promise<{
+    isVerified: boolean;
+    isBlocked: boolean;
+    status: string;
+  }> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return { isVerified: Boolean(user.isVerified), isBlocked: Boolean(user.isBlocked), status: user.isVerified ? 'APPROVED' : 'PENDING_APPROVAL' };
+    }
+    try {
+      const params = new URLSearchParams();
+      if (user.id) params.set('userId', user.id);
+      if (user.phone) params.set('phone', user.phone);
+      const res = await fetch(`/api/partner/verification-status?${params.toString()}`);
+      if (!res.ok) {
+        return { isVerified: Boolean(user.isVerified), isBlocked: Boolean(user.isBlocked), status: user.isVerified ? 'APPROVED' : 'PENDING_APPROVAL' };
+      }
+      const data = await res.json();
+      if (!data?.success || !data?.found) {
+        return { isVerified: Boolean(user.isVerified), isBlocked: Boolean(user.isBlocked), status: user.isVerified ? 'APPROVED' : 'PENDING_APPROVAL' };
+      }
+
+      const nextVerified = data.isVerified === true;
+      const nextBlocked = Boolean(data.isBlocked);
+      let changed = false;
+
+      // Update user record in local store
+      const users = this.getUsers();
+      const idx = users.findIndex((u) => u.id === user.id || (user.phone && u.phone === user.phone));
+      if (idx >= 0) {
+        if (users[idx].isVerified !== nextVerified || Boolean(users[idx].isBlocked) !== nextBlocked) {
+          users[idx] = {
+            ...users[idx],
+            isVerified: nextVerified,
+            isBlocked: nextBlocked,
+            blockedReason: data.blockedReason
+          };
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+          changed = true;
+        }
+      }
+
+      // Sync vehicle verification statuses from backend
+      if (Array.isArray(data.vehicles) && data.vehicles.length > 0) {
+        const vehicles = this.getVehicles();
+        data.vehicles.forEach((rv: any) => {
+          const localVeh = vehicles.find((v) => v.id === rv.id || v.registrationNumber === rv.registrationNumber);
+          if (localVeh && (localVeh.verificationStatus !== rv.verificationStatus || Boolean(localVeh.isBlocked) !== Boolean(rv.isBlocked))) {
+            localVeh.verificationStatus = rv.verificationStatus;
+            localVeh.isBlocked = Boolean(rv.isBlocked);
+            changed = true;
+          }
+        });
+        if (changed) {
+          localStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(vehicles));
+        }
+      }
+
+      // Sync matching PartnerApplication status
+      const apps = this.getPartnerApplications();
+      const app = apps.find((a) => a.userId === user.id || (user.phone && a.phone === user.phone));
+      if (app) {
+        if (nextVerified && app.status !== 'APPROVED') {
+          app.status = 'APPROVED';
+          app.updatedAt = new Date().toISOString();
+          localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+          changed = true;
+        } else if (!nextVerified && app.status === 'APPROVED') {
+          app.status = 'UNDER_REVIEW';
+          app.updatedAt = new Date().toISOString();
+          localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+          changed = true;
+        }
+      }
+
+      // Update active currentUser session
+      const current = this.getCurrentUser();
+      if (current && current.id === user.id && (current.isVerified !== nextVerified || Boolean(current.isBlocked) !== nextBlocked)) {
+        const updatedCurrent: User = {
+          ...current,
+          isVerified: nextVerified,
+          isBlocked: nextBlocked,
+          blockedReason: data.blockedReason
+        };
+        localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedCurrent));
+        changed = true;
+      }
+
+      if (changed) {
+        this.triggerChange();
+      }
+      return { isVerified: nextVerified, isBlocked: nextBlocked, status: data.status || (nextVerified ? 'APPROVED' : 'PENDING_APPROVAL') };
+    } catch {
+      return { isVerified: Boolean(user.isVerified), isBlocked: Boolean(user.isBlocked), status: user.isVerified ? 'APPROVED' : 'PENDING_APPROVAL' };
+    }
   }
 
   public checkPartnerBookingEligibility(userId: string): {
@@ -3756,66 +4009,66 @@ class LogisticsStore {
     application?: PartnerApplication;
   } {
     const apps = this.getPartnerApplications();
-    let app = apps.find((a) => a.userId === userId);
-
     const users = this.getUsers();
     const current = this.getCurrentUser();
     const user = users.find((u) => u.id === userId) || (current?.id === userId ? current : undefined);
+    let app = apps.find((a) => a.userId === userId || (user?.phone && a.phone === user.phone));
 
     if (user?.isBlocked) {
       return {
         isEligible: false,
         status: 'SUSPENDED',
-        reason: `Account suspended by Super Admin: ${user.blockedReason || 'Compliance review hold'}.`
-      };
-    }
-
-    // If user is test account, link approved profile
-    if (!app && user && (user.isTestAccount || user.phone?.includes('99999') || user.phone?.includes('96789'))) {
-      app = apps.find((a) => a.userId === 'user_driver_01');
-    }
-
-    // Newly onboarded/verified Drivers & Fleets via instant mobile onboarding are permitted immediately
-    if (!app && user && (user.isVerified || user.role === 'driver' || user.role === 'vehicle_owner' || user.role === 'fleet_partner' || user.role === 'transporter')) {
-      return {
-        isEligible: true,
-        status: 'APPROVED',
-        reason: 'Verified partner account active for instant dispatch & bidding.'
-      };
-    }
-
-    if (!app) {
-      return {
-        isEligible: false,
-        status: 'DRAFT',
-        reason: 'Vehicle partner onboarding not completed. Please finish KYC registration and accept mandatory transport agreements.'
-      };
-    }
-
-    if (app.status === 'APPROVED') {
-      return {
-        isEligible: true,
-        status: 'APPROVED',
-        reason: 'Partner is fully verified, KYC authenticated, and permitted to bid and execute commercial transport.',
+        reason: `Account suspended by Super Admin: ${user.blockedReason || 'Compliance review hold'}.`,
         application: app
       };
     }
 
-    const reasonMap: Record<PartnerAccountStatus, string> = {
-      DRAFT: 'Application is in draft state. Complete document upload and sign agreements.',
-      SUBMITTED: 'Application submitted and queued for Parivahan & RTO compliance verification.',
-      UNDER_REVIEW: 'Application is actively under compliance desk review. Bidding will unlock once approved.',
-      DOCUMENTS_REQUIRED: `Additional documents required: ${app.requestedChangesNotes || 'Please re-upload expired or rejected certificates.'}`,
-      REJECTED: `Application was rejected by compliance desk: ${app.rejectionReason || 'Non-compliant documents.'}`,
-      SUSPENDED: 'Partner account is temporarily suspended. Contact compliance support.',
-      EXPIRED: 'Statutory documents (RC, Commercial DL, or Fitness) have expired. Please upload renewed certificates.',
-      APPROVED: 'Approved'
-    };
+    // Explicit sandbox test accounts (99999...) remain active for demo testing
+    const isSandboxTest = Boolean(user && (user.isTestAccount || user.phone?.includes('99999')));
+    if (isSandboxTest) {
+      if (!app) app = apps.find((a) => a.userId === 'user_driver_01');
+      return {
+        isEligible: true,
+        status: 'APPROVED',
+        reason: 'Sandbox demo partner account active for testing.',
+        application: app
+      };
+    }
+
+    // Strict check: if PartnerApplication exists and is NOT APPROVED, block loads immediately
+    if (app && app.status !== 'APPROVED') {
+      const reasonMap: Record<PartnerAccountStatus, string> = {
+        DRAFT: 'KYC onboarding incomplete. Upload Driving License, Vehicle RC, and sign transport agreements for Admin approval.',
+        SUBMITTED: 'Your account & KYC documents are submitted and waiting for backend Admin verification & approval.',
+        UNDER_REVIEW: 'Your KYC & vehicle documents are under Admin review. Load bidding and acceptance will unlock once approved.',
+        DOCUMENTS_REQUIRED: `Additional documents required: ${app.requestedChangesNotes || 'Please re-upload valid RC/DL/Insurance certificates.'}`,
+        REJECTED: `Application rejected by Admin: ${app.rejectionReason || 'Non-compliant or mismatched documents.'}`,
+        SUSPENDED: 'Partner account is temporarily suspended. Contact Zuggi Compliance Desk.',
+        EXPIRED: 'Statutory documents (RC, Commercial DL, or Fitness) have expired. Please upload renewed certificates.',
+        APPROVED: 'Approved'
+      };
+      return {
+        isEligible: false,
+        status: app.status,
+        reason: reasonMap[app.status] || 'Pending Admin verification & approval.',
+        application: app
+      };
+    }
+
+    // Strict backend verification check: real drivers/owners MUST have Admin-approved isVerified === true
+    if (!user || user.isVerified !== true) {
+      return {
+        isEligible: false,
+        status: app ? app.status : 'SUBMITTED',
+        reason: 'Backend verification pending: Your new driver/owner account must be verified and approved by Zuggi Admin before you can bid on or accept loads.',
+        application: app
+      };
+    }
 
     return {
-      isEligible: false,
-      status: app.status,
-      reason: reasonMap[app.status] || 'Partner is not yet approved for commercial transport.',
+      isEligible: true,
+      status: 'APPROVED',
+      reason: 'Partner account verified and approved by Zuggi Admin for commercial load bidding & dispatch.',
       application: app
     };
   }

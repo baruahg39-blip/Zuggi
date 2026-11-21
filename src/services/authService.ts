@@ -766,18 +766,22 @@ class AuthService {
     const hasPasscode = Boolean(profile.passcode && /^\d{4,6}$/.test(profile.passcode.trim()));
     const nowIso = new Date().toISOString();
 
+    const isNewPartner = profile.role === 'driver';
+    const isTestPhone = cleanPhone.startsWith('99999');
+
     const updatedUser: User = {
       id: profile.userId,
       name: profile.name,
       phone: `+91 ${cleanPhone}`,
-      email: `${profile.name.toLowerCase().replace(/\s+/g, '')}@vahansetu.in`,
+      email: `${profile.name.toLowerCase().replace(/\s+/g, '')}@zuggi.in`,
       role: profile.role,
       businessName: profile.businessName || (profile.role === 'customer' ? `${profile.name} Traders` : `${profile.name} Transport`),
       city: profile.city,
       state: 'Assam',
       gstin: profile.gstin,
       pan: profile.pan,
-      isVerified: true,
+      // CRITICAL: Brand-new drivers/owners MUST remain unverified until Admin approves on backend
+      isVerified: isNewPartner ? isTestPhone : true,
       hasPasscode,
       passcodeUpdatedAt: hasPasscode ? nowIso : undefined,
       createdAt: nowIso
@@ -791,7 +795,7 @@ class AuthService {
         id: vehId,
         ownerId: profile.userId,
         transporterName: profile.businessName || `${profile.name} Transport`,
-        registrationNumber: profile.vehicleRegNumber,
+        registrationNumber: profile.vehicleRegNumber.toUpperCase().trim(),
         category: (profile.vehicleCategory as VehicleCategoryType) || 'tata_ace',
         bodyType: 'tarpaulin',
         capacityKg: profile.vehicleCategory === 'eicher_14ft' ? 4500 : 1500,
@@ -804,17 +808,17 @@ class AuthService {
           address: `${profile.city || 'Guwahati'} Transport Hub`,
           city: profile.city || 'Guwahati'
         },
-        isOnline: true,
-        isAvailable: true,
-        verificationStatus: 'verified',
+        isOnline: isTestPhone,
+        isAvailable: isTestPhone,
+        verificationStatus: isTestPhone ? 'verified' : 'pending',
         documents: [
           {
             id: `doc_rc_${vehId}`,
             type: 'rc',
-            documentNumber: profile.vehicleRegNumber,
+            documentNumber: profile.vehicleRegNumber.toUpperCase().trim(),
             documentUrl: '',
             expiryDate: '2032-12-31',
-            verificationStatus: 'verified'
+            verificationStatus: isTestPhone ? 'verified' : 'pending'
           }
         ],
         driverName: profile.name,
@@ -825,6 +829,75 @@ class AuthService {
       };
 
       logisticsStore.saveVehicle(vehicleObj);
+    }
+
+    // Auto-create SUBMITTED PartnerApplication in Admin Compliance Queue for new real drivers/owners
+    if (isNewPartner && !isTestPhone) {
+      const existingApp = logisticsStore.getPartnerApplicationByUserId(profile.userId);
+      if (!existingApp) {
+        const resolvedPartnerType = profile.isFleetOwner ? 'fleet_partner' : 'driver';
+        logisticsStore.submitPartnerApplication({
+          userId: profile.userId,
+          partnerType: resolvedPartnerType,
+          fullName: profile.name,
+          phone: updatedUser.phone,
+          email: updatedUser.email,
+          address: `${profile.city || 'Guwahati'}, Assam`,
+          city: profile.city || 'Guwahati',
+          state: 'Assam',
+          pincode: '781001',
+          pan: profile.pan || '',
+          gstin: profile.gstin || '',
+          bankDetails: {
+            accountHolderName: profile.name,
+            accountNumber: '',
+            ifscCode: '',
+            bankName: '',
+            isVerified: false
+          },
+          registeredVehicles: vehicleObj
+            ? [
+                {
+                  id: vehicleObj.id,
+                  registrationNumber: vehicleObj.registrationNumber,
+                  category: vehicleObj.category,
+                  modelName: vehicleObj.modelName,
+                  capacityKg: vehicleObj.capacityKg,
+                  permitType: vehicleObj.permitType,
+                  rcDocNumber: vehicleObj.registrationNumber
+                }
+              ]
+            : [],
+          documents: [
+            ...(profile.dlNumber
+              ? [
+                  {
+                    id: `doc_dl_${cleanPhone}`,
+                    name: 'Commercial Driving License',
+                    category: 'dl' as const,
+                    documentNumber: profile.dlNumber.toUpperCase().trim(),
+                    fileUrl: '',
+                    uploadedAt: nowIso,
+                    status: 'pending' as const
+                  }
+                ]
+              : []),
+            ...(profile.vehicleRegNumber
+              ? [
+                  {
+                    id: `doc_rc_${cleanPhone}`,
+                    name: 'Vehicle Registration Certificate (RC)',
+                    category: 'rc' as const,
+                    documentNumber: profile.vehicleRegNumber.toUpperCase().trim(),
+                    fileUrl: '',
+                    uploadedAt: nowIso,
+                    status: 'pending' as const
+                  }
+                ]
+              : [])
+          ]
+        });
+      }
     }
 
     const localDigest = hasPasscode
@@ -855,7 +928,7 @@ class AuthService {
           dlNumber: profile.dlNumber || 'PENDING_UPLOAD',
           isFleetOwner: profile.isFleetOwner ?? false,
           fleetSize: profile.fleetSize ?? 1,
-          verificationStatus: 'verified',
+          verificationStatus: isTestPhone ? 'verified' : 'pending',
           rating: 5.0,
           completedTrips: 0,
           totalEarnings: 0,
@@ -1244,6 +1317,22 @@ class AuthService {
       // Local fallback
     }
 
+    try {
+      const sessionRes = await fetch('/api/auth/admin-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: secretPasscode.trim() })
+      });
+      if (sessionRes.ok) {
+        const sessionData = await sessionRes.json();
+        if (sessionData?.token) {
+          logisticsStore.setAdminSessionToken(sessionData.token);
+        }
+      }
+    } catch {
+      // Offline preview fallback
+    }
+
     logisticsStore.saveUser(adminUser);
     logisticsStore.setCurrentUser(adminUser);
     return adminUser;
@@ -1370,6 +1459,7 @@ class AuthService {
       sessionStorage.setItem('vs_logged_out', 'true');
       sessionStorage.removeItem('vs_otp_cooldown_expiry');
     }
+    logisticsStore.setAdminSessionToken(null);
     logisticsStore.setCurrentUser(null);
   }
 }

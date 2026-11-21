@@ -704,6 +704,52 @@ app.post('/api/auth/reset-passcode', async (req, res) => {
   }
 });
 
+// --- GOOGLE PLAY POLICY: ACCOUNT & DATA DELETION REQUEST ENDPOINT ---
+const accountDeletionRequests: Array<{
+  id: string;
+  phone: string;
+  reason: string;
+  source: string;
+  requestedAt: string;
+}> = [];
+
+app.post('/api/auth/request-account-deletion', async (req, res) => {
+  const { phone, reason, source } = req.body || {};
+  const digits = String(phone || '').replace(/\D/g, '');
+  const clean10 = digits.length > 10 && digits.startsWith('91') ? digits.slice(2) : digits.slice(-10);
+
+  if (clean10.length !== 10) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please provide a valid 10-digit registered mobile number.'
+    });
+  }
+
+  const refId = `DEL-ZUG-${Date.now().toString().slice(-6)}`;
+  const entry = {
+    id: refId,
+    phone: `+91 ${clean10}`,
+    reason: String(reason || 'User requested account deletion').trim().slice(0, 500),
+    source: String(source || 'web_delete_account').trim(),
+    requestedAt: new Date().toISOString()
+  };
+
+  accountDeletionRequests.unshift(entry);
+  passcodeUserStore.delete(clean10);
+  passcodeResetTokenStore.delete(clean10);
+  passcodeAttemptStore.delete(clean10);
+  otpVerifiedStore.delete(clean10);
+
+  console.log(`[ACCOUNT DELETION REQUEST] ${refId} | ${entry.phone} | source=${entry.source}`);
+
+  return res.json({
+    success: true,
+    referenceId: refId,
+    message:
+      'Your Zuggi account deletion request has been logged. Login access is revoked immediately and personal profile/KYC data will be permanently erased within 7 working days (excluding statutory GST/tax invoices required by Indian law).'
+  });
+});
+
 // --- API Endpoint: Real-time Northeast India Logistics Intelligence & Fuel Trends ---
 interface CachedIntelligence {
   content: string;

@@ -2,10 +2,11 @@
   "id": "/partner",
   "name": "Zuggi Partner - Driver & Fleet App",
   "short_name": "Zuggi App",
-  "description": "Dedicated mobile app for commercial truck drivers, vehicle owners, and fleet partners. Browse daily loads, submit bids, dispatch fleet, and track GPS earnings.",
+  "description": "Dedicated mobile app for commercial truck drivers, vehicle owners, and fleet partners. Browse daily loads, submit bids, dispatch fleet, capture e-POD, and track GPS earnings.",
   "start_url": "/partner",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "theme_color": "#060309",
   "background_color": "#060309",
@@ -13,6 +14,9 @@
   "lang": "en",
   "dir": "ltr",
   "prefer_related_applications": false,
+  "launch_handler": {
+    "client_mode": ["navigate-existing", "auto"]
+  },
   "icons": [
     {
       "src": "/pwa-192x192.png",
@@ -33,20 +37,36 @@
       "purpose": "maskable"
     }
   ],
+  "screenshots": [
+    {
+      "src": "/playstore-screenshot-mobile.png",
+      "sizes": "1080x1920",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Zuggi Partner Driver & Fleet Mobile App"
+    },
+    {
+      "src": "/playstore-screenshot-wide.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Zuggi Partner Fleet Dispatch & Freight Exchange"
+    }
+  ],
   "shortcuts": [
     {
       "name": "Find Highway Loads",
       "short_name": "Find Loads",
-      "description": "Browse open commercial freight loads across Northeast corridors",
+      "description": "Browse open commercial freight loads across Assam and India corridors",
       "url": "/partner?view=find_loads",
-      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png" }]
     },
     {
-      "name": "My Fleet & Trips",
-      "short_name": "My Trips",
-      "description": "Manage active dispatched trips and live GPS tracking",
+      "name": "My Active Trip",
+      "short_name": "Active Trip",
+      "description": "Manage live dispatched trip, GPS tracking, and e-POD delivery",
       "url": "/partner?view=trips",
-      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192" }]
+      "icons": [{ "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png" }]
     }
   ]
 }

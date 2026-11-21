@@ -268,7 +268,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-xs flex items-center justify-between gap-3">
           <div className="text-xs">
             <p className="font-bold text-[#171318]">Booking a truck to ship goods?</p>
-            <p className="text-[11px] text-[#77717A]">Shippers & Admins sign in on the Web Portal.</p>
+            <p className="text-[11px] text-[#77717A]">Shippers &amp; Admins sign in on the Web Portal.</p>
           </div>
           <button
             type="button"
@@ -278,6 +278,42 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <span>Web Portal</span>
             <ExternalLink className="w-3 h-3" />
           </button>
+        </div>
+
+        {/* Google Play Policy Links (Always accessible before login) */}
+        <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-[#77717A] pt-1">
+          <a
+            href="/privacy"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateSpa('/privacy');
+            }}
+            className="hover:text-[#E83E83] underline"
+          >
+            Privacy Policy
+          </a>
+          <span>•</span>
+          <a
+            href="/terms"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateSpa('/terms');
+            }}
+            className="hover:text-[#E83E83] underline"
+          >
+            Terms &amp; Conditions
+          </a>
+          <span>•</span>
+          <a
+            href="/delete-account"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateSpa('/delete-account');
+            }}
+            className="hover:text-[#E83E83] underline"
+          >
+            Delete Account
+          </a>
         </div>
       </div>
     );

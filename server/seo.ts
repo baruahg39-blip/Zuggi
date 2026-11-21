@@ -627,6 +627,7 @@ export function buildSitemapEntries(baseUrl: string, listings: PublicFreightList
   push({ loc: `${cleanBase}/privacy`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
   push({ loc: `${cleanBase}/terms`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
   push({ loc: `${cleanBase}/refund-policy`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
+  push({ loc: `${cleanBase}/delete-account`, lastmod: today, changefreq: 'monthly', priority: '0.5' });
 
   // 2. Dynamic individual freight listings (/freight/:loadId)
   for (const load of listings) {
@@ -1366,6 +1367,33 @@ export function resolveRouteSeo(
       prerenderHtml: renderPrerenderShell(
         'Zuggi Freight — Cancellation & Refund Policy',
         'Clear shipper cancellation rules, transporter no-show protection, and 5–7 business day Cashfree refund timelines.',
+        bodyHtml,
+        cleanBase
+      )
+    };
+  }
+
+  if (pathname === '/delete-account') {
+    const bodyHtml = `<article style="background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;line-height:1.7;">
+      <h2>Delete Your Zuggi / Zuggi Partner Account &amp; Data</h2>
+      <p>This page allows registered shippers, commercial truck drivers, vehicle owners, and fleet partners of <strong>Zuggi</strong> and the <strong>Zuggi Partner Android App (in.zuggi.partner)</strong> to permanently delete their account and associated personal data.</p>
+      <h2>How to Request Deletion</h2>
+      <p>1. Open the Zuggi Partner App → tap <strong>Profile</strong> → scroll down and tap <strong>Delete My Account</strong>; OR<br/>2. Submit your registered 10-digit mobile number on this page or email <a href="mailto:support@zuggi.in">support@zuggi.in</a> with subject &ldquo;Account Deletion Request&rdquo;.</p>
+      <h2>Data Deleted vs. Retained</h2>
+      <p><strong>Deleted permanently within 7 working days:</strong> Mobile login credentials, passcode hashes, profile details, uploaded driver license/RC/KYC images, and active GPS pings.<br/><strong>Retained strictly as required by Indian law:</strong> Completed GST freight invoices, e-Way bill audit logs, and Cashfree financial settlement records retained for statutory tax compliance.</p>
+    </article>`;
+    return {
+      title: 'Delete Account & Data | Zuggi & Zuggi Partner App',
+      description:
+        'Request permanent deletion of your Zuggi or Zuggi Partner App (in.zuggi.partner) account, profile, KYC documents, and personal data.',
+      canonicalUrl: `${cleanBase}/delete-account`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow',
+      jsonLd: null,
+      prerenderHtml: renderPrerenderShell(
+        'Zuggi — Account & Data Deletion Request',
+        'Permanent account and personal data deletion portal for Zuggi (zuggi.in) and Zuggi Partner Android App (in.zuggi.partner).',
         bodyHtml,
         cleanBase
       )

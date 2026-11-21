@@ -8,12 +8,14 @@ import {
   ShieldCheck, 
   LogOut, 
   Truck, 
-  ShieldAlert, 
-  Clock
+  ShieldAlert,
+  Clock,
+  Trash2
 } from 'lucide-react';
 import { User, VehicleCategoryType } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { authService } from '../../services/authService';
+import { navigateSpa } from '../../utils/seo';
 import { VEHICLE_CATEGORIES } from '../../data/mockData';
 
 interface CustomerProfileModalProps {
@@ -54,6 +56,27 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
 
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  const handleConfirmDeleteAccount = async () => {
+    setIsDeletingAccount(true);
+    try {
+      await fetch('/api/auth/request-account-deletion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: currentUser.phone,
+          reason: 'Requested in-app via Profile settings',
+          source: portalMode === 'partner' ? 'partner_app_profile' : 'web_profile'
+        })
+      }).catch(() => {});
+    } finally {
+      setIsDeletingAccount(false);
+      onClose();
+      await authService.logout();
+    }
+  };
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -431,18 +454,102 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
             </div>
           )}
 
-          {/* SIGN OUT BUTTON */}
-          <div className="pt-3 border-t border-gray-200 flex justify-between items-center">
-            <span className="text-[11px] text-[#77717A]">User ID: {currentUser.id.slice(-8)}</span>
-            <button
-              type="button"
-              onClick={handleLogout}
-              disabled={isLoggingOut}
-              className="px-4 py-2 rounded-xl bg-[#FFF0F6] hover:bg-[#ffe2ee] text-[#E83E83] border border-[#E83E83]/30 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
-            >
-              <LogOut className="w-3.5 h-3.5 text-[#E83E83]" />
-              <span>Log Out</span>
-            </button>
+          {/* LEGAL & GOOGLE PLAY ACCOUNT DELETION SECTION */}
+          <div className="pt-3 border-t border-gray-200 space-y-3">
+            <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold text-[#77717A]">
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  navigateSpa('/privacy');
+                }}
+                className="hover:text-[#E83E83] underline cursor-pointer"
+              >
+                Privacy Policy
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  navigateSpa('/terms');
+                }}
+                className="hover:text-[#E83E83] underline cursor-pointer"
+              >
+                Terms &amp; Conditions
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  navigateSpa('/refund-policy');
+                }}
+                className="hover:text-[#E83E83] underline cursor-pointer"
+              >
+                Refund Policy
+              </button>
+            </div>
+
+            {!isAdmin && (
+              <div className="p-3 rounded-2xl bg-rose-50/70 border border-rose-200/80 space-y-2">
+                {!showDeleteConfirm ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <span className="text-xs font-bold text-rose-900 block">Delete Account &amp; Personal Data</span>
+                      <span className="text-[10px] text-rose-700">
+                        Permanently revoke login &amp; erase profile/KYC data
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDeleteConfirm(true)}
+                      className="px-3 py-1.5 rounded-xl bg-white hover:bg-rose-100 text-rose-700 border border-rose-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Delete Account</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[11px] font-semibold text-rose-900">
+                      Confirm permanent deletion for <span className="font-mono">{currentUser.phone}</span>? You will be signed out immediately and your profile/KYC data will be erased within 7 working days.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isDeletingAccount}
+                        onClick={handleConfirmDeleteAccount}
+                        className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold cursor-pointer disabled:opacity-60"
+                      >
+                        {isDeletingAccount ? 'Deleting...' : 'Yes, Delete My Account'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowDeleteConfirm(false)}
+                        className="px-3 py-1.5 rounded-xl bg-white hover:bg-gray-100 text-[#171318] border border-gray-300 text-[11px] font-bold cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* SIGN OUT BUTTON */}
+            <div className="flex justify-between items-center pt-1">
+              <span className="text-[11px] text-[#77717A]">User ID: {currentUser.id.slice(-8)}</span>
+              <button
+                type="button"
+                onClick={handleLogout}
+                disabled={isLoggingOut}
+                className="px-4 py-2 rounded-xl bg-[#FFF0F6] hover:bg-[#ffe2ee] text-[#E83E83] border border-[#E83E83]/30 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer active:scale-95"
+              >
+                <LogOut className="w-3.5 h-3.5 text-[#E83E83]" />
+                <span>Log Out</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

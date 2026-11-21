@@ -52,7 +52,7 @@ function isPublicCatalogRoute(pathname: string): boolean {
 
 function isLegalRoute(pathname: string): boolean {
   const clean = (pathname || '/').replace(/\/+$/, '').toLowerCase();
-  return clean === '/privacy' || clean === '/terms' || clean === '/refund-policy';
+  return clean === '/privacy' || clean === '/terms' || clean === '/refund-policy' || clean === '/delete-account';
 }
 
 export default function App() {

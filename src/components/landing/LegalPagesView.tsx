@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Building2,
@@ -8,11 +8,13 @@ import {
   MapPin,
   Phone,
   RefreshCcw,
-  ShieldCheck
+  ShieldCheck,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import { applyClientSeo, navigateSpa } from '../../utils/seo';
 
-export type LegalPageSlug = 'privacy' | 'terms' | 'refund-policy';
+export type LegalPageSlug = 'privacy' | 'terms' | 'refund-policy' | 'delete-account';
 
 interface LegalPagesViewProps {
   pathname: string;
@@ -25,11 +27,54 @@ function resolveSlug(pathname: string): LegalPageSlug {
   const clean = (pathname || '/privacy').replace(/\/+$/, '').toLowerCase();
   if (clean === '/terms') return 'terms';
   if (clean === '/refund-policy') return 'refund-policy';
+  if (clean === '/delete-account') return 'delete-account';
   return 'privacy';
 }
 
 export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSignedIn }) => {
   const activeTab = resolveSlug(pathname);
+  const [delPhone, setDelPhone] = useState('');
+  const [delReason, setDelReason] = useState('');
+  const [delSubmitting, setDelSubmitting] = useState(false);
+  const [delResult, setDelResult] = useState<{ ok: boolean; refId?: string; message: string } | null>(null);
+
+  const handleSubmitDeletion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const digits = delPhone.replace(/\D/g, '');
+    if (digits.length < 10) {
+      setDelResult({ ok: false, message: 'Please enter your valid 10-digit registered mobile number.' });
+      return;
+    }
+    setDelSubmitting(true);
+    setDelResult(null);
+    try {
+      const res = await fetch('/api/auth/request-account-deletion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: digits.slice(-10),
+          reason: delReason.trim() || 'Requested via zuggi.in/delete-account',
+          source: 'web_delete_account'
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        setDelResult({
+          ok: true,
+          refId: data.referenceId,
+          message: data.message || 'Account deletion request submitted successfully.'
+        });
+        setDelPhone('');
+        setDelReason('');
+      } else {
+        setDelResult({ ok: false, message: data.message || 'Could not submit request. Please try again.' });
+      }
+    } catch {
+      setDelResult({ ok: false, message: 'Network error. Please email support@zuggi.in with your mobile number.' });
+    } finally {
+      setDelSubmitting(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab === 'privacy') {
@@ -46,6 +91,14 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
         description:
           'Terms of service for shippers, fleet owners, and drivers using zuggi.in and Zuggi Partner App: bookings, KYC, e-Way bills, escrow settlements, and liability.',
         canonicalPath: '/terms',
+        robots: 'index, follow'
+      });
+    } else if (activeTab === 'delete-account') {
+      applyClientSeo({
+        title: 'Delete Account & Data | Zuggi & Zuggi Partner App',
+        description:
+          'Request permanent deletion of your Zuggi or Zuggi Partner App (in.zuggi.partner) account, profile, KYC documents, and personal data.',
+        canonicalPath: '/delete-account',
         robots: 'index, follow'
       });
     } else {
@@ -114,6 +167,20 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
             }`}
           >
             Cancellation &amp; Refund
+          </a>
+          <a
+            href="/delete-account"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateSpa('/delete-account');
+            }}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition ${
+              activeTab === 'delete-account'
+                ? 'bg-rose-600 text-white'
+                : 'text-[#77717A] hover:text-rose-600'
+            }`}
+          >
+            Delete Account
           </a>
         </div>
       </div>
@@ -430,6 +497,119 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
                   number with our support desk for priority tracking.
                 </p>
               </section>
+            </div>
+          </>
+        )}
+
+        {activeTab === 'delete-account' && (
+          <>
+            <header className="bg-[#171318] text-white p-6 sm:p-8 space-y-3">
+              <div className="inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-rose-300">
+                <Trash2 className="w-4 h-4" /> Google Play Data Safety &amp; User Rights
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-black tracking-tight">Delete Your Zuggi Account &amp; Data</h1>
+              <p className="text-xs sm:text-sm text-gray-300">
+                Applies to <strong>Zuggi (zuggi.in)</strong> and the{' '}
+                <strong>Zuggi Partner Android App</strong> (<span className="font-mono">in.zuggi.partner</span>).
+              </p>
+            </header>
+
+            <div className="p-6 sm:p-8 space-y-6 text-sm text-[#4b454e] leading-relaxed">
+              <section className="space-y-2">
+                <h2 className="text-lg font-extrabold text-[#171318]">1. How to Delete Your Account</h2>
+                <ul className="list-disc pl-5 space-y-1.5">
+                  <li>
+                    <strong>Inside the Zuggi Partner App:</strong> Sign in → tap <strong>Profile</strong> → scroll down
+                    and tap <strong>Delete My Account</strong>.
+                  </li>
+                  <li>
+                    <strong>Via This Web Form (No App Required):</strong> Enter your registered 10-digit mobile number
+                    below to immediately revoke login access and queue permanent erasure.
+                  </li>
+                </ul>
+              </section>
+
+              <section className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 space-y-1.5">
+                  <h3 className="font-extrabold text-rose-900">Data Permanently Deleted (Within 7 Days)</h3>
+                  <ul className="list-disc pl-4 space-y-1 text-rose-800">
+                    <li>Registered mobile number login &amp; encrypted passcode hash</li>
+                    <li>Name, business profile, email &amp; vehicle listings</li>
+                    <li>Uploaded Driving License, RC, Insurance &amp; KYC photos</li>
+                    <li>Live GPS location coordinates &amp; notification preferences</li>
+                  </ul>
+                </div>
+
+                <div className="p-4 rounded-2xl bg-gray-50 border border-gray-200 space-y-1.5">
+                  <h3 className="font-extrabold text-[#171318]">Data Retained for Indian Legal Compliance</h3>
+                  <ul className="list-disc pl-4 space-y-1 text-[#4b454e]">
+                    <li>Completed GST consignment invoices &amp; e-Way bill references</li>
+                    <li>Cashfree settlement &amp; Section 194C TDS payout ledgers</li>
+                    <li>Active dispute or fraud-audit logs (until legally closed)</li>
+                  </ul>
+                </div>
+              </section>
+
+              <form onSubmit={handleSubmitDeletion} className="p-5 rounded-2xl bg-[#F8F6F8] border border-gray-200 space-y-4">
+                <div className="flex items-center gap-2 text-xs font-extrabold text-[#171318]">
+                  <AlertTriangle className="w-4 h-4 text-rose-600" />
+                  <span>Submit Permanent Account Deletion Request</span>
+                </div>
+
+                {delResult && (
+                  <div
+                    className={`p-3.5 rounded-xl text-xs font-semibold border ${
+                      delResult.ok
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-rose-50 border-rose-200 text-rose-900'
+                    }`}
+                  >
+                    {delResult.refId && (
+                      <div className="font-mono font-bold mb-1">Reference ID: {delResult.refId}</div>
+                    )}
+                    <div>{delResult.message}</div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-[#171318] mb-1">
+                      Registered 10-Digit Mobile Number *
+                    </label>
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      maxLength={10}
+                      required
+                      value={delPhone}
+                      onChange={(e) => setDelPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                      placeholder="e.g. 9876543210"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm font-mono text-[#171318] focus:outline-none focus:border-[#E83E83]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-[#171318] mb-1">
+                      Reason (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={delReason}
+                      onChange={(e) => setDelReason(e.target.value)}
+                      placeholder="e.g. No longer operating commercial vehicle"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm text-[#171318] focus:outline-none focus:border-[#E83E83]"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={delSubmitting}
+                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold transition cursor-pointer inline-flex items-center gap-2"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>{delSubmitting ? 'Submitting Request...' : 'Request Permanent Account Deletion'}</span>
+                </button>
+              </form>
             </div>
           </>
         )}

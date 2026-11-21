@@ -91,9 +91,10 @@ export default function App() {
   const [showSupportModal, setShowSupportModal] = useState(false);
   const [supportPreselectedLoadId, setSupportPreselectedLoadId] = useState<string | undefined>(undefined);
 
-  // Driver Navigation Subviews: 'home' | 'find_loads' | 'trip' | 'fleet' | 'earnings' | 'history'
+  // Driver / Partner Navigation Subviews: 'home' | 'find_loads' | 'trip' | 'fleet' | 'earnings' | 'history'
   const [driverSubView, setDriverSubView] = useState<'home' | 'find_loads' | 'trip' | 'fleet' | 'earnings' | 'history'>('home');
-  const [activeDriverBookingId, setActiveDriverBookingId] = useState<string>('booking_01');
+  const [activeDriverBookingId, setActiveDriverBookingId] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   // Invoice Modal State
   const [activeInvoiceBookingId, setActiveInvoiceBookingId] = useState<string | null>(null);
@@ -114,12 +115,55 @@ export default function App() {
     };
   }, []);
 
-  // Sync current user state from logisticsStore
+  // Track device network status for highway offline banner
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
+
+  // Dynamically resolve the logged-in partner's current active booking (never hardcode demo ID)
+  const resolvePartnerActiveBookingId = (user: User | null): string | null => {
+    if (!user || !isPartnerRole(user.role)) return null;
+    const myVehicleIds = new Set(
+      logisticsStore
+        .getVehicles()
+        .filter(
+          (v) =>
+            v.ownerId === user.id ||
+            v.assignedDriverId === user.id ||
+            (user.businessName && v.transporterName === user.businessName)
+        )
+        .map((v) => v.id)
+    );
+    const myBookings = logisticsStore.getBookings().filter(
+      (b) =>
+        b.driverId === user.id ||
+        b.transporterId === user.id ||
+        myVehicleIds.has(b.vehicleId) ||
+        (user.isTestAccount && b.isTestBooking)
+    );
+    const running = myBookings.find((b) => b.status !== 'completed' && b.status !== 'cancelled');
+    return running?.id || null;
+  };
+
+  const [partnerActiveTripId, setPartnerActiveTripId] = useState<string | null>(() =>
+    resolvePartnerActiveBookingId(logisticsStore.getCurrentUser())
+  );
+
+  // Sync current user state and active trip ID from logisticsStore
   useEffect(() => {
     const update = () => {
       const u = logisticsStore.getCurrentUser();
       setCurrentUser(u || null);
+      setPartnerActiveTripId(resolvePartnerActiveBookingId(u || null));
     };
+    update();
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, []);
@@ -190,13 +234,20 @@ export default function App() {
     }
   }, [portalMode, currentPath, currentUser, customerActiveLoadId]);
 
-  // Reset sub-navigation states cleanly whenever active user or role changes
+  // Reset sub-navigation states cleanly whenever active user or role changes & honor manifest shortcuts
   useEffect(() => {
     setCustomerActiveLoadId(null);
     const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
     const viewParam = params?.get('view');
     if (portalMode === 'partner' && viewParam === 'find_loads') {
       setDriverSubView('find_loads');
+    } else if (portalMode === 'partner' && viewParam === 'trips') {
+      setActiveDriverBookingId(resolvePartnerActiveBookingId(currentUser));
+      setDriverSubView('trip');
+    } else if (portalMode === 'partner' && viewParam === 'fleet') {
+      setDriverSubView('fleet');
+    } else if (portalMode === 'partner' && viewParam === 'earnings') {
+      setDriverSubView('earnings');
     } else {
       setDriverSubView('home');
     }
@@ -413,14 +464,16 @@ export default function App() {
               <>
                 {driverSubView === 'trip' ? (
                   <DriverTripExecution
-                    bookingId={activeDriverBookingId}
+                    bookingId={activeDriverBookingId || partnerActiveTripId}
                     onBack={() => setDriverSubView('home')}
                     onTripCompleted={() => setDriverSubView('home')}
+                    onFindLoads={() => setDriverSubView('home')}
                   />
                 ) : (
                   <VehicleOwnerDashboard
                     currentUser={currentUser}
                     onOpenSupport={handleOpenSupport}
+                    onViewInvoice={(bookingId: string) => setActiveInvoiceBookingId(bookingId)}
                     onNavigateToTrip={(bookingId: string) => {
                       setActiveDriverBookingId(bookingId);
                       setDriverSubView('trip');
@@ -461,9 +514,10 @@ export default function App() {
 
                 {driverSubView === 'trip' && (
                   <DriverTripExecution
-                    bookingId={activeDriverBookingId}
+                    bookingId={activeDriverBookingId || partnerActiveTripId}
                     onBack={() => setDriverSubView('home')}
                     onTripCompleted={() => setDriverSubView('home')}
+                    onFindLoads={() => setDriverSubView('find_loads')}
                   />
                 )}
 
@@ -498,9 +552,10 @@ export default function App() {
               <>
                 {driverSubView === 'trip' ? (
                   <DriverTripExecution
-                    bookingId={activeDriverBookingId}
+                    bookingId={activeDriverBookingId || partnerActiveTripId}
                     onBack={() => setDriverSubView('home')}
                     onTripCompleted={() => setDriverSubView('home')}
+                    onFindLoads={() => setDriverSubView('home')}
                   />
                 ) : (
                   <FleetPartnerDashboard
@@ -538,12 +593,26 @@ export default function App() {
         )}
       </main>
 
+      {/* Highway Offline Connectivity Banner */}
+      {!isOnline && (
+        <div className="fixed bottom-18 md:bottom-4 left-3 right-3 sm:left-4 sm:right-auto z-50 flex items-center gap-2 rounded-xl bg-amber-600 px-3.5 py-2 text-xs font-bold text-white shadow-xl border border-amber-400">
+          <span className="h-2 w-2 rounded-full bg-white animate-pulse shrink-0" />
+          <span>Offline Mode — Trip details &amp; GPS pings are buffered until network returns.</span>
+        </div>
+      )}
+
       {/* Mobile Fixed Bottom Navigation Bar */}
       {currentUser && (
         <MobileBottomNav
           currentUser={currentUser}
           activeDriverSubView={driverSubView === 'history' ? 'home' : driverSubView}
-          onDriverNavigate={(subView) => setDriverSubView(subView)}
+          hasActiveTrip={Boolean(partnerActiveTripId)}
+          onDriverNavigate={(subView) => {
+            if (subView === 'trip') {
+              setActiveDriverBookingId(partnerActiveTripId);
+            }
+            setDriverSubView(subView);
+          }}
           onCustomerPostLoad={() => setShowCreateLoadModal(true)}
           onCustomerHome={() => setCustomerActiveLoadId(null)}
           onOpenSupport={() => handleOpenSupport()}

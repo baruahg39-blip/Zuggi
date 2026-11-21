@@ -1288,6 +1288,28 @@ function isHtmlPageRequest(req: express.Request): boolean {
   return true;
 }
 
+function applyPartnerManifestIfNeeded(req: express.Request, html: string): string {
+  const pathname = getRequestPathname(req);
+  const host = (req.headers.host || '').toLowerCase();
+  const isPartnerRequest =
+    pathname === '/partner' ||
+    pathname.startsWith('/partner/') ||
+    host.startsWith('partner.') ||
+    host.startsWith('driver.');
+
+  if (!isPartnerRequest) return html;
+
+  return html
+    .replace(
+      /<link\s+rel=["']manifest["']\s+href=["']\/manifest\.json["']\s*\/?>/i,
+      '<link rel="manifest" href="/manifest-partner.json" />'
+    )
+    .replace(
+      /<meta\s+name=["']apple-mobile-web-app-title["']\s+content=["'][^"']*["']\s*\/?>/i,
+      '<meta name="apple-mobile-web-app-title" content="Zuggi Partner" />'
+    );
+}
+
 // Mount Vite or serve static files with dynamic server-side SEO & JSON-LD injection
 if (process.env.NODE_ENV !== 'production') {
   const { createServer: createViteServer } = await import('vite');
@@ -1304,7 +1326,7 @@ if (process.env.NODE_ENV !== 'production') {
       const rawTemplate = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
       const listings = await fetchPublicFreightCatalog();
       const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
-      const seoInjected = injectSeoIntoHtml(rawTemplate, seo);
+      const seoInjected = applyPartnerManifestIfNeeded(req, injectSeoIntoHtml(rawTemplate, seo));
       const html = await vite.transformIndexHtml(req.originalUrl, seoInjected);
       res.status(seo.httpStatus || 200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
     } catch (e: any) {
@@ -1335,7 +1357,7 @@ if (process.env.NODE_ENV !== 'production') {
       const template = cachedDistHtml || fs.readFileSync(distIndexPath, 'utf-8');
       const listings = await fetchPublicFreightCatalog();
       const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
-      const html = injectSeoIntoHtml(template, seo);
+      const html = applyPartnerManifestIfNeeded(req, injectSeoIntoHtml(template, seo));
       res.status(seo.httpStatus || 200);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');

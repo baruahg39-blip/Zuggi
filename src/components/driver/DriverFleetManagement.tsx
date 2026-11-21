@@ -142,7 +142,7 @@ export const DriverFleetManagement: React.FC<DriverFleetManagementProps> = ({
 
         <button
           onClick={() => setShowAddVehicleModal(true)}
-          className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-md transition cursor-pointer flex items-center gap-1.5"
+          className="px-4 py-2 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white font-bold text-xs shadow-md shadow-[#E83E83]/25 transition cursor-pointer flex items-center gap-1.5"
         >
           <Plus className="w-4 h-4" />
           <span>Add Commercial Vehicle</span>
@@ -150,11 +150,11 @@ export const DriverFleetManagement: React.FC<DriverFleetManagementProps> = ({
       </div>
 
       <div>
-        <h2 className="text-lg font-bold text-white flex items-center gap-2">
-          <Layers className="w-5 h-5 text-amber-400" />
-          <span>Commercial Vehicle Fleet & Document Compliance</span>
+        <h2 className="text-lg sm:text-xl font-extrabold text-[#171318] flex items-center gap-2">
+          <Layers className="w-5 h-5 text-[#E83E83]" />
+          <span>Commercial Vehicle Fleet &amp; Document Compliance</span>
         </h2>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-[#77717A] mt-1">
           Registered commercial vehicles, document verification status (RC, Fitness, Insurance, Permits).
         </p>
       </div>

@@ -18,6 +18,7 @@ import { User } from '../../types';
 interface MobileBottomNavProps {
   currentUser: User;
   activeDriverSubView?: 'home' | 'find_loads' | 'trip' | 'fleet' | 'earnings';
+  hasActiveTrip?: boolean;
   onDriverNavigate?: (subView: 'home' | 'find_loads' | 'trip' | 'fleet' | 'earnings') => void;
   onCustomerPostLoad?: () => void;
   onCustomerHome?: () => void;
@@ -29,6 +30,7 @@ interface MobileBottomNavProps {
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   currentUser,
   activeDriverSubView = 'home',
+  hasActiveTrip = false,
   onDriverNavigate,
   onCustomerPostLoad,
   onCustomerHome,
@@ -37,7 +39,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   onOpenProfile
 }) => {
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#171318] border-t border-gray-800 px-2 py-1.5 shadow-2xl safe-area-pb">
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#171318] border-t border-gray-800 px-1.5 py-1.5 shadow-2xl safe-area-pb">
       <div className="w-full text-[10px] font-semibold text-gray-400">
         {/* 1. CUSTOMER / SHIPPER MOBILE BAR (4 evenly distributed items, centered Post Load) */}
         {currentUser.role === 'customer' && (
@@ -78,9 +80,9 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
           </div>
         )}
 
-        {/* 2. DRIVER MOBILE BAR (4 evenly distributed items) */}
+        {/* 2. DRIVER MOBILE BAR (5 evenly distributed items: Home, Loads, Trip, Truck, Income) */}
         {currentUser.role === 'driver' && (
-          <div className="grid grid-cols-4 w-full items-center text-center">
+          <div className="grid grid-cols-5 w-full items-center text-center">
             <button
               onClick={() => onDriverNavigate && onDriverNavigate('home')}
               className={`flex flex-col items-center justify-center gap-1 p-1 transition active:scale-95 cursor-pointer w-full ${
@@ -88,7 +90,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               }`}
             >
               <Truck className="w-5 h-5" />
-              <span className="whitespace-nowrap">Dashboard</span>
+              <span className="whitespace-nowrap">Home</span>
             </button>
 
             <button
@@ -98,17 +100,32 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               }`}
             >
               <Search className="w-5 h-5" />
-              <span className="whitespace-nowrap">Find Loads</span>
+              <span className="whitespace-nowrap">Loads</span>
             </button>
 
             <button
               onClick={() => onDriverNavigate && onDriverNavigate('trip')}
-              className={`flex flex-col items-center justify-center gap-1 p-1 transition active:scale-95 cursor-pointer w-full ${
+              className={`relative flex flex-col items-center justify-center gap-1 p-1 transition active:scale-95 cursor-pointer w-full ${
                 activeDriverSubView === 'trip' ? 'text-[#E83E83] font-bold' : 'text-gray-400 hover:text-white'
               }`}
             >
-              <Navigation className="w-5 h-5" />
-              <span className="whitespace-nowrap">Active Trip</span>
+              <span className="relative">
+                <Navigation className="w-5 h-5" />
+                {hasActiveTrip && (
+                  <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#171318] animate-pulse" />
+                )}
+              </span>
+              <span className="whitespace-nowrap">Live Trip</span>
+            </button>
+
+            <button
+              onClick={() => onDriverNavigate && onDriverNavigate('fleet')}
+              className={`flex flex-col items-center justify-center gap-1 p-1 transition active:scale-95 cursor-pointer w-full ${
+                activeDriverSubView === 'fleet' ? 'text-[#E83E83] font-bold' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Layers className="w-5 h-5" />
+              <span className="whitespace-nowrap">My Truck</span>
             </button>
 
             <button
@@ -118,7 +135,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               }`}
             >
               <IndianRupee className="w-5 h-5" />
-              <span className="whitespace-nowrap">Earnings</span>
+              <span className="whitespace-nowrap">Income</span>
             </button>
           </div>
         )}
@@ -133,16 +150,21 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               }`}
             >
               <Truck className="w-5 h-5" />
-              <span>Dashboard</span>
+              <span>Owner Desk</span>
             </button>
 
             <button
               onClick={() => onDriverNavigate && onDriverNavigate('trip')}
-              className={`flex flex-col items-center justify-center gap-1 p-1 w-full cursor-pointer ${
+              className={`relative flex flex-col items-center justify-center gap-1 p-1 w-full cursor-pointer ${
                 activeDriverSubView === 'trip' ? 'text-[#E83E83] font-bold' : 'text-gray-400 hover:text-white'
               }`}
             >
-              <Navigation className="w-5 h-5" />
+              <span className="relative">
+                <Navigation className="w-5 h-5" />
+                {hasActiveTrip && (
+                  <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#171318] animate-pulse" />
+                )}
+              </span>
               <span>Active Trip</span>
             </button>
 
@@ -179,11 +201,16 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
 
             <button
               onClick={() => onDriverNavigate && onDriverNavigate('trip')}
-              className={`flex flex-col items-center justify-center gap-1 p-1 w-full cursor-pointer ${
+              className={`relative flex flex-col items-center justify-center gap-1 p-1 w-full cursor-pointer ${
                 activeDriverSubView === 'trip' ? 'text-[#E83E83] font-bold' : 'text-gray-400 hover:text-white'
               }`}
             >
-              <Navigation className="w-5 h-5" />
+              <span className="relative">
+                <Navigation className="w-5 h-5" />
+                {hasActiveTrip && (
+                  <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#171318] animate-pulse" />
+                )}
+              </span>
               <span>Live Trip</span>
             </button>
 

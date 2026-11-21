@@ -93,7 +93,7 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
 
           <button
             onClick={handleExportCsv}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold shadow-md transition cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs font-bold shadow-md transition cursor-pointer"
             title="Export settlements, Section 194C TDS deductions, and UTR codes into CSV format for Tally, Excel, or CA accounting"
           >
             <FileSpreadsheet className="w-4 h-4" />
@@ -102,7 +102,7 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
 
           <button
             onClick={() => window.print()}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-gray-50 text-[#171318] text-xs font-semibold border border-gray-200 transition cursor-pointer"
           >
             <Download className="w-4 h-4" />
             <span>Download Statement</span>
@@ -111,14 +111,14 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
       </div>
 
       <div>
-        <div className="flex items-center gap-2">
-          <IndianRupee className="w-5 h-5 text-amber-400" />
-          <h2 className="text-lg font-bold text-white">Fleet Net Earnings & Cashfree Settlements</h2>
-          <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 text-[10px] font-bold border border-indigo-500/30">
+        <div className="flex flex-wrap items-center gap-2">
+          <IndianRupee className="w-5 h-5 text-[#E83E83]" />
+          <h2 className="text-lg sm:text-xl font-extrabold text-[#171318]">Fleet Net Earnings &amp; Cashfree Settlements</h2>
+          <span className="px-2.5 py-0.5 rounded-full bg-[#FFF0F6] text-[#E83E83] text-[10px] font-bold border border-[#E83E83]/25">
             Easy Split Enabled
           </span>
         </div>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-[#77717A] mt-1">
           Automated 2-stage vendor settlements: 90% released on verified pickup, remaining 10% released post-delivery and POD clearance.
         </p>
       </div>

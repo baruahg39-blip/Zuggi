@@ -691,12 +691,24 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
               </p>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <a
-                  href={`tel:${booking.pickup.contactPhone}`}
+                  href={`tel:${(booking.pickup.contactPhone || '').replace(/\s+/g, '')}`}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-xs transition"
                 >
                   <Phone className="w-3.5 h-3.5" />
                   <span>Call {booking.pickup.contactName}</span>
                 </a>
+                {booking.pickup.contactPhone && (
+                  <a
+                    href={`https://wa.me/91${booking.pickup.contactPhone.replace(/\D/g, '').slice(-10)}?text=${encodeURIComponent(
+                      `Namaste ${booking.pickup.contactName}, I am your Zuggi Driver assigned for Booking #${booking.id} (${booking.pickup.city} to ${booking.delivery.city}). Starting towards pickup location now.`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-300 font-bold text-xs transition"
+                  >
+                    <span>WhatsApp</span>
+                  </a>
+                )}
                 <a
                   href={pickupNavUrl}
                   target="_blank"
@@ -831,12 +843,24 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
               </p>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <a
-                  href={`tel:${booking.delivery.contactPhone}`}
+                  href={`tel:${(booking.delivery.contactPhone || '').replace(/\s+/g, '')}`}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-xs transition"
                 >
                   <Phone className="w-3.5 h-3.5" />
                   <span>Call {booking.delivery.contactName}</span>
                 </a>
+                {booking.delivery.contactPhone && (
+                  <a
+                    href={`https://wa.me/91${booking.delivery.contactPhone.replace(/\D/g, '').slice(-10)}?text=${encodeURIComponent(
+                      `Namaste ${booking.delivery.contactName}, I am your Zuggi Driver carrying Booking #${booking.id} from ${booking.pickup.city} to ${booking.delivery.city}. Sharing live arrival update.`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-300 font-bold text-xs transition"
+                  >
+                    <span>WhatsApp Receiver</span>
+                  </a>
+                )}
                 <a
                   href={dropNavUrl}
                   target="_blank"
@@ -930,10 +954,16 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
                     className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-10 pr-3 py-3 text-center text-lg font-mono font-black tracking-widest text-[#FF85B7] focus:outline-none focus:border-[#E83E83]"
                   />
                 </div>
-                <p className="text-[10px] text-gray-400 mt-1.5">
-                  Demo / test consignee OTP for this shipment:{' '}
-                  <strong className="text-[#FF85B7] font-mono">{booking.deliveryOtp}</strong>
-                </p>
+                {logisticsStore.getCurrentUser()?.isTestAccount || logisticsStore.getCurrentUser()?.phone?.includes('99999') ? (
+                  <p className="text-[10px] text-gray-400 mt-1.5">
+                    Sandbox test consignee OTP:{' '}
+                    <strong className="text-[#FF85B7] font-mono">{booking.deliveryOtp}</strong>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-amber-300/90 mt-1.5">
+                    Ask the consignee / receiver at the drop point for their secret 4-digit Zuggi Delivery OTP to confirm handover and release your final payout.
+                  </p>
+                )}
               </div>
             </div>
 

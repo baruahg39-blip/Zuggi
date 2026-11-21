@@ -125,6 +125,8 @@ class LogisticsStore {
     return this.adminSessionToken;
   }
 
+  private supabaseSyncInFlight = false;
+
   constructor() {
     this.purgeLegacyDemoData();
     this.seedRegistryIfEmpty();
@@ -139,6 +141,71 @@ class LogisticsStore {
       this.initFirestoreSync(active);
     }
     void this.initSupabaseSync();
+    this.startLiveBackgroundSync();
+  }
+
+  private startLiveBackgroundSync() {
+    if (typeof window === 'undefined') return;
+    // Refresh live marketplace state every 15s while tab is visible so Customer, Driver, Owner & Admin stay in sync across devices
+    window.setInterval(() => {
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) {
+        void this.initSupabaseSync(true);
+      }
+    }, 15000);
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && navigator.onLine !== false) {
+        void this.initSupabaseSync(true);
+      }
+    });
+
+    window.addEventListener('online', () => {
+      void this.initSupabaseSync(true);
+    });
+  }
+
+  public async forceLiveRefresh(): Promise<void> {
+    await this.initSupabaseSync(true);
+  }
+
+  public updateUserBankDetails(
+    userId: string,
+    bankDetails: {
+      accountHolderName?: string;
+      bankName?: string;
+      accountNumber?: string;
+      ifscCode?: string;
+      upiId?: string;
+    },
+    pan?: string
+  ): User | null {
+    const users = this.getUsers();
+    const idx = users.findIndex((u) => u.id === userId);
+    const current = this.getCurrentUser();
+    const baseUser = idx >= 0 ? users[idx] : current?.id === userId ? current : null;
+    if (!baseUser) return null;
+
+    const updated: User = {
+      ...baseUser,
+      pan: pan !== undefined ? pan.trim().toUpperCase() : baseUser.pan,
+      bankDetails: {
+        ...(baseUser.bankDetails || {}),
+        accountHolderName: (bankDetails.accountHolderName || baseUser.name || '').trim(),
+        bankName: (bankDetails.bankName || '').trim(),
+        accountNumber: (bankDetails.accountNumber || '').replace(/\s+/g, ''),
+        ifscCode: (bankDetails.ifscCode || '').trim().toUpperCase(),
+        upiId: (bankDetails.upiId || '').trim(),
+        isVerified: Boolean(bankDetails.upiId || (bankDetails.accountNumber && bankDetails.ifscCode)),
+        updatedAt: new Date().toISOString()
+      }
+    };
+
+    this.saveUser(updated);
+    if (current && current.id === userId) {
+      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updated));
+    }
+    this.triggerChange();
+    return updated;
   }
 
   private purgeLegacyDemoData() {
@@ -285,10 +352,12 @@ class LogisticsStore {
   public async initSupabaseSync(force = false): Promise<void> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     if (this.supabaseBootstrapped && !force) return;
+    if (this.supabaseSyncInFlight) return;
     this.supabaseBootstrapped = true;
+    this.supabaseSyncInFlight = true;
 
     try {
-      const res = await fetch('/api/db/bootstrap');
+      const res = await fetch('/api/db/bootstrap', { cache: 'no-store' });
       if (!res.ok) return;
       const json = await res.json();
       if (!json?.configured || !json?.tablesReady || !json?.data) return;
@@ -298,12 +367,25 @@ class LogisticsStore {
 
       if (Array.isArray(remote.users) && remote.users.length > 0) {
         changed = this.mergeCollectionById<User>(STORAGE_KEYS.USERS, this.getUsers(), remote.users) || changed;
+        const currentUser = this.getCurrentUser();
         remote.users.forEach((u: User) => {
           if (u?.phone) {
             const existingVeh = Array.isArray(remote.vehicles)
               ? remote.vehicles.find((v: CommercialVehicle) => v.ownerId === u.id)
               : undefined;
             this.saveRegisteredProfile(u.phone, u, existingVeh);
+          }
+          // Keep logged-in session synced with backend verification, block status & saved bank details
+          if (currentUser && u && (u.id === currentUser.id || (u.phone && currentUser.phone && u.phone.replace(/\D/g, '').slice(-10) === currentUser.phone.replace(/\D/g, '').slice(-10)))) {
+            const syncedCurrent: User = {
+              ...currentUser,
+              isVerified: u.isVerified === true,
+              isBlocked: Boolean(u.isBlocked),
+              blockedReason: u.blockedReason,
+              bankDetails: u.bankDetails || currentUser.bankDetails,
+              pan: u.pan || currentUser.pan
+            };
+            localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(syncedCurrent));
           }
         });
       }
@@ -328,6 +410,8 @@ class LogisticsStore {
       }
     } catch {
       // Silent fallback to Firestore + localStorage
+    } finally {
+      this.supabaseSyncInFlight = false;
     }
   }
 
@@ -2704,14 +2788,24 @@ class LogisticsStore {
   // --- CASHFREE EASY SPLIT MARKETPLACE SETTLEMENTS & ESCROW ENGINE ---
 
   public getPaymentTransactions(bookingId?: string): MarketplacePaymentTransaction[] {
-    const txs = this.safeJsonParse<MarketplacePaymentTransaction[]>(STORAGE_KEYS.PAYMENT_TRANSACTIONS, []);
+    const rawTxs = this.safeJsonParse<MarketplacePaymentTransaction[]>(STORAGE_KEYS.PAYMENT_TRANSACTIONS, []);
+    const txs = rawTxs.map((t) => ({
+      ...t,
+      amountInr: Number.isFinite(Number(t?.amountInr)) ? Number(t.amountInr) : 0,
+      type: t?.type || 'customer_advance_90',
+      notes: t?.notes || ''
+    }));
     if (bookingId) return txs.filter((t) => t.bookingId === bookingId);
     return txs;
   }
 
   public recordPaymentTransaction(tx: MarketplacePaymentTransaction) {
     const txs = this.getPaymentTransactions();
-    txs.unshift(tx);
+    txs.unshift({
+      ...tx,
+      amountInr: Number.isFinite(Number(tx.amountInr)) ? Number(tx.amountInr) : 0,
+      notes: tx.notes || ''
+    });
     localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
   }
 
@@ -2752,7 +2846,11 @@ class LogisticsStore {
   /**
    * 1. Customer Advance Payment (90% before pickup)
    */
-  public payCustomerAdvance(bookingId: string, paymentRef?: string): { success: boolean; message: string } {
+  public payCustomerAdvance(
+    bookingId: string,
+    paymentRef?: string,
+    paymentMethodLabel?: string
+  ): { success: boolean; message: string } {
     const bookings = this.getBookings();
     const booking = bookings.find((b) => b.id === bookingId);
     if (!booking) return { success: false, message: 'Booking not found.' };
@@ -2761,21 +2859,27 @@ class LogisticsStore {
       return { success: false, message: 'Advance payment already received.' };
     }
 
+    const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
+    const advanceAmt = Number(booking.customerAdvanceAmountInr) || Math.round(totalAgreed * 0.90);
+    const commissionAmt = Number(booking.platformCommissionInr) || Math.round(totalAgreed * 0.05);
+    const methodLabel = paymentMethodLabel || 'Online Escrow / UPI';
+    booking.customerAdvanceAmountInr = advanceAmt;
+    booking.platformCommissionInr = commissionAmt;
     booking.paymentAdvanceStatus = 'paid';
     booking.paymentStatus = 'advance_paid';
-    booking.cashfreeAdvanceOrderId = paymentRef || `CF_ADV_${booking.id}_${Date.now()}`;
+    booking.cashfreeAdvanceOrderId = paymentRef || `ZUG_ADV_${booking.id}_${Date.now()}`;
 
     // Record Transaction
     this.recordPaymentTransaction({
       id: `tx_${Date.now()}_adv`,
       bookingId: booking.id,
       type: 'customer_advance_90',
-      amountInr: booking.customerAdvanceAmountInr,
+      amountInr: advanceAmt,
       orderId: booking.cashfreeAdvanceOrderId,
-      cfPaymentId: `pay_${Date.now().toString(36)}`,
+      cfPaymentId: paymentRef || `pay_${Date.now().toString(36)}`,
       status: 'success',
       timestamp: new Date().toISOString(),
-      notes: `90% Advance payment secured in Cashfree escrow. Platform commission: ₹${booking.platformCommissionInr}`
+      notes: `90% Advance confirmed via ${methodLabel}. Ref: ${booking.cashfreeAdvanceOrderId}. Platform fee: ₹${commissionAmt}`
     });
 
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
@@ -2785,8 +2889,8 @@ class LogisticsStore {
     this.addNotification({
       recipientRole: 'driver',
       recipientId: booking.driverId,
-      title: 'Advance Secured in Escrow!',
-      message: `Customer paid ₹${booking.customerAdvanceAmountInr.toLocaleString('en-IN')} (90% advance) in Cashfree escrow. You may now proceed to pickup.`,
+      title: 'Advance Payment Confirmed!',
+      message: `Customer confirmed ₹${advanceAmt.toLocaleString('en-IN')} (90% advance) via ${methodLabel}. You may now proceed to pickup.`,
       type: 'payment_received',
       linkId: booking.id
     });
@@ -2794,14 +2898,14 @@ class LogisticsStore {
     this.addNotification({
       recipientRole: 'customer',
       recipientId: booking.customerId,
-      title: 'Advance Payment Successful',
-      message: `₹${booking.customerAdvanceAmountInr.toLocaleString('en-IN')} secured in Cashfree Escrow. Transporter dispatched for pickup.`,
+      title: 'Advance Payment Confirmed',
+      message: `₹${advanceAmt.toLocaleString('en-IN')} confirmed via ${methodLabel}. Transporter notified for pickup.`,
       type: 'payment_received',
       linkId: booking.loadId
     });
 
     this.triggerChange();
-    return { success: true, message: `Advance payment of ₹${booking.customerAdvanceAmountInr.toLocaleString('en-IN')} secured in Cashfree Escrow.` };
+    return { success: true, message: `Advance payment of ₹${advanceAmt.toLocaleString('en-IN')} confirmed (${methodLabel}).` };
   }
 
   /**
@@ -2880,7 +2984,11 @@ class LogisticsStore {
   /**
    * 3. Customer Final Balance Payment (10% post delivery)
    */
-  public payCustomerBalance(bookingId: string, paymentRef?: string): { success: boolean; message: string } {
+  public payCustomerBalance(
+    bookingId: string,
+    paymentRef?: string,
+    paymentMethodLabel?: string
+  ): { success: boolean; message: string } {
     const bookings = this.getBookings();
     const booking = bookings.find((b) => b.id === bookingId);
     if (!booking) return { success: false, message: 'Booking not found.' };
@@ -2889,20 +2997,24 @@ class LogisticsStore {
       return { success: false, message: 'Final balance payment already paid.' };
     }
 
+    const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
+    const balanceAmt = Number(booking.customerBalanceAmountInr) || Math.round(totalAgreed * 0.10);
+    const methodLabel = paymentMethodLabel || 'Online Escrow / UPI';
+    booking.customerBalanceAmountInr = balanceAmt;
     booking.paymentBalanceStatus = 'paid';
-    booking.cashfreeBalanceOrderId = paymentRef || `CF_BAL_${booking.id}_${Date.now()}`;
+    booking.cashfreeBalanceOrderId = paymentRef || `ZUG_BAL_${booking.id}_${Date.now()}`;
 
     // Record Transaction
     this.recordPaymentTransaction({
       id: `tx_${Date.now()}_bal`,
       bookingId: booking.id,
       type: 'customer_balance_10',
-      amountInr: booking.customerBalanceAmountInr,
+      amountInr: balanceAmt,
       orderId: booking.cashfreeBalanceOrderId,
-      cfPaymentId: `pay_bal_${Date.now().toString(36)}`,
+      cfPaymentId: paymentRef || `pay_bal_${Date.now().toString(36)}`,
       status: 'success',
       timestamp: new Date().toISOString(),
-      notes: `10% final balance payment collected from customer.`
+      notes: `10% final balance confirmed via ${methodLabel}. Ref: ${booking.cashfreeBalanceOrderId}`
     });
 
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));

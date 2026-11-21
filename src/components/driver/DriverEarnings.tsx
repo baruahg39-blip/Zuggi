@@ -29,9 +29,33 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
 }) => {
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [driverBookings, setDriverBookings] = useState<any[]>([]);
+  const [liveUser, setLiveUser] = useState<User>(currentUser);
+  const [editingBank, setEditingBank] = useState<boolean>(false);
+  const [bankForm, setBankForm] = useState({
+    accountHolderName: currentUser.bankDetails?.accountHolderName || currentUser.name || '',
+    bankName: currentUser.bankDetails?.bankName || '',
+    accountNumber: currentUser.bankDetails?.accountNumber || '',
+    ifscCode: currentUser.bankDetails?.ifscCode || '',
+    upiId: currentUser.bankDetails?.upiId || '',
+    pan: currentUser.pan || ''
+  });
+  const [bankSavedMsg, setBankSavedMsg] = useState<string | null>(null);
+
+  const handleSaveBankDetails = (e: React.FormEvent) => {
+    e.preventDefault();
+    const updated = logisticsStore.updateUserBankDetails(currentUser.id, bankForm, bankForm.pan);
+    if (updated) {
+      setLiveUser(updated);
+      setEditingBank(false);
+      setBankSavedMsg('Bank & UPI payout details saved and synced!');
+      setTimeout(() => setBankSavedMsg(null), 4000);
+    }
+  };
 
   useEffect(() => {
     const update = () => {
+      const freshUser = logisticsStore.getUserById(currentUser.id) || logisticsStore.getCurrentUser() || currentUser;
+      setLiveUser(freshUser);
       const myBookings = logisticsStore
         .getBookings()
         .filter((b) => b.driverId === currentUser.id || b.transporterId === currentUser.id);
@@ -187,30 +211,131 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
         </div>
       </div>
 
-      {/* Verified Cashfree Easy Split Vendor Payout Account */}
-      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400 font-bold shrink-0">
-            <Building2 className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-bold text-white">
-                Cashfree Easy Split Beneficiary Account
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-semibold">
-                ACTIVE • Penny-Drop Verified
-              </span>
+      {/* Real Driver Bank / UPI Payout Account */}
+      <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400 font-bold shrink-0">
+              <Building2 className="w-5 h-5" />
             </div>
-            <p className="text-xs text-slate-400">
-              Vendor ID: <span className="font-mono text-slate-200">vnd_{currentUser.id}</span> • Bank: <span className="text-slate-200">HDFC Bank (Commercial Branch)</span> • IFSC: <span className="font-mono text-slate-200">HDFC0000128</span> • UPI: <span className="font-mono text-amber-400">{currentUser.phone?.replace(/\D/g, '').slice(-10) || '9876543210'}@okaxis</span>
-            </p>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-bold text-white">
+                  Your Bank &amp; UPI Payout Account
+                </span>
+                {liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-semibold">
+                    PAYOUT DETAILS SAVED
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-700 font-semibold">
+                    ACTION NEEDED — ADD BANK / UPI
+                  </span>
+                )}
+              </div>
+              {liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? (
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Account Holder: <span className="text-slate-200 font-semibold">{liveUser.bankDetails.accountHolderName || liveUser.name}</span>
+                  {liveUser.bankDetails.bankName ? <> • Bank: <span className="text-slate-200">{liveUser.bankDetails.bankName}</span></> : null}
+                  {liveUser.bankDetails.ifscCode ? <> • IFSC: <span className="font-mono text-slate-200">{liveUser.bankDetails.ifscCode}</span></> : null}
+                  {liveUser.bankDetails.accountNumber ? <> • A/C: <span className="font-mono text-slate-200">••••{liveUser.bankDetails.accountNumber.slice(-4)}</span></> : null}
+                  {liveUser.bankDetails.upiId ? <> • UPI: <span className="font-mono text-amber-400">{liveUser.bankDetails.upiId}</span></> : null}
+                </p>
+              ) : (
+                <p className="text-xs text-amber-200/80 mt-0.5">
+                  Add your real UPI ID or Bank Account &amp; IFSC so Zuggi can credit your trip earnings directly.
+                </p>
+              )}
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setEditingBank((v) => !v)}
+            className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition cursor-pointer"
+          >
+            {editingBank ? 'Cancel' : liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? 'Edit Bank / UPI' : '+ Add Bank / UPI'}
+          </button>
         </div>
-        <div className="text-xs text-emerald-400 flex items-center gap-1 font-semibold">
-          <ShieldCheck className="w-4 h-4" />
-          <span>RBI Regulated Marketplace Escrow</span>
-        </div>
+
+        {bankSavedMsg && (
+          <div className="p-2.5 rounded-xl bg-emerald-950/70 border border-emerald-700 text-emerald-300 text-xs font-semibold flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{bankSavedMsg}</span>
+          </div>
+        )}
+
+        {editingBank && (
+          <form onSubmit={handleSaveBankDetails} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-3 border-t border-slate-800">
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">Account Holder Name</label>
+              <input
+                type="text"
+                value={bankForm.accountHolderName}
+                onChange={(e) => setBankForm({ ...bankForm, accountHolderName: e.target.value })}
+                placeholder="Full name as per bank"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">UPI ID (GPay / PhonePe / Paytm)</label>
+              <input
+                type="text"
+                value={bankForm.upiId}
+                onChange={(e) => setBankForm({ ...bankForm, upiId: e.target.value })}
+                placeholder="e.g. yourname@okaxis"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">Bank Name</label>
+              <input
+                type="text"
+                value={bankForm.bankName}
+                onChange={(e) => setBankForm({ ...bankForm, bankName: e.target.value })}
+                placeholder="e.g. State Bank of India"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">Account Number</label>
+              <input
+                type="text"
+                value={bankForm.accountNumber}
+                onChange={(e) => setBankForm({ ...bankForm, accountNumber: e.target.value })}
+                placeholder="Bank account number"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">IFSC Code</label>
+              <input
+                type="text"
+                value={bankForm.ifscCode}
+                onChange={(e) => setBankForm({ ...bankForm, ifscCode: e.target.value.toUpperCase() })}
+                placeholder="e.g. SBIN0000078"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono uppercase focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-400 block mb-1">PAN Number (for 1% TDS)</label>
+              <input
+                type="text"
+                value={bankForm.pan}
+                onChange={(e) => setBankForm({ ...bankForm, pan: e.target.value.toUpperCase() })}
+                placeholder="e.g. ABCDE1234F"
+                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-700 text-xs text-white font-mono uppercase focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div className="sm:col-span-2 lg:col-span-3 flex justify-end">
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black cursor-pointer transition"
+              >
+                Save Payout Account Details
+              </button>
+            </div>
+          </form>
+        )}
       </div>
 
       {/* Settlement Records Table */}

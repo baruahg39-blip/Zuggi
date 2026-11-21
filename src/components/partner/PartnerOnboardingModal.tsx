@@ -81,12 +81,12 @@ export const PartnerOnboardingModal: React.FC<PartnerOnboardingModalProps> = ({
   const [repDesignation, setRepDesignation] = useState<string>('Managing Director');
   const [repPhone, setRepPhone] = useState<string>(currentUser.phone || '');
 
-  // Bank & Settlement
-  const [accountHolder, setAccountHolder] = useState<string>(currentUser.name || '');
-  const [accountNumber, setAccountNumber] = useState<string>('50100291829102');
-  const [ifscCode, setIfscCode] = useState<string>('HDFC0000128');
-  const [bankName, setBankName] = useState<string>('HDFC Bank');
-  const [upiId, setUpiId] = useState<string>(`${currentUser.phone?.slice(-10) || '9864012345'}@okaxis`);
+  // Bank & Settlement (Use partner's real saved bank details, never fake placeholders)
+  const [accountHolder, setAccountHolder] = useState<string>(currentUser.bankDetails?.accountHolderName || currentUser.name || '');
+  const [accountNumber, setAccountNumber] = useState<string>(currentUser.bankDetails?.accountNumber || '');
+  const [ifscCode, setIfscCode] = useState<string>(currentUser.bankDetails?.ifscCode || '');
+  const [bankName, setBankName] = useState<string>(currentUser.bankDetails?.bankName || '');
+  const [upiId, setUpiId] = useState<string>(currentUser.bankDetails?.upiId || '');
 
   // Vehicles list
   const [registeredVehicles, setRegisteredVehicles] = useState<Array<{
@@ -450,7 +450,7 @@ export const PartnerOnboardingModal: React.FC<PartnerOnboardingModalProps> = ({
           ifscCode: ifscCode.trim().toUpperCase(),
           bankName: bankName.trim(),
           upiId: upiId.trim(),
-          isVerified: true
+          isVerified: false
         },
         registeredVehicles: partnerType !== 'driver' ? registeredVehicles : [],
         registeredDrivers: partnerType === 'fleet_partner' ? registeredDrivers : undefined,
@@ -466,6 +466,20 @@ export const PartnerOnboardingModal: React.FC<PartnerOnboardingModalProps> = ({
           agreements: agreementsList
         }
       });
+
+      if (accountNumber.trim() || upiId.trim() || ifscCode.trim()) {
+        logisticsStore.updateUserBankDetails(
+          currentUser.id,
+          {
+            accountHolderName: accountHolder.trim(),
+            bankName: bankName.trim(),
+            accountNumber: accountNumber.trim(),
+            ifscCode: ifscCode.trim().toUpperCase(),
+            upiId: upiId.trim()
+          },
+          panNumber.trim().toUpperCase()
+        );
+      }
 
       setExistingApp(submitted);
       setIsSubmitting(false);

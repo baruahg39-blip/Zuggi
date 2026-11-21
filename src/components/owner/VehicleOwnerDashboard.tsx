@@ -71,9 +71,32 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
   const [partnerEligibility, setPartnerEligibility] = useState(() =>
     logisticsStore.checkPartnerBookingEligibility(currentUser.id)
   );
+  const [liveUser, setLiveUser] = useState<User>(currentUser);
+  const [editingBank, setEditingBank] = useState(false);
+  const [bankForm, setBankForm] = useState({
+    accountHolderName: currentUser.bankDetails?.accountHolderName || currentUser.name || '',
+    bankName: currentUser.bankDetails?.bankName || '',
+    accountNumber: currentUser.bankDetails?.accountNumber || '',
+    ifscCode: currentUser.bankDetails?.ifscCode || '',
+    upiId: currentUser.bankDetails?.upiId || '',
+    pan: currentUser.pan || ''
+  });
+
+  const handleSaveBankDetails = (e: React.FormEvent) => {
+    e.preventDefault();
+    const updated = logisticsStore.updateUserBankDetails(currentUser.id, bankForm, bankForm.pan);
+    if (updated) {
+      setLiveUser(updated);
+      setEditingBank(false);
+      setBidSuccessMessage('Bank & UPI payout details saved and synced!');
+      setTimeout(() => setBidSuccessMessage(null), 4000);
+    }
+  };
 
   useEffect(() => {
     const update = () => {
+      const freshUser = logisticsStore.getUserById(currentUser.id) || logisticsStore.getCurrentUser() || currentUser;
+      setLiveUser(freshUser);
       setPartnerEligibility(logisticsStore.checkPartnerBookingEligibility(currentUser.id));
       setVehicles(
         logisticsStore.getVehicles().filter(
@@ -646,16 +669,101 @@ export const VehicleOwnerDashboard: React.FC<VehicleOwnerDashboardProps> = ({
             </div>
           </div>
 
-          <div className="bg-white rounded-3xl p-6 border border-[#F2E8EE] shadow-sm space-y-3">
-            <h3 className="text-base font-bold text-[#171318]">Beneficiary Payout Account</h3>
-            <p className="text-xs text-[#77717A]">
-              Vendor ID: <span className="font-mono text-[#171318]">vnd_{currentUser.id.slice(-8)}</span> • Bank: <span className="font-semibold text-[#171318]">HDFC Bank</span> • IFSC: <span className="font-mono text-[#171318]">HDFC0000128</span>
-            </p>
-            <div className="flex items-center gap-2 pt-2">
-              <span className="px-3 py-1 rounded-full bg-[#E8F8F0] text-[#16A36A] text-xs font-bold border border-[#BDE8D3]">
-                ✓ Penny-Drop Verified Account
-              </span>
+          <div className="bg-white rounded-3xl p-6 border border-[#F2E8EE] shadow-sm space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold text-[#171318]">Beneficiary Bank &amp; UPI Payout Account</h3>
+                {liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? (
+                  <p className="text-xs text-[#77717A] mt-1">
+                    Holder: <span className="font-semibold text-[#171318]">{liveUser.bankDetails.accountHolderName || liveUser.name}</span>
+                    {liveUser.bankDetails.bankName ? <> • Bank: <span className="font-semibold text-[#171318]">{liveUser.bankDetails.bankName}</span></> : null}
+                    {liveUser.bankDetails.ifscCode ? <> • IFSC: <span className="font-mono text-[#171318]">{liveUser.bankDetails.ifscCode}</span></> : null}
+                    {liveUser.bankDetails.accountNumber ? <> • A/C: <span className="font-mono text-[#171318]">••••{liveUser.bankDetails.accountNumber.slice(-4)}</span></> : null}
+                    {liveUser.bankDetails.upiId ? <> • UPI: <span className="font-mono font-bold text-[#E83E83]">{liveUser.bankDetails.upiId}</span></> : null}
+                  </p>
+                ) : (
+                  <p className="text-xs text-amber-700 mt-1">
+                    No payout account added yet. Add your real Bank Account or UPI ID to receive direct trip settlements.
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingBank((v) => !v)}
+                className="px-4 py-2 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs font-bold transition cursor-pointer"
+              >
+                {editingBank ? 'Cancel' : liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? 'Edit Bank / UPI' : '+ Add Bank / UPI'}
+              </button>
             </div>
+
+            {!editingBank && (
+              <div className="flex items-center gap-2">
+                {liveUser.bankDetails?.upiId || liveUser.bankDetails?.accountNumber ? (
+                  <span className="px-3 py-1 rounded-full bg-[#E8F8F0] text-[#16A36A] text-xs font-bold border border-[#BDE8D3]">
+                    ✓ Payout Account Saved
+                  </span>
+                ) : (
+                  <span className="px-3 py-1 rounded-full bg-amber-50 text-amber-800 text-xs font-bold border border-amber-300">
+                    Action Needed — Add Payout Bank / UPI
+                  </span>
+                )}
+              </div>
+            )}
+
+            {editingBank && (
+              <form onSubmit={handleSaveBankDetails} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-3 border-t border-[#F2E8EE]">
+                <input
+                  type="text"
+                  value={bankForm.accountHolderName}
+                  onChange={(e) => setBankForm({ ...bankForm, accountHolderName: e.target.value })}
+                  placeholder="Account Holder Name"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318]"
+                />
+                <input
+                  type="text"
+                  value={bankForm.upiId}
+                  onChange={(e) => setBankForm({ ...bankForm, upiId: e.target.value })}
+                  placeholder="UPI ID (e.g. owner@okaxis)"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318] font-mono"
+                />
+                <input
+                  type="text"
+                  value={bankForm.bankName}
+                  onChange={(e) => setBankForm({ ...bankForm, bankName: e.target.value })}
+                  placeholder="Bank Name (e.g. SBI / HDFC)"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318]"
+                />
+                <input
+                  type="text"
+                  value={bankForm.accountNumber}
+                  onChange={(e) => setBankForm({ ...bankForm, accountNumber: e.target.value })}
+                  placeholder="Bank Account Number"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318] font-mono"
+                />
+                <input
+                  type="text"
+                  value={bankForm.ifscCode}
+                  onChange={(e) => setBankForm({ ...bankForm, ifscCode: e.target.value.toUpperCase() })}
+                  placeholder="IFSC Code (e.g. SBIN0000078)"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318] font-mono uppercase"
+                />
+                <input
+                  type="text"
+                  value={bankForm.pan}
+                  onChange={(e) => setBankForm({ ...bankForm, pan: e.target.value.toUpperCase() })}
+                  placeholder="PAN Number (for TDS)"
+                  className="px-3.5 py-2.5 rounded-xl bg-[#FAFAFB] border border-[#E5DCE2] text-xs text-[#171318] font-mono uppercase"
+                />
+                <div className="sm:col-span-2 lg:col-span-3 flex justify-end">
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 rounded-xl bg-[#16A36A] hover:bg-[#128757] text-white text-xs font-bold cursor-pointer transition"
+                  >
+                    Save Bank &amp; UPI Details
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

@@ -522,10 +522,49 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                   </span>
                 </div>
 
+                {/* 1-Tap Direct Call, WhatsApp Driver & Share Delivery OTP */}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {assignedDriverPhone && (
+                    <>
+                      <a
+                        href={`tel:${assignedDriverPhone.replace(/\s+/g, '')}`}
+                        className="flex-1 min-w-[110px] py-2 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                        <span>Call Driver</span>
+                      </a>
+                      <a
+                        href={`https://wa.me/91${assignedDriverPhone.replace(/\D/g, '').slice(-10)}?text=${encodeURIComponent(
+                          `Namaste ${assignedDriverName}, regarding Zuggi Booking #${booking.id} (${load.pickup.city} to ${load.delivery.city}, Vehicle: ${assignedVehicleReg}).`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex-1 min-w-[110px] py-2 px-3 rounded-xl bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        <span>WhatsApp Driver</span>
+                      </a>
+                    </>
+                  )}
+                  {load.deliveryOtp && (
+                    <a
+                      href={`https://wa.me/${load.delivery.contactPhone ? '91' + load.delivery.contactPhone.replace(/\D/g, '').slice(-10) : ''}?text=${encodeURIComponent(
+                        `Zuggi Shipment Update:\nRoute: ${load.pickup.city} → ${load.delivery.city}\nTruck: ${assignedVehicleReg}\nDriver: ${assignedDriverName} (${assignedDriverPhone || 'Assigned'})\nSecret Delivery OTP: ${load.deliveryOtp}\nShare this OTP with the driver ONLY after receiving & verifying the goods.`
+                      )}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full py-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Share Truck Details &amp; Delivery OTP on WhatsApp</span>
+                    </a>
+                  )}
+                </div>
+
                 <div className="flex items-center justify-between">
                   <span className="text-slate-400">Total Agreed Fare:</span>
                   <span className="font-bold text-base text-emerald-400 font-mono">
-                    ₹{booking.totalAgreedAmountInr.toLocaleString('en-IN')}
+                    ₹{(Number(booking.totalAgreedAmountInr) || 0).toLocaleString('en-IN')}
                   </span>
                 </div>
 
@@ -569,7 +608,7 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                       className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-98"
                     >
                       <CreditCard className="w-4 h-4" />
-                      <span>Pay 90% Advance (₹{(booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.90)).toLocaleString('en-IN')}) via Cashfree</span>
+                      <span>Pay 90% Advance (₹{(booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.90)).toLocaleString('en-IN')}) — UPI / Pickup / Escrow</span>
                     </button>
                   )}
 

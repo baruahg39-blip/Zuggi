@@ -1190,73 +1190,85 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </form>
                   )}
 
-                  {/* Sandbox 1-Tap Sign-In Buttons */}
-                  <div className="pt-2 border-t border-gray-100 space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-[#77717A]">
-                      <span className="font-semibold">Quick Sandbox Access:</span>
-                      <span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full font-mono">Instant Testing</span>
-                    </div>
-                      {targetPortal === 'admin' ? (
-                        <div className="space-y-2">
+                  {/* Admin Security Portal (Always shown for Admin) OR Sandbox Demo Buttons (Localhost / ?demo=1 only) */}
+                  {targetPortal === 'admin' ? (
+                    <div className="pt-2 border-t border-gray-100 space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setAuthView('owner_portal')}
+                        className="w-full py-2.5 px-3 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-900 text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Sign In to Super Admin Console (Passcode)</span>
+                      </button>
+                      {typeof window !== 'undefined' &&
+                        (window.location.hostname === 'localhost' ||
+                          window.location.hostname === '127.0.0.1' ||
+                          window.location.search.includes('demo=1')) && (
                           <button
                             type="button"
                             onClick={handleQuickAdminLogin}
-                            className="w-full py-2.5 px-3 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 text-purple-900 text-xs font-bold flex items-center justify-between transition cursor-pointer"
+                            className="w-full py-2 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-between transition cursor-pointer"
                           >
                             <span className="flex items-center gap-1.5">
                               <ShieldAlert className="w-3.5 h-3.5 text-purple-600" />
-                              <span>⚡ 1-Tap Sign-In ({SUPER_ADMIN_EMAIL})</span>
+                              <span>1-Tap Dev Admin ({SUPER_ADMIN_EMAIL})</span>
                             </span>
-                            <span className="font-mono text-[10px] text-purple-700 bg-purple-100 px-2 py-0.5 rounded-full">Super Admin</span>
+                            <span className="font-mono text-[10px] text-purple-700 bg-purple-100 px-2 py-0.5 rounded-full">Dev</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => setAuthView('owner_portal')}
-                            className="w-full py-2 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer"
-                          >
-                            <Lock className="w-3.5 h-3.5 text-gray-500" />
-                            <span>Or Authenticate with Security Passcode Key</span>
-                          </button>
+                        )}
+                    </div>
+                  ) : (
+                    typeof window !== 'undefined' &&
+                    (window.location.hostname === 'localhost' ||
+                      window.location.hostname === '127.0.0.1' ||
+                      window.location.search.includes('demo=1')) && (
+                      <div className="pt-2 border-t border-gray-100 space-y-1.5">
+                        <div className="flex items-center justify-between text-[11px] text-[#77717A]">
+                          <span className="font-semibold">Quick Test Access (Dev Only):</span>
+                          <span className="text-[10px] bg-gray-100 px-2 py-0.5 rounded-full font-mono">Demo</span>
                         </div>
-                      ) : targetPortal === 'customer' ? (
-                        <button
-                          type="button"
-                          onClick={() => handleSandboxLogin('test_shipper_9911')}
-                          className="w-full py-2.5 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-between transition cursor-pointer"
-                        >
-                          <span className="flex items-center gap-1.5">
-                            <Building2 className="w-3.5 h-3.5 text-[#E83E83]" />
-                            <span>Brahmaputra Agro (Book a Truck Demo)</span>
-                          </span>
-                          <span className="font-mono text-[10px] text-gray-500">+91 99999 11111</span>
-                        </button>
-                      ) : (
-                        <div className="grid grid-cols-2 gap-1.5">
+                        {targetPortal === 'customer' ? (
                           <button
                             type="button"
-                            onClick={() => handleSandboxLogin('test_driver_9922')}
-                            className="py-2.5 px-2.5 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex flex-col text-left transition cursor-pointer"
+                            onClick={() => handleSandboxLogin('test_shipper_9911')}
+                            className="w-full py-2.5 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-between transition cursor-pointer"
                           >
-                            <span className="flex items-center gap-1 text-[11px]">
-                              <Truck className="w-3 h-3 text-[#E83E83]" />
-                              <span className="font-bold truncate">Driver Bikash</span>
+                            <span className="flex items-center gap-1.5">
+                              <Building2 className="w-3.5 h-3.5 text-[#E83E83]" />
+                              <span>Brahmaputra Agro (Book a Truck Demo)</span>
                             </span>
-                            <span className="font-mono text-[9px] text-gray-500 mt-0.5">+91 99999 22222</span>
+                            <span className="font-mono text-[10px] text-gray-500">+91 99999 11111</span>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleSandboxLogin('test_driver_9933')}
-                            className="py-2.5 px-2.5 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex flex-col text-left transition cursor-pointer"
-                          >
-                            <span className="flex items-center gap-1 text-[11px]">
-                              <Truck className="w-3 h-3 text-emerald-600" />
-                              <span className="font-bold truncate">Pragati Fleet</span>
-                            </span>
-                            <span className="font-mono text-[9px] text-gray-500 mt-0.5">+91 99999 33333</span>
-                          </button>
-                        </div>
-                      )}
-                  </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleSandboxLogin('test_driver_9922')}
+                              className="py-2.5 px-2.5 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex flex-col text-left transition cursor-pointer"
+                            >
+                              <span className="flex items-center gap-1 text-[11px]">
+                                <Truck className="w-3 h-3 text-[#E83E83]" />
+                                <span className="font-bold truncate">Driver Bikash</span>
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-500 mt-0.5">+91 99999 22222</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSandboxLogin('test_driver_9933')}
+                              className="py-2.5 px-2.5 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex flex-col text-left transition cursor-pointer"
+                            >
+                              <span className="flex items-center gap-1 text-[11px]">
+                                <Truck className="w-3 h-3 text-emerald-600" />
+                                <span className="font-bold truncate">Pragati Fleet</span>
+                              </span>
+                              <span className="font-mono text-[9px] text-gray-500 mt-0.5">+91 99999 33333</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  )}
                 </div>
               ) : (
                 <form onSubmit={handleVerifyOtp} className="space-y-4">

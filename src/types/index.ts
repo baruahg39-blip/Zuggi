@@ -25,6 +25,15 @@ export interface User {
   hasPasscode?: boolean;
   passcodeHash?: string;
   passcodeUpdatedAt?: string;
+  bankDetails?: {
+    accountHolderName?: string;
+    bankName?: string;
+    accountNumber?: string;
+    ifscCode?: string;
+    upiId?: string;
+    isVerified?: boolean;
+    updatedAt?: string;
+  };
   createdAt: string;
 }
 

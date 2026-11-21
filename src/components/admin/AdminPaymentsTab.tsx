@@ -44,32 +44,62 @@ export const AdminPaymentsTab: React.FC = () => {
     return unsub;
   }, []);
 
+  const formatInr = (val: unknown) => {
+    const num = Number(val);
+    return (Number.isFinite(num) ? num : 0).toLocaleString('en-IN');
+  };
+
   // Compute Financial Aggregates
   const totalAgreedGMV = useMemo(
-    () => bookings.reduce((sum, b) => sum + (b.totalAgreedAmountInr || 0), 0),
+    () => bookings.reduce((sum, b) => sum + (Number(b.totalAgreedAmountInr) || 0), 0),
     [bookings]
   );
 
   const totalAdvanceCollected = useMemo(
-    () => bookings.filter((b) => b.paymentAdvanceStatus === 'paid').reduce((sum, b) => sum + (b.customerAdvanceAmountInr || Math.round(b.totalAgreedAmountInr * 0.90)), 0),
+    () =>
+      bookings
+        .filter((b) => b.paymentAdvanceStatus === 'paid')
+        .reduce(
+          (sum, b) =>
+            sum + (Number(b.customerAdvanceAmountInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.90)),
+          0
+        ),
     [bookings]
   );
 
   const totalBalanceCollected = useMemo(
-    () => bookings.filter((b) => b.paymentBalanceStatus === 'paid').reduce((sum, b) => sum + (b.customerBalanceAmountInr || Math.round(b.totalAgreedAmountInr * 0.10)), 0),
+    () =>
+      bookings
+        .filter((b) => b.paymentBalanceStatus === 'paid')
+        .reduce(
+          (sum, b) =>
+            sum + (Number(b.customerBalanceAmountInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.10)),
+          0
+        ),
     [bookings]
   );
 
   const totalCustomerCollections = totalAdvanceCollected + totalBalanceCollected;
 
   const totalCommissionEarned = useMemo(
-    () => bookings.filter((b) => b.paymentAdvanceStatus === 'paid').reduce((sum, b) => sum + (b.platformCommissionInr || Math.round(b.totalAgreedAmountInr * 0.05)), 0),
+    () =>
+      bookings
+        .filter((b) => b.paymentAdvanceStatus === 'paid')
+        .reduce(
+          (sum, b) =>
+            sum + (Number(b.platformCommissionInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.05)),
+          0
+        ),
     [bookings]
   );
 
   const totalDisbursedPayouts = useMemo(() => {
-    const stage1 = bookings.filter((b) => b.payoutStage1Status === 'settled').reduce((sum, b) => sum + (b.driverFirstPayoutInr || 0), 0);
-    const stage2 = bookings.filter((b) => b.payoutStage2Status === 'settled').reduce((sum, b) => sum + (b.driverFinalPayoutInr || 0), 0);
+    const stage1 = bookings
+      .filter((b) => b.payoutStage1Status === 'settled')
+      .reduce((sum, b) => sum + (Number(b.driverFirstPayoutInr) || 0), 0);
+    const stage2 = bookings
+      .filter((b) => b.payoutStage2Status === 'settled')
+      .reduce((sum, b) => sum + (Number(b.driverFinalPayoutInr) || 0), 0);
     return stage1 + stage2;
   }, [bookings]);
 
@@ -79,12 +109,12 @@ export const AdminPaymentsTab: React.FC = () => {
   );
 
   const totalHeldInDisputes = useMemo(
-    () => activeDisputesList.reduce((sum, d) => sum + d.heldAmountInr, 0),
+    () => activeDisputesList.reduce((sum, d) => sum + (Number(d.heldAmountInr) || 0), 0),
     [activeDisputesList]
   );
 
   const totalRefundsProcessed = useMemo(
-    () => transactions.filter((t) => t.type === 'refund').reduce((sum, t) => sum + t.amountInr, 0),
+    () => transactions.filter((t) => t.type === 'refund').reduce((sum, t) => sum + (Number(t.amountInr) || 0), 0),
     [transactions]
   );
 
@@ -103,14 +133,14 @@ export const AdminPaymentsTab: React.FC = () => {
   const handleExportCsv = () => {
     const headers = ['Transaction ID', 'Booking ID', 'Type', 'Amount (INR)', 'Order ID', 'Status', 'Timestamp', 'Notes'];
     const rows = transactions.map((t) => [
-      t.id,
-      t.bookingId,
-      t.type,
-      t.amountInr,
-      t.orderId,
-      t.status,
-      t.timestamp,
-      `"${t.notes.replace(/"/g, '""')}"`
+      t.id || '',
+      t.bookingId || '',
+      t.type || 'payment',
+      Number(t.amountInr) || 0,
+      t.orderId || '',
+      t.status || '',
+      t.timestamp || '',
+      `"${String(t.notes || '').replace(/"/g, '""')}"`
     ]);
 
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
@@ -166,42 +196,42 @@ export const AdminPaymentsTab: React.FC = () => {
         {/* 1. Total GMV */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-slate-400 uppercase font-bold block">Gross Booking Value</span>
-          <span className="text-lg font-black text-white font-mono block">₹{totalAgreedGMV.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-white font-mono block">₹{formatInr(totalAgreedGMV)}</span>
           <span className="text-[10px] text-slate-500 block">Total agreed fares</span>
         </div>
 
         {/* 2. Customer Collections */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-slate-400 uppercase font-bold block">Customer Collections</span>
-          <span className="text-lg font-black text-emerald-400 font-mono block">₹{totalCustomerCollections.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-emerald-400 font-mono block">₹{formatInr(totalCustomerCollections)}</span>
           <span className="text-[10px] text-slate-500 block">Advance + Final</span>
         </div>
 
         {/* 3. Platform Commission */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-slate-400 uppercase font-bold block">Platform Fee (5%)</span>
-          <span className="text-lg font-black text-amber-400 font-mono block">₹{totalCommissionEarned.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-amber-400 font-mono block">₹{formatInr(totalCommissionEarned)}</span>
           <span className="text-[10px] text-slate-500 block">Zuggi revenue</span>
         </div>
 
         {/* 4. Successful Payouts */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-slate-400 uppercase font-bold block">Disbursed to Fleet</span>
-          <span className="text-lg font-black text-teal-400 font-mono block">₹{totalDisbursedPayouts.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-teal-400 font-mono block">₹{formatInr(totalDisbursedPayouts)}</span>
           <span className="text-[10px] text-slate-500 block">Stage 1 & Stage 2</span>
         </div>
 
         {/* 5. Active Disputes */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-rose-400 uppercase font-bold block">Disputed on Hold</span>
-          <span className="text-lg font-black text-rose-400 font-mono block">₹{totalHeldInDisputes.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-rose-400 font-mono block">₹{formatInr(totalHeldInDisputes)}</span>
           <span className="text-[10px] text-slate-500 block">{activeDisputesList.length} active dispute(s)</span>
         </div>
 
         {/* 6. Refunds */}
         <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-[10px] text-slate-400 uppercase font-bold block">Refunds</span>
-          <span className="text-lg font-black text-slate-300 font-mono block">₹{totalRefundsProcessed.toLocaleString('en-IN')}</span>
+          <span className="text-lg font-black text-slate-300 font-mono block">₹{formatInr(totalRefundsProcessed)}</span>
           <span className="text-[10px] text-slate-500 block">Customer reversals</span>
         </div>
 
@@ -242,14 +272,14 @@ export const AdminPaymentsTab: React.FC = () => {
                   <div className="text-right">
                     <span className="text-[11px] text-slate-400 block">Held in Escrow:</span>
                     <span className="text-base font-extrabold text-rose-400 font-mono">
-                      ₹{disp.heldAmountInr.toLocaleString('en-IN')}
+                      ₹{formatInr(disp.heldAmountInr)}
                     </span>
                   </div>
                 </div>
 
                 <div className="p-3 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
                   <div className="font-bold text-rose-400 uppercase text-[10px] mb-1">
-                    Dispute Reason: {disp.reason.replace('_', ' ')}
+                    Dispute Reason: {String(disp.reason || 'other').replace(/_/g, ' ')}
                   </div>
                   <p className="text-xs">{disp.description}</p>
                   {disp.evidencePhotoUrl && (
@@ -270,7 +300,7 @@ export const AdminPaymentsTab: React.FC = () => {
                     onClick={() => handleResolveDispute(disp.id, 'refund_to_customer')}
                     className="px-3.5 py-2 rounded-xl bg-rose-900/80 hover:bg-rose-800 text-rose-200 text-xs font-bold transition cursor-pointer"
                   >
-                    Authorize Customer Refund (₹{disp.heldAmountInr.toLocaleString('en-IN')})
+                    Authorize Customer Refund (₹{formatInr(disp.heldAmountInr)})
                   </button>
 
                   <button
@@ -314,20 +344,34 @@ export const AdminPaymentsTab: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800 font-sans">
-              {bookings.slice(0, 5).map((b) => (
-                <tr key={b.id} className="hover:bg-slate-950/40 transition">
-                  <td className="p-3.5 font-mono text-slate-400">vnd_{b.driverId.slice(-8)}</td>
-                  <td className="p-3.5 font-bold text-white">Assigned Transporter ({b.vehicleId})</td>
-                  <td className="p-3.5 text-slate-300">Direct Bank Split (IMPS/NEFT)</td>
-                  <td className="p-3.5 font-mono text-amber-400">HDFC0000128 • 9876543210@okaxis</td>
-                  <td className="p-3.5 font-mono text-slate-400">AAAFK4902L</td>
-                  <td className="p-3.5 text-right">
-                    <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30 text-[10px]">
-                      ACTIVE
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {bookings.slice(0, 8).map((b) => {
+                const partnerUser = logisticsStore.getUserById(b.driverId) || logisticsStore.getUserById(b.transporterId);
+                const bank = partnerUser?.bankDetails;
+                const hasBank = Boolean(bank?.upiId || bank?.accountNumber);
+                return (
+                  <tr key={b.id} className="hover:bg-slate-950/40 transition">
+                    <td className="p-3.5 font-mono text-slate-400">vnd_{String(b.driverId || b.id || 'partner').slice(-8)}</td>
+                    <td className="p-3.5 font-bold text-white">
+                      {partnerUser?.name || `Transporter (${b.vehicleId || 'TBD'})`}
+                      {partnerUser?.phone ? <span className="block text-[10px] font-mono text-slate-400">{partnerUser.phone}</span> : null}
+                    </td>
+                    <td className="p-3.5 text-slate-300">{bank?.bankName || (bank?.upiId ? 'Direct UPI Payout' : 'Pending Bank Setup')}</td>
+                    <td className="p-3.5 font-mono text-amber-400">
+                      {[bank?.ifscCode, bank?.upiId].filter(Boolean).join(' • ') || 'Not added yet'}
+                    </td>
+                    <td className="p-3.5 font-mono text-slate-400">{partnerUser?.pan || partnerUser?.gstin || '—'}</td>
+                    <td className="p-3.5 text-right">
+                      <span className={`px-2 py-0.5 rounded font-bold border text-[10px] ${
+                        hasBank
+                          ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                      }`}>
+                        {hasBank ? 'READY' : 'PENDING BANK'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -362,10 +406,10 @@ export const AdminPaymentsTab: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800 font-sans">
-                {transactions.map((tx) => (
-                  <tr key={tx.id} className="hover:bg-slate-950/40 transition">
-                    <td className="p-3.5 font-mono text-slate-400 text-[11px]">{tx.id}</td>
-                    <td className="p-3.5 font-mono text-indigo-400 font-bold">{tx.bookingId}</td>
+                {transactions.map((tx, idx) => (
+                  <tr key={tx.id || `tx_${idx}`} className="hover:bg-slate-950/40 transition">
+                    <td className="p-3.5 font-mono text-slate-400 text-[11px]">{tx.id || '—'}</td>
+                    <td className="p-3.5 font-mono text-indigo-400 font-bold">{tx.bookingId || '—'}</td>
                     <td className="p-3.5">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                         tx.type === 'customer_advance_90'
@@ -378,21 +422,23 @@ export const AdminPaymentsTab: React.FC = () => {
                           ? 'bg-teal-500/20 text-teal-400'
                           : 'bg-rose-500/20 text-rose-400'
                       }`}>
-                        {tx.type.replace(/_/g, ' ').toUpperCase()}
+                        {String(tx.type || 'payment').replace(/_/g, ' ').toUpperCase()}
                       </span>
                     </td>
                     <td className="p-3.5 font-mono font-bold text-white text-sm">
-                      ₹{tx.amountInr.toLocaleString('en-IN')}
+                      ₹{formatInr(tx.amountInr)}
                     </td>
-                    <td className="p-3.5 font-mono text-slate-400 text-[11px]">{tx.orderId}</td>
+                    <td className="p-3.5 font-mono text-slate-400 text-[11px]">{tx.orderId || '—'}</td>
                     <td className="p-3.5">
                       <span className="text-emerald-400 font-bold text-[11px] flex items-center gap-1">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>SUCCESS</span>
+                        <span>{String(tx.status || 'SUCCESS').toUpperCase()}</span>
                       </span>
                     </td>
                     <td className="p-3.5 text-right font-mono text-slate-400 text-[11px]">
-                      {new Date(tx.timestamp).toLocaleString('en-IN')}
+                      {tx.timestamp && !Number.isNaN(new Date(tx.timestamp).getTime())
+                        ? new Date(tx.timestamp).toLocaleString('en-IN')
+                        : '—'}
                     </td>
                   </tr>
                 ))}

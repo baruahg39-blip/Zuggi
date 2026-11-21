@@ -507,9 +507,9 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
       )}
 
       {/* MAP VIEWPORT CANVAS */}
-      <div className="relative w-full h-[450px] md:h-[520px] rounded-3xl overflow-hidden border border-gray-200 bg-[#171318] shadow-xl flex flex-col">
+      <div className="relative w-full h-[450px] md:h-[520px] rounded-3xl overflow-hidden border border-gray-200 bg-[#E8EEF4] shadow-xl flex flex-col">
         {/* Floating Top HUD */}
-        <div className="absolute top-3 left-3 right-3 z-20 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+        <div className="absolute top-3 left-3 right-3 z-[420] flex flex-wrap items-center justify-between gap-2 pointer-events-none">
           {/* Vehicle & Speed Badge */}
           <div className="bg-[#171318]/90 backdrop-blur-md px-3.5 py-2.5 rounded-2xl border border-gray-700 shadow-xl pointer-events-auto flex items-center gap-3 text-white">
             <div className="w-9 h-9 rounded-xl bg-[#E83E83] flex items-center justify-center font-bold text-white shadow-md">
@@ -557,17 +557,20 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
         </div>
 
         {/* MAP CANVAS */}
-        <div className="flex-1 w-full h-full relative">
+        <div className="flex-1 w-full h-full min-h-0 relative">
           {canRenderGoogleMap ? (
             <>
               <APIProvider
                 apiKey={apiKey}
                 language="en"
                 region="IN"
+                libraries={['maps', 'marker', 'geometry']}
                 onError={reportMapError}
               >
                 <GoogleMap
                   mapId="DEMO_MAP_ID"
+                  colorScheme="LIGHT"
+                  mapTypeId="roadmap"
                   style={{ width: '100%', height: '100%' }}
                   defaultCenter={initialMapCenter}
                   defaultZoom={8}

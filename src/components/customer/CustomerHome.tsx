@@ -29,6 +29,7 @@ import { logisticsStore } from '../../services/store';
 import { exportCustomerBookingsToCsv } from '../../utils/csvExport';
 import { ShipperLiveTracker } from '../tracking/ShipperLiveTracker';
 import { DriverGpsSimulatorModal } from '../tracking/DriverGpsSimulatorModal';
+import { LocationAutocompleteInput, SelectedPlace } from '../shared/LocationAutocompleteInput';
 
 interface CustomerHomeProps {
   currentUser: User;
@@ -51,13 +52,14 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const [loads, setLoads] = useState<LoadItem[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [vehicles, setVehicles] = useState<CommercialVehicle[]>([]);
-  const hubs = useMemo(() => logisticsStore.getHubLocations(), []);
   const vehicleCategories = useMemo(() => logisticsStore.getVehicleCategories(), []);
 
-  // Quick estimator state
-  const [calcFrom, setCalcFrom] = useState(hubs[0]?.name || 'Guwahati Hub');
-  const [calcTo, setCalcTo] = useState(hubs[1]?.name || 'Dibrugarh Terminal');
-  const [calcVehicle, setCalcVehicle] = useState(vehicleCategories[1]?.id || 'light_truck');
+  // Quick estimator state — supports ANY area, town, city, or pincode across the state & India
+  const [calcFrom, setCalcFrom] = useState('');
+  const [calcFromCoords, setCalcFromCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [calcTo, setCalcTo] = useState('');
+  const [calcToCoords, setCalcToCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [calcVehicle, setCalcVehicle] = useState(vehicleCategories[1]?.id || 'bolero_pickup');
 
   // Live Tracking and Simulator state
   const [selectedTrackTripId, setSelectedTrackTripId] = useState<string>('trip_demo_01');
@@ -127,13 +129,17 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
     };
   }, [bookings]);
 
-  // Quick instant estimate computation
+  // Quick instant estimate computation from real selected coordinates
   const quickEst = useMemo(() => {
-    const pHub = hubs.find((h) => h.name === calcFrom) || hubs[0];
-    const dHub = hubs.find((h) => h.name === calcTo) || hubs[1];
-    if (!pHub || !dHub) return { distanceKm: 440, estimatedHours: 9, baseFreight: 22000, helperCharges: 0, tollEstimate: 500, gstAmount: 1100, totalEstimate: 23600, ratePerKm: 48 };
-    return logisticsStore.calculateEstimatedFreight(pHub.lat, pHub.lng, dHub.lat, dHub.lng, calcVehicle);
-  }, [calcFrom, calcTo, calcVehicle, hubs]);
+    if (!calcFromCoords || !calcToCoords) return null;
+    return logisticsStore.calculateEstimatedFreight(
+      calcFromCoords.lat,
+      calcFromCoords.lng,
+      calcToCoords.lat,
+      calcToCoords.lng,
+      calcVehicle
+    );
+  }, [calcFromCoords, calcToCoords, calcVehicle]);
 
   const handleExportBookingsCsv = () => {
     exportCustomerBookingsToCsv(loads, bookings);
@@ -343,38 +349,51 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
             </div>
           )}
 
-          {/* QUICK FREIGHT ESTIMATOR */}
+          {/* QUICK FREIGHT ESTIMATOR (ANY LOCATION ACROSS CITY, STATE & INDIA) */}
           <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-4">
-            <div className="flex items-center gap-2">
-              <Calculator className="w-5 h-5 text-[#E83E83]" />
-              <h3 className="font-bold text-base text-[#171318]">Instant Freight Rate Calculator</h3>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Calculator className="w-5 h-5 text-[#E83E83]" />
+                <h3 className="font-bold text-base text-[#171318]">Instant Freight Rate Calculator</h3>
+              </div>
+              <span className="text-[11px] text-[#77717A] font-medium">Search any street, town, city or pincode</span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-[#77717A]">Pickup Hub</label>
-                <select
+                <label className="text-xs font-bold text-[#77717A]">Pickup Location</label>
+                <LocationAutocompleteInput
                   value={calcFrom}
-                  onChange={(e) => setCalcFrom(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-[#E83E83]"
-                >
-                  {hubs.map((h) => (
-                    <option key={h.name} value={h.name}>{h.name}</option>
-                  ))}
-                </select>
+                  onChangeText={(txt) => {
+                    setCalcFrom(txt);
+                    if (!txt.trim()) setCalcFromCoords(null);
+                  }}
+                  onSelectPlace={(place: SelectedPlace) => {
+                    setCalcFrom(place.label);
+                    setCalcFromCoords({ lat: place.lat, lng: place.lng });
+                  }}
+                  placeholder="Enter pickup area, city or pincode"
+                  theme="light"
+                  showGpsButton={true}
+                />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-[#77717A]">Destination Hub</label>
-                <select
+                <label className="text-xs font-bold text-[#77717A]">Drop Location</label>
+                <LocationAutocompleteInput
                   value={calcTo}
-                  onChange={(e) => setCalcTo(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-[#E83E83]"
-                >
-                  {hubs.map((h) => (
-                    <option key={h.name} value={h.name}>{h.name}</option>
-                  ))}
-                </select>
+                  onChangeText={(txt) => {
+                    setCalcTo(txt);
+                    if (!txt.trim()) setCalcToCoords(null);
+                  }}
+                  onSelectPlace={(place: SelectedPlace) => {
+                    setCalcTo(place.label);
+                    setCalcToCoords({ lat: place.lat, lng: place.lng });
+                  }}
+                  placeholder="Enter drop area, city or pincode"
+                  theme="light"
+                  showGpsButton={false}
+                />
               </div>
 
               <div className="space-y-1">
@@ -382,7 +401,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
                 <select
                   value={calcVehicle}
                   onChange={(e) => setCalcVehicle(e.target.value as any)}
-                  className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-[#E83E83]"
+                  className="w-full px-3 py-2.5 rounded-xl border border-gray-300 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-[#E83E83] bg-white text-[#171318]"
                 >
                   {vehicleCategories.map((v) => (
                     <option key={v.id} value={v.id}>{v.name} ({v.capacityTonnes} MT)</option>
@@ -392,21 +411,33 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
             </div>
 
             <div className="bg-[#FFF0F6] rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <span className="text-xs font-bold text-[#E83E83] block">Estimated Freight Range</span>
-                <span className="text-2xl font-black text-[#171318]">
-                  ₹{Math.round(quickEst.totalEstimate * 0.95).toLocaleString('en-IN')} – ₹{Math.round(quickEst.totalEstimate * 1.05).toLocaleString('en-IN')}
-                </span>
-                <span className="text-xs text-[#77717A] block mt-0.5">
-                  Est. Distance: {quickEst.distanceKm} km • Travel time: ~{quickEst.estimatedHours} hrs
-                </span>
-              </div>
+              {quickEst ? (
+                <div>
+                  <span className="text-xs font-bold text-[#E83E83] block">Estimated Freight Range</span>
+                  <span className="text-2xl font-black text-[#171318]">
+                    ₹{Math.round(quickEst.totalEstimate * 0.95).toLocaleString('en-IN')} – ₹{Math.round(quickEst.totalEstimate * 1.05).toLocaleString('en-IN')}
+                  </span>
+                  <span className="text-xs text-[#77717A] block mt-0.5">
+                    Est. Distance: {quickEst.distanceKm} km • Travel time: ~{quickEst.estimatedHours} hrs
+                  </span>
+                </div>
+              ) : (
+                <div>
+                  <span className="text-xs font-bold text-[#E83E83] block">Any Pickup → Any Drop</span>
+                  <span className="text-sm font-bold text-[#171318] block mt-0.5">
+                    Select pickup &amp; drop locations above to see live distance and freight estimate
+                  </span>
+                  <span className="text-[11px] text-[#77717A] block mt-0.5">
+                    Works for local city deliveries, inter-district trips &amp; interstate highways
+                  </span>
+                </div>
+              )}
 
               <button
                 onClick={onCreateLoadClick}
-                className="px-5 py-2.5 bg-[#E83E83] text-white text-xs font-bold rounded-xl shadow-md hover:bg-[#d62e73] transition cursor-pointer"
+                className="px-5 py-2.5 bg-[#E83E83] text-white text-xs font-bold rounded-xl shadow-md hover:bg-[#d62e73] transition cursor-pointer shrink-0"
               >
-                Book with This Rate
+                {quickEst ? 'Book with This Rate' : 'Book a Truck Now'}
               </button>
             </div>
           </div>

@@ -18,11 +18,13 @@ import { usePWAInstall } from '../../hooks/usePWAInstall';
 interface MobileAppInstallModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onOpenPermissions?: () => void;
 }
 
 export const MobileAppInstallModal: React.FC<MobileAppInstallModalProps> = ({
   isOpen,
-  onClose
+  onClose,
+  onOpenPermissions
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [activeTab, setActiveTab] = useState<'phone' | 'apk_guide' | 'qr'>('phone');
@@ -194,6 +196,28 @@ export const MobileAppInstallModal: React.FC<MobileAppInstallModalProps> = ({
                     )}
                   </div>
 
+                  {/* Required Permissions Checklist for Drivers */}
+                  <div className="p-4 bg-slate-950/80 border border-slate-800 rounded-2xl space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-white">Required Driver Permissions After Install</span>
+                      {onOpenPermissions && (
+                        <button
+                          type="button"
+                          onClick={onOpenPermissions}
+                          className="min-h-[36px] px-3 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] text-white text-[11px] font-bold transition whitespace-nowrap cursor-pointer"
+                        >
+                          Grant Permissions Now
+                        </button>
+                      )}
+                    </div>
+                    <ul className="space-y-1.5 text-[11px] text-gray-300">
+                      <li><strong className="text-white">Precise GPS Location:</strong> Live highway tracking, nearby loads, pickup &amp; drop geo-fence.</li>
+                      <li><strong className="text-white">Camera &amp; Photo Scan:</strong> Proof of Delivery (e-POD), signed Bilty, and RC / DL KYC upload.</li>
+                      <li><strong className="text-white">Notifications:</strong> Instant nearby load alerts, accepted bids, and advance payout alerts.</li>
+                      <li><strong className="text-white">Contacts (Emergency / Co-Driver):</strong> Pick a backup co-driver or family emergency contact.</li>
+                    </ul>
+                  </div>
+
                   {/* App Link Box */}
                   <div className="space-y-1.5">
                     <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">
@@ -304,6 +328,23 @@ export const MobileAppInstallModal: React.FC<MobileAppInstallModalProps> = ({
                   <div>npm i -g @bubblewrap/cli</div>
                   <div>bubblewrap init --manifest=https://zuggi.in/manifest-partner.json</div>
                   <div>bubblewrap build</div>
+                </div>
+              </div>
+
+              {/* AndroidManifest.xml Permissions Reference for Play Store Build */}
+              <div className="p-3.5 bg-[#060309] border border-gray-800 rounded-xl space-y-2">
+                <span className="font-bold text-white text-xs block">
+                  Android Play Store Permissions (Enable in PWABuilder / AndroidManifest.xml)
+                </span>
+                <p className="text-gray-400 text-[11px]">
+                  Enable Location Delegation and Notifications in PWABuilder / Bubblewrap, and include these declarations if building a native Capacitor / Android wrapper:
+                </p>
+                <div className="bg-gray-900 p-2.5 rounded-lg border border-gray-800 font-mono text-[10px] text-emerald-300 space-y-0.5 select-all overflow-x-auto">
+                  <div>&lt;uses-permission android:name=&quot;android.permission.ACCESS_FINE_LOCATION&quot; /&gt;</div>
+                  <div>&lt;uses-permission android:name=&quot;android.permission.ACCESS_COARSE_LOCATION&quot; /&gt;</div>
+                  <div>&lt;uses-permission android:name=&quot;android.permission.CAMERA&quot; /&gt;</div>
+                  <div>&lt;uses-permission android:name=&quot;android.permission.POST_NOTIFICATIONS&quot; /&gt;</div>
+                  <div>&lt;uses-permission android:name=&quot;android.permission.READ_CONTACTS&quot; /&gt;</div>
                 </div>
               </div>
             </div>

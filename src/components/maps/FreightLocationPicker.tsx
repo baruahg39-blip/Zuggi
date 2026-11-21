@@ -193,7 +193,7 @@ const MapInnerController: React.FC<MapInnerControllerProps> = ({
       const request = {
         origin: { lat: pickup.lat, lng: pickup.lng },
         destination: { lat: drop.lat, lng: drop.lng },
-        travelMode: 'DRIVE',
+        travelMode: 'DRIVING',
         fields: ['path', 'distanceMeters', 'durationMillis', 'viewport']
       };
 
@@ -298,11 +298,11 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   const [pickup, setPickup] = useState<LocationDetail>({
     lat: initialPickup?.lat || 26.1445,
     lng: initialPickup?.lng || 91.7362,
-    formatted_address: initialPickup?.formatted_address || 'Beltola Wholesale Transport Yard, GS Road, Guwahati, Assam',
-    city: initialPickup?.city || 'Guwahati',
-    state: initialPickup?.state || 'Assam',
-    pincode: initialPickup?.pincode || '781028',
-    landmark: initialPickup?.landmark || 'Shed 4B, Main Gate',
+    formatted_address: initialPickup?.formatted_address || '',
+    city: initialPickup?.city || '',
+    state: initialPickup?.state || '',
+    pincode: initialPickup?.pincode || '',
+    landmark: initialPickup?.landmark || '',
     contactName: initialPickup?.contactName || '',
     contactPhone: initialPickup?.contactPhone || ''
   });
@@ -310,11 +310,11 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   const [drop, setDrop] = useState<LocationDetail>({
     lat: initialDrop?.lat || 26.7509,
     lng: initialDrop?.lng || 94.2037,
-    formatted_address: initialDrop?.formatted_address || 'Gar-Ali Commercial Hub, Jorhat, Assam',
-    city: initialDrop?.city || 'Jorhat',
-    state: initialDrop?.state || 'Assam',
-    pincode: initialDrop?.pincode || '785001',
-    landmark: initialDrop?.landmark || 'Godown 12, Highway Crossing',
+    formatted_address: initialDrop?.formatted_address || '',
+    city: initialDrop?.city || '',
+    state: initialDrop?.state || '',
+    pincode: initialDrop?.pincode || '',
+    landmark: initialDrop?.landmark || '',
     contactName: initialDrop?.contactName || '',
     contactPhone: initialDrop?.contactPhone || ''
   });
@@ -326,11 +326,16 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   const [isGeocoding, setIsGeocoding] = useState<boolean>(false);
   const [currentResolvedAddress, setCurrentResolvedAddress] = useState<string>('');
 
-  // Autocomplete Search States
+  // Autocomplete Search States (supports both Google Places API New and Nominatim fallback)
   const [searchQuery, setSearchQuery] = useState('');
   const [autocompleteSuggestions, setAutocompleteSuggestions] = useState<google.maps.places.AutocompleteSuggestion[]>([]);
+  const [fallbackSuggestions, setFallbackSuggestions] = useState<
+    Array<{ displayName: string; mainText: string; secondaryText: string; lat: number; lng: number; city: string; state: string; pincode: string }>
+  >([]);
   const [isSearching, setIsSearching] = useState(false);
   const sessionTokenRef = useRef<google.maps.places.AutocompleteSessionToken | null>(null);
+  const [fallbackFlyTo, setFallbackFlyTo] = useState<{ lat: number; lng: number; zoom?: number; seq: number } | null>(null);
+  const fallbackGeocodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Route Metrics State
   const [routeMeta, setRouteMeta] = useState<RouteMeta | null>(null);
@@ -385,10 +390,11 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
     setIsGeocoding(true);
   }, []);
 
-  // 1. Programmatic Autocomplete Suggestion Fetch using Places API (New)
+  // 1. Programmatic Autocomplete Suggestion Fetch (Google Places API New when active, Nominatim when fallback road map is active)
   useEffect(() => {
     if (!searchQuery.trim() || searchQuery.length < 2) {
       setAutocompleteSuggestions([]);
+      setFallbackSuggestions([]);
       return;
     }
 
@@ -396,8 +402,7 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
     const timer = setTimeout(async () => {
       try {
         setIsSearching(true);
-        // Using window.google.maps.places.AutocompleteSuggestion
-        if (window.google && window.google.maps && window.google.maps.places) {
+        if (canRenderGoogleMap && window.google && window.google.maps && window.google.maps.places) {
           const { AutocompleteSessionToken, AutocompleteSuggestion } = window.google.maps.places;
           if (!sessionTokenRef.current) {
             sessionTokenRef.current = new AutocompleteSessionToken();
@@ -412,6 +417,63 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
           const res = await AutocompleteSuggestion.fetchAutocompleteSuggestions(request);
           if (isSubscribed) {
             setAutocompleteSuggestions(res.suggestions || []);
+            setFallbackSuggestions([]);
+          }
+        } else {
+          const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=in&addressdetails=1&limit=6&q=${encodeURIComponent(
+            searchQuery.trim()
+          )}`;
+          const res = await fetch(url, { headers: { Accept: 'application/json' } });
+          if (res.ok && isSubscribed) {
+            const rows = (await res.json()) as Array<{
+              display_name?: string;
+              name?: string;
+              lat?: string;
+              lon?: string;
+              address?: Record<string, string>;
+            }>;
+            const mapped = rows
+              .map((r) => {
+                const lat = parseFloat(r.lat || '');
+                const lng = parseFloat(r.lon || '');
+                if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+                const addr = r.address || {};
+                const city =
+                  addr.city ||
+                  addr.town ||
+                  addr.village ||
+                  addr.suburb ||
+                  addr.county ||
+                  addr.state_district ||
+                  r.name ||
+                  '';
+                const state = addr.state || '';
+                const pincode = addr.postcode || '';
+                const full = r.display_name || `${city}${state ? `, ${state}` : ''}`;
+                const parts = full.split(',').map((s) => s.trim());
+                return {
+                  displayName: full,
+                  mainText: r.name || parts[0] || city,
+                  secondaryText: parts.slice(1, 4).join(', '),
+                  lat,
+                  lng,
+                  city,
+                  state,
+                  pincode
+                };
+              })
+              .filter(Boolean) as Array<{
+                displayName: string;
+                mainText: string;
+                secondaryText: string;
+                lat: number;
+                lng: number;
+                city: string;
+                state: string;
+                pincode: string;
+              }>;
+            setFallbackSuggestions(mapped);
+            setAutocompleteSuggestions([]);
           }
         }
       } catch (err) {
@@ -419,13 +481,80 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
       } finally {
         if (isSubscribed) setIsSearching(false);
       }
-    }, 250); // 250ms debounce for typing
+    }, 280);
 
     return () => {
       isSubscribed = false;
       clearTimeout(timer);
     };
-  }, [searchQuery]);
+  }, [searchQuery, canRenderGoogleMap]);
+
+  const handleSelectFallbackSuggestion = (item: {
+    displayName: string;
+    mainText: string;
+    lat: number;
+    lng: number;
+    city: string;
+    state: string;
+    pincode: string;
+  }) => {
+    setSearchQuery('');
+    setFallbackSuggestions([]);
+    setFallbackFlyTo((prev) => ({ lat: item.lat, lng: item.lng, zoom: 16, seq: (prev?.seq || 0) + 1 }));
+    if (activeStep === 'pickup') {
+      setPickup((prev) => ({
+        ...prev,
+        lat: item.lat,
+        lng: item.lng,
+        formatted_address: item.displayName,
+        city: item.city || prev.city,
+        state: item.state || prev.state,
+        pincode: item.pincode || prev.pincode
+      }));
+    } else {
+      setDrop((prev) => ({
+        ...prev,
+        lat: item.lat,
+        lng: item.lng,
+        formatted_address: item.displayName,
+        city: item.city || prev.city,
+        state: item.state || prev.state,
+        pincode: item.pincode || prev.pincode
+      }));
+    }
+    setCurrentResolvedAddress(item.displayName);
+    showToast(`Centered on ${item.mainText}`, 'info');
+  };
+
+  const handleFallbackCenterChange = useCallback(
+    (lat: number, lng: number) => {
+      if (activeStep === 'preview') return;
+      if (fallbackGeocodeTimerRef.current) clearTimeout(fallbackGeocodeTimerRef.current);
+      setIsGeocoding(true);
+      fallbackGeocodeTimerRef.current = setTimeout(async () => {
+        try {
+          const res = await fetch(`/api/maps/reverse-geocode?lat=${lat}&lng=${lng}`);
+          const data = await res.json();
+          if (data && data.success) {
+            handleCenterAddressResolved(activeStep, {
+              lat,
+              lng,
+              formatted_address: data.formatted_address || `${data.area || ''}, ${data.city || ''}`.trim(),
+              city: data.city || '',
+              state: data.state || '',
+              pincode: data.pincode || '',
+              landmark: ''
+            });
+          } else {
+            setIsGeocoding(false);
+          }
+        } catch {
+          setIsGeocoding(false);
+        }
+      }, 450);
+    },
+    [activeStep, handleCenterAddressResolved]
+  );
 
   // 2. Select Autocomplete Suggestion -> Centering Map and Fetching Details
   const handleSelectSuggestion = async (suggestion: google.maps.places.AutocompleteSuggestion) => {
@@ -508,6 +637,8 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
       setActiveStep('drop');
       if (mapRef.current) {
         mapRef.current.panTo({ lat: drop.lat, lng: drop.lng });
+      } else {
+        setFallbackFlyTo((prev) => ({ lat: drop.lat, lng: drop.lng, zoom: 14, seq: (prev?.seq || 0) + 1 }));
       }
     } else if (activeStep === 'drop') {
       setDropConfirmed(true);
@@ -658,7 +789,11 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
             type="button"
             onClick={() => {
               setActiveStep('pickup');
-              if (mapRef.current) mapRef.current.panTo({ lat: pickup.lat, lng: pickup.lng });
+              if (mapRef.current) {
+                mapRef.current.panTo({ lat: pickup.lat, lng: pickup.lng });
+              } else {
+                setFallbackFlyTo((prev) => ({ lat: pickup.lat, lng: pickup.lng, zoom: 14, seq: (prev?.seq || 0) + 1 }));
+              }
             }}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition cursor-pointer ${
               activeStep === 'pickup'
@@ -675,7 +810,11 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
             type="button"
             onClick={() => {
               setActiveStep('drop');
-              if (mapRef.current) mapRef.current.panTo({ lat: drop.lat, lng: drop.lng });
+              if (mapRef.current) {
+                mapRef.current.panTo({ lat: drop.lat, lng: drop.lng });
+              } else {
+                setFallbackFlyTo((prev) => ({ lat: drop.lat, lng: drop.lng, zoom: 14, seq: (prev?.seq || 0) + 1 }));
+              }
             }}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition cursor-pointer ${
               activeStep === 'drop'
@@ -726,12 +865,12 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
               {isSearching && <Loader2 className="w-4 h-4 text-[#E83E83] animate-spin shrink-0" />}
             </div>
 
-            {/* Suggestions Dropdown */}
-            {autocompleteSuggestions.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-2xl border border-gray-200 shadow-2xl overflow-hidden z-30 max-h-60 overflow-y-auto divide-y divide-gray-100">
+            {/* Suggestions Dropdown (Google Places API New or Nominatim Fallback) */}
+            {(autocompleteSuggestions.length > 0 || fallbackSuggestions.length > 0) && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-2xl border border-gray-200 shadow-2xl overflow-hidden z-[500] max-h-60 overflow-y-auto divide-y divide-gray-100">
                 {autocompleteSuggestions.map((item, idx) => (
                   <button
-                    key={idx}
+                    key={`g_${idx}`}
                     type="button"
                     onClick={() => handleSelectSuggestion(item)}
                     className="w-full text-left p-3 hover:bg-[#FFF0F6] transition flex items-start gap-2.5 cursor-pointer group"
@@ -747,6 +886,24 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
                     </div>
                   </button>
                 ))}
+                {fallbackSuggestions.map((item, idx) => (
+                  <button
+                    key={`f_${idx}`}
+                    type="button"
+                    onClick={() => handleSelectFallbackSuggestion(item)}
+                    className="w-full text-left p-3 hover:bg-[#FFF0F6] transition flex items-start gap-2.5 cursor-pointer group"
+                  >
+                    <MapPin className="w-4 h-4 text-gray-400 group-hover:text-[#E83E83] shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-bold text-[#171318] group-hover:text-[#E83E83]">
+                        {item.mainText}
+                      </div>
+                      <div className="text-[11px] text-gray-500 line-clamp-1">
+                        {item.secondaryText || item.displayName}
+                      </div>
+                    </div>
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -754,17 +911,25 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
       )}
 
       {/* MAP VIEWPORT AREA */}
-      <div className="relative w-full h-[360px] sm:h-[440px] bg-gray-100 overflow-hidden">
+      <div className="relative w-full h-[360px] sm:h-[440px] bg-[#E8EEF4] overflow-hidden">
         {canRenderGoogleMap ? (
-          <APIProvider apiKey={apiKey} language="en" region="IN" onError={reportMapError}>
+          <APIProvider
+            apiKey={apiKey}
+            language="en"
+            region="IN"
+            libraries={['places', 'routes', 'marker']}
+            onError={reportMapError}
+          >
             <Map
               mapId="DEMO_MAP_ID"
+              colorScheme="LIGHT"
+              mapTypeId="roadmap"
               defaultCenter={{ lat: pickup.lat, lng: pickup.lng }}
               defaultZoom={13}
               gestureHandling="greedy"
               disableDefaultUI={false}
               internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-              className="w-full h-full"
+              style={{ width: '100%', height: '100%' }}
             >
               <MapInnerController
                 activeStep={activeStep}
@@ -788,12 +953,15 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
             heading={45}
             remainingKm={routeMeta?.distance_km}
             reason={mapAuthError ? 'auth_error' : 'missing_key'}
+            pickerMode={activeStep}
+            onCenterChange={handleFallbackCenterChange}
+            flyToTarget={fallbackFlyTo}
           />
         )}
 
-        {/* FLOATING CENTERED PIN OVERLAY (Visible during Pickup and Drop setting on Google Map) */}
-        {canRenderGoogleMap && activeStep !== 'preview' && (
-          <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-10 -mt-8">
+        {/* FLOATING CENTERED PIN OVERLAY (Visible during Pickup and Drop setting on both Google Map and Road Map) */}
+        {activeStep !== 'preview' && (
+          <div className="absolute inset-0 pointer-events-none flex items-center justify-center z-[420] -mt-8">
             <div className="flex flex-col items-center animate-bounce duration-700">
               {/* Floating Tooltip */}
               <div
@@ -830,7 +998,7 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
         )}
 
         {/* LIVE REVERSE-GEOCODING STATUS PILL */}
-        <div className="absolute top-3 left-3 right-3 sm:right-auto z-10 pointer-events-auto">
+        <div className="absolute top-3 left-3 right-3 sm:right-auto z-[420] pointer-events-auto">
           <div className="bg-white/95 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-gray-200 shadow-md text-xs flex items-center gap-2 max-w-md">
             {isGeocoding ? (
               <>
@@ -863,7 +1031,7 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
 
         {/* BOTTOM FLOATING ACTION BAR: Address Confirmation */}
         {activeStep !== 'preview' && (
-          <div className="absolute bottom-3 left-3 right-3 z-10 pointer-events-auto">
+          <div className="absolute bottom-3 left-3 right-3 z-[420] pointer-events-auto">
             <div className="bg-white/95 backdrop-blur-md rounded-2xl border border-gray-200 p-3 sm:p-4 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="space-y-0.5 overflow-hidden">
                 <div className="flex items-center gap-2">

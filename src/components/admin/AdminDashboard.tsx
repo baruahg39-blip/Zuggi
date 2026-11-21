@@ -767,16 +767,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          <div className="w-full h-[460px] rounded-3xl overflow-hidden border border-gray-200 shadow-lg bg-[#120F15] relative">
+          <div className="w-full h-[460px] rounded-3xl overflow-hidden border border-gray-200 shadow-lg bg-[#E8EEF4] relative">
             {canRenderGoogleMap ? (
-              <APIProvider apiKey={apiKey} language="en" region="IN" onError={reportMapError}>
+              <APIProvider apiKey={apiKey} language="en" region="IN" libraries={['maps', 'marker']} onError={reportMapError}>
                 <GoogleMap
                   mapId="DEMO_MAP_ID"
+                  colorScheme="LIGHT"
+                  mapTypeId="roadmap"
                   internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
                   defaultCenter={{ lat: 26.25, lng: 92.9 }}
                   defaultZoom={7}
                   gestureHandling="greedy"
-                  className="w-full h-full"
+                  style={{ width: '100%', height: '100%' }}
                 >
                   {vehicles.map((v) => {
                     const pos = v.currentLocation || { lat: 26.1445, lng: 91.7362 };

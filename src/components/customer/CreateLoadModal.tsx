@@ -19,6 +19,7 @@ import { GoodsCategory, LocationPoint, VehicleCategoryType } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { showToast } from '../shared/Toast';
 import { FreightLocationPicker, FreightLocationPayload } from '../maps/FreightLocationPicker';
+import { LocationAutocompleteInput, SelectedPlace } from '../shared/LocationAutocompleteInput';
 
 interface CreateLoadModalProps {
   isOpen: boolean;
@@ -44,24 +45,24 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   onClose,
   onLoadCreated
 }) => {
-  const hubs = useMemo(() => logisticsStore.getHubLocations(), []);
   const vehicleCategories = useMemo(() => logisticsStore.getVehicleCategories(), []);
   const currentUser = logisticsStore.getCurrentUser();
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
-  const [locationInputMode, setLocationInputMode] = useState<'map' | 'presets'>('map');
+  const [locationInputMode, setLocationInputMode] = useState<'map' | 'manual'>('map');
 
-  // Exact coordinates and structured details from map picker
+  // Exact coordinates and structured details from map picker or live address search
   const [pickupPointState, setPickupPointState] = useState<LocationPoint | null>(null);
   const [deliveryPointState, setDeliveryPointState] = useState<LocationPoint | null>(null);
   const [routeDistanceKm, setRouteDistanceKm] = useState<number | null>(null);
   const [routeDurationMins, setRouteDurationMins] = useState<number | null>(null);
 
-  // Form State
-  const [pickupPreset, setPickupPreset] = useState(hubs[0]?.name || '');
-  const [pickupCustomAddress, setPickupCustomAddress] = useState(hubs[0]?.name || '');
-  const [pickupCity, setPickupCity] = useState(hubs[0]?.city || '');
-  const [pickupState, setPickupState] = useState(hubs[0]?.state || 'Assam');
+  // Form State — open for ANY street, locality, town, village, or city across the state & India
+  const [pickupSearchText, setPickupSearchText] = useState('');
+  const [pickupCustomAddress, setPickupCustomAddress] = useState('');
+  const [pickupCity, setPickupCity] = useState('');
+  const [pickupState, setPickupState] = useState('Assam');
+  const [pickupPincode, setPickupPincode] = useState('');
   const [pickupContactName, setPickupContactName] = useState(currentUser?.name || '');
   const [pickupContactPhone, setPickupContactPhone] = useState(currentUser?.phone || '');
   const [pickupDateTime, setPickupDateTime] = useState(() => {
@@ -69,10 +70,11 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
     return d.toISOString().slice(0, 16);
   });
 
-  const [deliveryPreset, setDeliveryPreset] = useState(hubs[2]?.name || hubs[1]?.name || '');
-  const [deliveryCustomAddress, setDeliveryCustomAddress] = useState(hubs[2]?.name || hubs[1]?.name || '');
-  const [deliveryCity, setDeliveryCity] = useState(hubs[2]?.city || hubs[1]?.city || '');
-  const [deliveryState, setDeliveryState] = useState(hubs[2]?.state || hubs[1]?.state || 'Assam');
+  const [deliverySearchText, setDeliverySearchText] = useState('');
+  const [deliveryCustomAddress, setDeliveryCustomAddress] = useState('');
+  const [deliveryCity, setDeliveryCity] = useState('');
+  const [deliveryState, setDeliveryState] = useState('Assam');
+  const [deliveryPincode, setDeliveryPincode] = useState('');
   const [deliveryContactName, setDeliveryContactName] = useState('');
   const [deliveryContactPhone, setDeliveryContactPhone] = useState('');
 
@@ -96,9 +98,9 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   const [targetBudgetInr, setTargetBudgetInr] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  // Coords helper
-  const selectedPickupHub = hubs.find((h) => h.name === pickupPreset) || hubs[0];
-  const selectedDeliveryHub = hubs.find((h) => h.name === deliveryPreset) || hubs[2];
+  // Default map center fallback (Guwahati, Assam) only when user hasn't picked a pin yet
+  const defaultPickupCoord = { lat: 26.1445, lng: 91.7362 };
+  const defaultDropCoord = { lat: 26.7509, lng: 94.2037 };
 
   // Callback from FreightLocationPicker
   const handleMapLocationPayload = (payload: FreightLocationPayload) => {
@@ -147,10 +149,10 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
 
   // Live Estimate calculation
   const estimate = useMemo(() => {
-    const lat1 = pickupPointState?.lat ?? selectedPickupHub.lat;
-    const lng1 = pickupPointState?.lng ?? selectedPickupHub.lng;
-    const lat2 = deliveryPointState?.lat ?? selectedDeliveryHub.lat;
-    const lng2 = deliveryPointState?.lng ?? selectedDeliveryHub.lng;
+    const lat1 = pickupPointState?.lat ?? defaultPickupCoord.lat;
+    const lng1 = pickupPointState?.lng ?? defaultPickupCoord.lng;
+    const lat2 = deliveryPointState?.lat ?? defaultDropCoord.lat;
+    const lng2 = deliveryPointState?.lng ?? defaultDropCoord.lng;
 
     return logisticsStore.calculateEstimatedFreight(
       lat1,
@@ -161,33 +163,53 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
       loadType,
       helpersNeeded
     );
-  }, [pickupPointState, deliveryPointState, selectedPickupHub, selectedDeliveryHub, requiredVehicleCategory, loadType, helpersNeeded]);
+  }, [pickupPointState, deliveryPointState, requiredVehicleCategory, loadType, helpersNeeded]);
 
   if (!isOpen) return null;
 
-  const handlePickupHubChange = (name: string) => {
-    setPickupPreset(name);
-    const h = hubs.find((item) => item.name === name);
-    if (h) {
-      setPickupCustomAddress(h.name);
-      setPickupCity(h.city);
-      setPickupState(h.state);
-    }
+  const handleSelectPickupPlace = (place: SelectedPlace) => {
+    setPickupSearchText(place.label);
+    setPickupCustomAddress(place.address);
+    setPickupCity(place.city || place.label);
+    setPickupState(place.state || 'Assam');
+    setPickupPincode(place.pincode || '');
+    setPickupPointState({
+      address: place.address,
+      city: place.city || place.label,
+      district: place.district || place.city || place.label,
+      state: place.state || 'Assam',
+      pincode: place.pincode || '',
+      lat: place.lat,
+      lng: place.lng,
+      contactName: pickupContactName,
+      contactPhone: pickupContactPhone
+    });
   };
 
-  const handleDeliveryHubChange = (name: string) => {
-    setDeliveryPreset(name);
-    const h = hubs.find((item) => item.name === name);
-    if (h) {
-      setDeliveryCustomAddress(h.name);
-      setDeliveryCity(h.city);
-      setDeliveryState(h.state);
-    }
+  const handleSelectDeliveryPlace = (place: SelectedPlace) => {
+    setDeliverySearchText(place.label);
+    setDeliveryCustomAddress(place.address);
+    setDeliveryCity(place.city || place.label);
+    setDeliveryState(place.state || 'Assam');
+    setDeliveryPincode(place.pincode || '');
+    setDeliveryPointState({
+      address: place.address,
+      city: place.city || place.label,
+      district: place.district || place.city || place.label,
+      state: place.state || 'Assam',
+      pincode: place.pincode || '',
+      lat: place.lat,
+      lng: place.lng,
+      contactName: deliveryContactName,
+      contactPhone: deliveryContactPhone
+    });
   };
 
   const handleNextStep = () => {
-    if (step === 1 && (!pickupCity.trim() || !deliveryCity.trim())) {
-      showToast('Please select valid Pickup and Delivery cities.', 'error');
+    const resolvedPickupCity = (pickupCity || pickupSearchText || pickupCustomAddress).trim();
+    const resolvedDropCity = (deliveryCity || deliverySearchText || deliveryCustomAddress).trim();
+    if (step === 1 && (!resolvedPickupCity || !resolvedDropCity)) {
+      showToast('Please enter both Pickup and Delivery locations.', 'error');
       return;
     }
     if (step === 2) {
@@ -224,26 +246,29 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
     setIsSubmitting(true);
 
     try {
-      const pickupPoint: LocationPoint = pickupPointState || {
-        address: pickupCustomAddress,
-        city: pickupCity,
-        district: selectedPickupHub.district,
-        state: pickupState,
-        pincode: selectedPickupHub.pincode,
-        lat: selectedPickupHub.lat,
-        lng: selectedPickupHub.lng,
+      const resolvedPickupCity = (pickupCity || pickupSearchText || 'Pickup Location').trim();
+      const resolvedDeliveryCity = (deliveryCity || deliverySearchText || 'Drop Location').trim();
+
+      const pickupPoint: LocationPoint = {
+        address: (pickupCustomAddress || pickupSearchText || resolvedPickupCity).trim(),
+        city: resolvedPickupCity,
+        district: pickupPointState?.district || resolvedPickupCity,
+        state: pickupState || pickupPointState?.state || 'Assam',
+        pincode: pickupPincode || pickupPointState?.pincode || '',
+        lat: pickupPointState?.lat ?? defaultPickupCoord.lat,
+        lng: pickupPointState?.lng ?? defaultPickupCoord.lng,
         contactName: pickupContactName,
         contactPhone: pickupContactPhone
       };
 
-      const deliveryPoint: LocationPoint = deliveryPointState || {
-        address: deliveryCustomAddress,
-        city: deliveryCity,
-        district: selectedDeliveryHub.district,
-        state: deliveryState,
-        pincode: selectedDeliveryHub.pincode,
-        lat: selectedDeliveryHub.lat,
-        lng: selectedDeliveryHub.lng,
+      const deliveryPoint: LocationPoint = {
+        address: (deliveryCustomAddress || deliverySearchText || resolvedDeliveryCity).trim(),
+        city: resolvedDeliveryCity,
+        district: deliveryPointState?.district || resolvedDeliveryCity,
+        state: deliveryState || deliveryPointState?.state || 'Assam',
+        pincode: deliveryPincode || deliveryPointState?.pincode || '',
+        lat: deliveryPointState?.lat ?? defaultDropCoord.lat,
+        lng: deliveryPointState?.lng ?? defaultDropCoord.lng,
         contactName: deliveryContactName,
         contactPhone: deliveryContactPhone
       };
@@ -346,7 +371,7 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
           {/* STEP 1: ROUTE & TIMING */}
           {step === 1 && (
             <div className="space-y-4">
-              {/* Mode Toggle: Interactive Map vs Preset Hubs */}
+              {/* Mode Toggle: Interactive Map vs Search Any Address */}
               <div className="flex items-center justify-between p-1 bg-slate-900 border border-slate-800 rounded-2xl">
                 <button
                   type="button"
@@ -358,19 +383,19 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                   }`}
                 >
                   <MapPin className="w-3.5 h-3.5" />
-                  <span>Interactive Map Picker (GPS Pinpoint)</span>
+                  <span>Map Pinpoint (GPS)</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setLocationInputMode('presets')}
+                  onClick={() => setLocationInputMode('manual')}
                   className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
-                    locationInputMode === 'presets'
+                    locationInputMode === 'manual'
                       ? 'bg-slate-700 text-white shadow-md'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
                   <Building className="w-3.5 h-3.5" />
-                  <span>Preset Logistics Hubs</span>
+                  <span>Type Any Address / City</span>
                 </button>
               </div>
 
@@ -378,32 +403,32 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                 /* INTERACTIVE 2-STEP LOCATION PICKER WITH PLACES AUTOCOMPLETE & REVERSE GEOCODING */
                 <FreightLocationPicker
                   initialPickup={{
-                    lat: pickupPointState?.lat ?? selectedPickupHub.lat,
-                    lng: pickupPointState?.lng ?? selectedPickupHub.lng,
-                    formatted_address: pickupCustomAddress || selectedPickupHub.name,
-                    city: pickupCity || selectedPickupHub.city,
-                    pincode: selectedPickupHub.pincode,
+                    lat: pickupPointState?.lat ?? defaultPickupCoord.lat,
+                    lng: pickupPointState?.lng ?? defaultPickupCoord.lng,
+                    formatted_address: pickupCustomAddress || '',
+                    city: pickupCity || '',
+                    pincode: pickupPincode || '',
                     contactName: pickupContactName,
                     contactPhone: pickupContactPhone
                   }}
                   initialDrop={{
-                    lat: deliveryPointState?.lat ?? selectedDeliveryHub.lat,
-                    lng: deliveryPointState?.lng ?? selectedDeliveryHub.lng,
-                    formatted_address: deliveryCustomAddress || selectedDeliveryHub.name,
-                    city: deliveryCity || selectedDeliveryHub.city,
-                    pincode: selectedDeliveryHub.pincode,
+                    lat: deliveryPointState?.lat ?? defaultDropCoord.lat,
+                    lng: deliveryPointState?.lng ?? defaultDropCoord.lng,
+                    formatted_address: deliveryCustomAddress || '',
+                    city: deliveryCity || '',
+                    pincode: deliveryPincode || '',
                     contactName: deliveryContactName,
                     contactPhone: deliveryContactPhone
                   }}
                   onLocationSelected={handleMapLocationPayload}
                 />
               ) : (
-                /* PRESET HUBS VIEW */
+                /* UNIVERSAL ADDRESS ENTRY VIEW (ANY STREET, TOWN, VILLAGE OR CITY) */
                 <div className="space-y-4">
                   <div className="p-3.5 bg-amber-500/10 border border-amber-500/20 rounded-xl text-xs text-amber-300 flex items-center gap-2">
                     <MapPin className="w-4 h-4 text-amber-400 shrink-0" />
                     <span>
-                      Select logistics hubs in Assam, Northeast, or Kolkata, or enter precise warehouse addresses.
+                      Enter any pickup &amp; drop address across your city, district, state, or anywhere in India — or tap the GPS icon to auto-detect your location.
                     </span>
                   </div>
 
@@ -411,43 +436,76 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/60 space-y-3">
                     <div className="flex items-center gap-2 text-sm font-bold text-emerald-400">
                       <div className="w-2.5 h-2.5 rounded-full bg-emerald-500"></div>
-                      <span>Pickup Location (Consignor)</span>
+                      <span>Pickup Location (Any Area / Town / City)</span>
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
-                        <label className="text-xs text-slate-400 block mb-1">Preset Strategic Hub</label>
-                        <select
-                          value={pickupPreset}
-                          onChange={(e) => handlePickupHubChange(e.target.value)}
-                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
-                        >
-                          {hubs.map((hub) => (
-                            <option key={hub.name} value={hub.name}>
-                              {hub.city} - {hub.name}
-                            </option>
-                          ))}
-                        </select>
+                        <label className="text-xs text-slate-400 block mb-1">Search Pickup Area, Town, City or Pincode *</label>
+                        <LocationAutocompleteInput
+                          value={pickupSearchText}
+                          onChangeText={(txt) => {
+                            setPickupSearchText(txt);
+                            if (!pickupCity) setPickupCity(txt);
+                          }}
+                          onSelectPlace={handleSelectPickupPlace}
+                          placeholder="e.g. Six Mile Guwahati, Nagaon, Jorhat..."
+                          theme="dark"
+                          showGpsButton={true}
+                        />
                       </div>
 
                       <div>
-                        <label className="text-xs text-slate-400 block mb-1">Pickup Date & Time</label>
+                        <label className="text-xs text-slate-400 block mb-1">Pickup Date &amp; Time</label>
                         <input
                           type="datetime-local"
                           value={pickupDateTime}
                           onChange={(e) => setPickupDateTime(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">City / Town *</label>
+                        <input
+                          type="text"
+                          value={pickupCity}
+                          onChange={(e) => setPickupCity(e.target.value)}
+                          placeholder="e.g. Guwahati, Tezpur, Silchar..."
                           className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">State</label>
+                        <input
+                          type="text"
+                          value={pickupState}
+                          onChange={(e) => setPickupState(e.target.value)}
+                          placeholder="e.g. Assam, Meghalaya..."
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">Pincode</label>
+                        <input
+                          type="text"
+                          value={pickupPincode}
+                          onChange={(e) => setPickupPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="e.g. 781001"
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-amber-500"
                         />
                       </div>
                     </div>
 
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Detailed Pickup Address</label>
+                      <label className="text-xs text-slate-400 block mb-1">Detailed Pickup Address / Shop / Landmark</label>
                       <input
                         type="text"
                         value={pickupCustomAddress}
                         onChange={(e) => setPickupCustomAddress(e.target.value)}
-                        placeholder="Warehouse / Mandi / Factory address..."
+                        placeholder="Shop / House / Godown / Street / Landmark..."
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
                       />
                     </div>
@@ -478,31 +536,64 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/60 space-y-3">
                     <div className="flex items-center gap-2 text-sm font-bold text-rose-400">
                       <div className="w-2.5 h-2.5 rounded-full bg-rose-500"></div>
-                      <span>Delivery Destination (Consignee)</span>
+                      <span>Delivery Destination (Any Area / Town / City)</span>
                     </div>
 
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Preset Strategic Hub</label>
-                      <select
-                        value={deliveryPreset}
-                        onChange={(e) => handleDeliveryHubChange(e.target.value)}
-                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
-                      >
-                        {hubs.map((hub) => (
-                          <option key={hub.name} value={hub.name}>
-                            {hub.city} ({hub.state}) - {hub.name}
-                          </option>
-                        ))}
-                      </select>
+                      <label className="text-xs text-slate-400 block mb-1">Search Drop Area, Town, City or Pincode *</label>
+                      <LocationAutocompleteInput
+                        value={deliverySearchText}
+                        onChangeText={(txt) => {
+                          setDeliverySearchText(txt);
+                          if (!deliveryCity) setDeliveryCity(txt);
+                        }}
+                        onSelectPlace={handleSelectDeliveryPlace}
+                        placeholder="e.g. Dibrugarh, Tinsukia, Shillong, Siliguri, Kolkata..."
+                        theme="dark"
+                        showGpsButton={false}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">City / Town *</label>
+                        <input
+                          type="text"
+                          value={deliveryCity}
+                          onChange={(e) => setDeliveryCity(e.target.value)}
+                          placeholder="e.g. Dibrugarh, Dimapur..."
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">State</label>
+                        <input
+                          type="text"
+                          value={deliveryState}
+                          onChange={(e) => setDeliveryState(e.target.value)}
+                          placeholder="e.g. Assam, Nagaland..."
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-400 block mb-1">Pincode</label>
+                        <input
+                          type="text"
+                          value={deliveryPincode}
+                          onChange={(e) => setDeliveryPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="e.g. 786001"
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-amber-500"
+                        />
+                      </div>
                     </div>
 
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Detailed Delivery Address</label>
+                      <label className="text-xs text-slate-400 block mb-1">Detailed Delivery Address / Shop / Landmark</label>
                       <input
                         type="text"
                         value={deliveryCustomAddress}
                         onChange={(e) => setDeliveryCustomAddress(e.target.value)}
-                        placeholder="Delivery warehouse or retail consignee address..."
+                        placeholder="Delivery shop, warehouse, house or landmark..."
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-amber-500"
                       />
                     </div>

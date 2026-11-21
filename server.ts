@@ -1320,19 +1320,52 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
       }
     }
 
-    // High-accuracy geographic fallback for Northeast region
-    const approxKm = (Math.hypot(nearest.lat - lat, nearest.lng - lng) * 111).toFixed(1);
-    const formatted_address = parseFloat(approxKm) < 3 
-      ? nearest.address 
-      : `Near ${nearest.city} Logistics Corridor (${lat.toFixed(4)}, ${lng.toFixed(4)}), ${nearest.state} - ${nearest.pincode}`;
+    // All-India OpenStreetMap Nominatim reverse-geocoding fallback when Google Maps key is not configured
+    try {
+      const osmUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&addressdetails=1`;
+      const osmRes = await fetch(osmUrl, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
+        }
+      });
+      if (osmRes.ok) {
+        const osm = await osmRes.json();
+        const addr = osm?.address || {};
+        const road = addr.road || addr.pedestrian || addr.highway || '';
+        const area = addr.suburb || addr.neighbourhood || addr.locality || addr.quarter || addr.village || '';
+        const city = addr.city || addr.town || addr.village || addr.county || addr.state_district || nearest.city;
+        const state = addr.state || nearest.state;
+        const pincode = addr.postcode || '';
+        const formatted_address =
+          osm?.display_name ||
+          [road, area, city, state, pincode].filter(Boolean).join(', ');
+        if (formatted_address) {
+          return res.json({
+            success: true,
+            lat,
+            lng,
+            formatted_address,
+            street: road || area || city,
+            area: area || city,
+            city,
+            pincode,
+            state
+          });
+        }
+      }
+    } catch (osmErr) {
+      console.warn('[Reverse Geocode OSM Notice]:', osmErr);
+    }
 
+    // Final coordinate fallback if offline
     return res.json({
       success: true,
       lat,
       lng,
-      formatted_address,
-      street: `Corridor Sector ${Math.abs(Math.round(lat * 100)) % 100}`,
-      area: `${nearest.city} Highway Zone`,
+      formatted_address: `${nearest.city} Area (${lat.toFixed(4)}, ${lng.toFixed(4)}), ${nearest.state}`,
+      street: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+      area: nearest.city,
       city: nearest.city,
       pincode: nearest.pincode,
       state: nearest.state

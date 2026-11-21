@@ -22,6 +22,7 @@ import {
 import { User, UserRole, VehicleCategoryType } from '../../types';
 import { authService, DEV_TEST_ACCOUNTS } from '../../services/authService';
 import { logisticsStore } from '../../services/store';
+import { LocationAutocompleteInput } from '../shared/LocationAutocompleteInput';
 import { SUPER_ADMIN_EMAIL } from '../../services/firebase';
 import { VEHICLE_CATEGORIES } from '../../data/mockData';
 import { showToast } from '../shared/Toast';
@@ -1533,21 +1534,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <div>
                 <label className="text-xs font-bold text-[#171318] block mb-1">
-                  Primary Operating Hub / Base City
+                  Your City / Town / District *
                 </label>
-                <select
+                <LocationAutocompleteInput
                   value={operatingCity}
-                  onChange={(e) => setOperatingCity(e.target.value)}
-                  className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 focus:border-[#E83E83] rounded-xl text-[#171318] text-xs focus:outline-none"
-                >
-                  <option value="Guwahati">Guwahati (Amingaon ICD & Beltola Hub)</option>
-                  <option value="Dibrugarh">Dibrugarh (Upper Assam Tea Belt)</option>
-                  <option value="Jorhat">Jorhat (Gar-Ali Freight Junction)</option>
-                  <option value="Silchar">Silchar (Barak Valley Gateway)</option>
-                  <option value="Tezpur">Tezpur (North Bank Industrial)</option>
-                  <option value="Dimapur">Dimapur (Nagaland Entry Hub)</option>
-                  <option value="Shillong">Shillong (Meghalaya Corridor)</option>
-                </select>
+                  onChangeText={(txt) => setOperatingCity(txt)}
+                  onSelectPlace={(place) => setOperatingCity(place.city || place.label)}
+                  placeholder="Type your city, town, or district (e.g. Guwahati, Nagaon, Barpeta...)"
+                  theme="light"
+                  showGpsButton={true}
+                  cityOnly={true}
+                />
               </div>
 
               {/* Permanent Login Passcode Setup (So Future Logins Require Zero OTP) */}

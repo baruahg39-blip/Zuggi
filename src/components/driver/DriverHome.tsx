@@ -27,6 +27,11 @@ import { logisticsStore } from '../../services/store';
 import { showToast } from '../shared/Toast';
 import { PartnerOnboardingModal } from '../partner/PartnerOnboardingModal';
 import { NortheastHighwayAlerts } from './NortheastHighwayAlerts';
+import {
+  DevicePermissionsSnapshot,
+  areCoreDriverPermissionsGranted,
+  getDevicePermissionsSnapshot
+} from '../../utils/devicePermissions';
 
 interface DriverHomeProps {
   currentUser: User;
@@ -36,6 +41,7 @@ interface DriverHomeProps {
   onNavigateToEarnings: () => void;
   onNavigateToTripHistory: () => void;
   onOpenSupport?: (loadId?: string) => void;
+  onOpenPermissions?: () => void;
 }
 
 export const DriverHome: React.FC<DriverHomeProps> = ({
@@ -45,7 +51,8 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
   onNavigateToFleet,
   onNavigateToEarnings,
   onNavigateToTripHistory,
-  onOpenSupport
+  onOpenSupport,
+  onOpenPermissions
 }) => {
   const [vehicles, setVehicles] = useState<CommercialVehicle[]>([]);
   const [activeBooking, setActiveBooking] = useState<Booking | undefined>(undefined);
@@ -57,6 +64,26 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
   );
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
+  const [permSnap, setPermSnap] = useState<DevicePermissionsSnapshot | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadPerms = () => {
+      getDevicePermissionsSnapshot().then((snap) => {
+        if (active) setPermSnap(snap);
+      });
+    };
+    loadPerms();
+    const onFocus = () => loadPerms();
+    const onPermUpdated = () => loadPerms();
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('zuggi-permissions-updated', onPermUpdated);
+    return () => {
+      active = false;
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('zuggi-permissions-updated', onPermUpdated);
+    };
+  }, []);
 
   // Active section for the driver tabs: 'trips' | 'pickup' | 'navigation' | 'status' | 'support' | 'highway_alerts'
   const [activeDriverTab, setActiveDriverTab] = useState<'trips' | 'pickup' | 'navigation' | 'status' | 'support' | 'highway_alerts'>('trips');
@@ -129,6 +156,11 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
       setIsOnboardingOpen(true);
       return;
     }
+    if (!isOnline && permSnap && permSnap.location !== 'granted' && permSnap.location !== 'unsupported') {
+      showToast('Please allow GPS Location access before going online for trips.', 'info');
+      onOpenPermissions?.();
+      return;
+    }
     if (primaryVehicle) {
       if (primaryVehicle.isBlocked) {
         showToast(`Vehicle blocked: ${primaryVehicle.blockedReason || 'Contact Admin'}`, 'error');
@@ -178,6 +210,32 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
         </div>
       )}
 
+      {/* REQUIRED DEVICE PERMISSIONS PROMPT BAR (Location, Camera, Notifications, Contacts) */}
+      {permSnap && !areCoreDriverPermissionsGranted(permSnap) && (
+        <div className="bg-white rounded-2xl p-4 border border-amber-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-[#171318]">
+                App Permissions Needed (GPS Location, Camera &amp; Alerts)
+              </h3>
+              <p className="text-xs text-[#6B6470] mt-0.5">
+                Allow Location for live trip tracking, Camera for e-POD &amp; Bilty photos, and Contacts for co-driver / emergency support.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onOpenPermissions?.()}
+            className="min-h-[44px] px-4 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs font-bold transition whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            Grant Access
+          </button>
+        </div>
+      )}
+
       {/* DRIVER STATUS HERO CARD - Premium Pink & Black */}
       <div className="bg-[#171318] text-white rounded-3xl p-5 sm:p-7 shadow-xl border border-gray-800">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -224,10 +282,22 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
           </div>
 
           {/* Quick Driver Action Buttons */}
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            {onOpenPermissions && (
+              <button
+                type="button"
+                onClick={onOpenPermissions}
+                className="min-h-[44px] px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                title="Manage Location, Camera, Alerts & Contacts permissions"
+              >
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                <span>Permissions</span>
+              </button>
+            )}
+
             <button
               onClick={onNavigateToTripHistory}
-              className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+              className="flex-1 sm:flex-none min-h-[44px] px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <History className="w-4 h-4 text-emerald-400" />
               <span>Trip History</span>
@@ -235,7 +305,7 @@ export const DriverHome: React.FC<DriverHomeProps> = ({
 
             <button
               onClick={onNavigateToEarnings}
-              className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-xl bg-[#FFF0F6] text-[#E83E83] hover:bg-[#ffe2ee] text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+              className="flex-1 sm:flex-none min-h-[44px] px-3.5 py-2.5 rounded-xl bg-[#FFF0F6] text-[#E83E83] hover:bg-[#ffe2ee] text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <IndianRupee className="w-4 h-4" />
               <span>My Earnings</span>

@@ -327,9 +327,9 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   }, [currentPing, delivery]);
 
   return (
-    <div className="relative w-full h-[450px] md:h-[520px] rounded-3xl overflow-hidden border border-gray-200 bg-[#171318] shadow-xl flex flex-col">
+    <div className="relative w-full h-[450px] md:h-[520px] rounded-3xl overflow-hidden border border-gray-200 bg-[#E8EEF4] shadow-xl flex flex-col">
       {/* Top Telemetry Overlay */}
-      <div className="absolute top-3 left-3 right-3 z-20 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+      <div className="absolute top-3 left-3 right-3 z-[420] flex flex-wrap items-center justify-between gap-2 pointer-events-none">
         <div className="bg-[#171318]/95 backdrop-blur-md px-3.5 py-2.5 rounded-2xl border border-gray-700/80 shadow-lg pointer-events-auto flex items-center gap-3">
           <div className="relative flex items-center justify-center">
             <span className="w-3 h-3 rounded-full bg-[#16A36A] animate-ping absolute opacity-75"></span>
@@ -380,17 +380,20 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       </div>
 
       {/* Interactive Map Canvas */}
-      <div className="flex-1 w-full h-full relative">
+      <div className="flex-1 w-full h-full min-h-0 relative">
         {canRenderGoogleMap ? (
           <>
             <APIProvider
               apiKey={apiKey}
               language="en"
               region="IN"
+              libraries={['maps', 'marker']}
               onError={reportMapError}
             >
               <GoogleMap
                 mapId="DEMO_MAP_ID"
+                colorScheme="LIGHT"
+                mapTypeId="roadmap"
                 style={{ width: '100%', height: '100%' }}
                 defaultCenter={initialCenter}
                 defaultZoom={8}

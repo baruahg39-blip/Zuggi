@@ -1,6 +1,7 @@
-import React, { useMemo, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import {
-  MapPin,
   Navigation,
   ZoomIn,
   ZoomOut,
@@ -33,6 +34,10 @@ export interface LiveTelemetryFallbackMapProps {
   insidePickup?: boolean;
   insideDelivery?: boolean;
   reason?: 'missing_key' | 'auth_error' | 'quota_exceeded';
+  /** Optional interactive location picker mode for FreightLocationPicker */
+  pickerMode?: 'pickup' | 'drop' | 'preview';
+  onCenterChange?: (lat: number, lng: number) => void;
+  flyToTarget?: { lat: number; lng: number; zoom?: number; seq: number } | null;
 }
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -49,11 +54,65 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return R * c;
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function makePinIcon(label: string, color: string, subtitle?: string): L.DivIcon {
+  const safeLabel = escapeHtml(label);
+  const safeSub = subtitle ? escapeHtml(subtitle.slice(0, 18)) : '';
+  return L.divIcon({
+    className: 'zuggi-osm-pin',
+    html: `
+      <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%);pointer-events:auto;">
+        ${
+          safeSub
+            ? `<div style="background:${color};color:#fff;font-size:10px;font-weight:800;padding:2px 7px;border-radius:9999px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.28);margin-bottom:3px;border:1.5px solid #fff;">${safeSub}</div>`
+            : ''
+        }
+        <div style="width:28px;height:28px;border-radius:9999px;background:${color};border:2.5px solid #fff;box-shadow:0 4px 10px rgba(0,0,0,0.32);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:900;">
+          ${safeLabel}
+        </div>
+        <div style="width:8px;height:4px;background:rgba(0,0,0,0.28);border-radius:9999px;margin-top:1px;"></div>
+      </div>
+    `,
+    iconSize: [28, 28],
+    iconAnchor: [0, 0]
+  });
+}
+
+function makeTruckIcon(vehicleNumber: string, speedKmh: number, heading: number): L.DivIcon {
+  const safeVeh = escapeHtml(vehicleNumber.slice(0, 15));
+  return L.divIcon({
+    className: 'zuggi-osm-truck',
+    html: `
+      <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%);pointer-events:auto;">
+        <div style="width:36px;height:36px;border-radius:9999px;background:#E83E83;border:2.5px solid #fff;box-shadow:0 4px 14px rgba(232,62,131,0.5);display:flex;align-items:center;justify-content:center;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff" style="transform:rotate(${Math.round(heading)}deg);">
+            <polygon points="12,2 20,21 12,17 4,21" />
+          </svg>
+        </div>
+        <div style="margin-top:3px;background:#171318;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:9999px;border:1px solid rgba(232,62,131,0.65);white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.35);font-family:ui-monospace,monospace;">
+          ${safeVeh}${speedKmh > 0 ? ` • ${speedKmh} km/h` : ''}
+        </div>
+      </div>
+    `,
+    iconSize: [36, 36],
+    iconAnchor: [0, 0]
+  });
+}
+
 /**
- * Pure React + SVG coordinate-projected live GPS tracking canvas.
- * Zero external non-Google map tiles (strictly compliant with Google Maps Platform ToS).
- * Automatically engages when Google Maps JS API key is not yet configured or fails auth,
- * ensuring shippers can always track their assigned vehicle, route, and geo-fences live.
+ * Interactive OpenStreetMap road map fallback powered by Leaflet.
+ * Engages ONLY when Google Maps JavaScript API is unavailable (missing key,
+ * domain referrer mismatch, or quota exceeded) using raw GPS/trip coordinates
+ * so users always see real streets, highways, cities, pins, and geo-fences
+ * instead of a blank dark screen.
  */
 export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> = ({
   pickup,
@@ -68,508 +127,399 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
   deliveryRadiusMeters = 500,
   insidePickup = false,
   insideDelivery = false,
-  reason = 'missing_key'
+  reason = 'missing_key',
+  pickerMode,
+  onCenterChange,
+  flyToTarget
 }) => {
-  const [zoom, setZoom] = useState<number>(1);
-  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [selectedPin, setSelectedPin] = useState<'pickup' | 'drop' | 'vehicle' | null>(null);
-  const dragStateRef = useRef<{ active: boolean; startX: number; startY: number; origX: number; origY: number }>({
-    active: false,
-    startX: 0,
-    startY: 0,
-    origX: 0,
-    origY: 0
-  });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const overlayLayerRef = useRef<L.LayerGroup | null>(null);
+  const isProgrammaticRef = useRef(false);
+  const hasFittedRef = useRef(false);
+  const onCenterChangeRef = useRef(onCenterChange);
+  onCenterChangeRef.current = onCenterChange;
+  const pickerModeRef = useRef(pickerMode);
+  pickerModeRef.current = pickerMode;
 
-  const activeLocation = currentLocation || { lat: pickup.lat, lng: pickup.lng };
+  const [tilesLoaded, setTilesLoaded] = useState(false);
 
-  // Compute real geographic bounding box & equirectangular cosine-corrected projection onto 900x520 SVG space
-  const projection = useMemo(() => {
-    const W = 900;
-    const H = 520;
-    const padX = 115;
-    const padY = 95;
+  const safePickup = useMemo(
+    () => ({
+      lat: Number.isFinite(pickup.lat) ? pickup.lat : 26.1445,
+      lng: Number.isFinite(pickup.lng) ? pickup.lng : 91.7362,
+      city: pickup.city || 'Pickup',
+      address: pickup.address || ''
+    }),
+    [pickup.lat, pickup.lng, pickup.city, pickup.address]
+  );
 
-    const allPoints = [
-      { lat: pickup.lat, lng: pickup.lng },
-      { lat: drop.lat, lng: drop.lng },
-      { lat: activeLocation.lat, lng: activeLocation.lng },
-      ...historyPings.map((p) => ({ lat: p.lat, lng: p.lng }))
-    ].filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  const safeDrop = useMemo(
+    () => ({
+      lat: Number.isFinite(drop.lat) ? drop.lat : 26.7509,
+      lng: Number.isFinite(drop.lng) ? drop.lng : 94.2037,
+      city: drop.city || 'Drop',
+      address: drop.address || ''
+    }),
+    [drop.lat, drop.lng, drop.city, drop.address]
+  );
 
-    const minLat = Math.min(...allPoints.map((p) => p.lat));
-    const maxLat = Math.max(...allPoints.map((p) => p.lat));
-    const minLng = Math.min(...allPoints.map((p) => p.lng));
-    const maxLng = Math.max(...allPoints.map((p) => p.lng));
+  const activeLocation = useMemo(() => {
+    if (currentLocation && Number.isFinite(currentLocation.lat) && Number.isFinite(currentLocation.lng)) {
+      return currentLocation;
+    }
+    return { lat: safePickup.lat, lng: safePickup.lng };
+  }, [currentLocation, safePickup.lat, safePickup.lng]);
 
-    const midLat = (minLat + maxLat) / 2;
-    const cosLat = Math.max(0.2, Math.cos((midLat * Math.PI) / 180));
-
-    const spanLat = Math.max(0.08, maxLat - minLat);
-    const spanLngScaled = Math.max(0.08, (maxLng - minLng) * cosLat);
-
-    const usableW = W - padX * 2;
-    const usableH = H - padY * 2;
-    const scale = Math.min(usableW / spanLngScaled, usableH / spanLat);
-
-    const centerLng = (minLng + maxLng) / 2;
-    const centerLat = (minLat + maxLat) / 2;
-
-    const project = (lat: number, lng: number) => ({
-      x: W / 2 + (lng - centerLng) * cosLat * scale,
-      y: H / 2 - (lat - centerLat) * scale
-    });
-
-    const pickupPt = project(pickup.lat, pickup.lng);
-    const dropPt = project(drop.lat, drop.lng);
-    const vehiclePt = project(activeLocation.lat, activeLocation.lng);
-    const trailPts = historyPings.map((p) => project(p.lat, p.lng));
-
-    // Smooth curved corridor control point
-    const midX = (pickupPt.x + dropPt.x) / 2;
-    const midY = (pickupPt.y + dropPt.y) / 2;
-    const dx = dropPt.x - pickupPt.x;
-    const dy = dropPt.y - pickupPt.y;
-    const distPx = Math.hypot(dx, dy) || 1;
-    const curveOffset = Math.min(48, distPx * 0.12);
-    const ctrlX = midX - (dy / distPx) * curveOffset;
-    const ctrlY = midY + (dx / distPx) * curveOffset;
-
-    const totalStraightKm = Math.max(1, haversineKm(pickup.lat, pickup.lng, drop.lat, drop.lng) * 1.25);
+  const progressMetrics = useMemo(() => {
+    const totalStraightKm = Math.max(1, haversineKm(safePickup.lat, safePickup.lng, safeDrop.lat, safeDrop.lng) * 1.25);
     const computedRemKm =
       remainingKm !== undefined
         ? remainingKm
-        : Math.round(haversineKm(activeLocation.lat, activeLocation.lng, drop.lat, drop.lng) * 1.25 * 10) / 10;
+        : Math.round(haversineKm(activeLocation.lat, activeLocation.lng, safeDrop.lat, safeDrop.lng) * 1.25 * 10) / 10;
     const progressPct = Math.min(100, Math.max(4, Math.round(((totalStraightKm - computedRemKm) / totalStraightKm) * 100)));
+    return { totalStraightKm: Math.round(totalStraightKm), computedRemKm, progressPct };
+  }, [safePickup, safeDrop, activeLocation, remainingKm]);
 
-    // Visual geofence circle radius in SVG px (bounded for clear visibility at highway zoom)
-    const kmPerPx = 111 / Math.max(scale, 1);
-    const pickupGeoPx = Math.max(16, Math.min(44, (pickupRadiusMeters / 1000) / Math.max(kmPerPx, 0.01)));
-    const dropGeoPx = Math.max(16, Math.min(44, (deliveryRadiusMeters / 1000) / Math.max(kmPerPx, 0.01)));
+  // 1. Initialize Leaflet map with bright OpenStreetMap street/highway tiles
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || mapRef.current) return;
 
-    return {
-      W,
-      H,
-      pickupPt,
-      dropPt,
-      vehiclePt,
-      trailPts,
-      ctrlX,
-      ctrlY,
-      totalStraightKm: Math.round(totalStraightKm),
-      computedRemKm,
-      progressPct,
-      pickupGeoPx,
-      dropGeoPx,
-      minLat,
-      maxLat,
-      minLng,
-      maxLng
-    };
-  }, [pickup, drop, activeLocation, historyPings, remainingKm, pickupRadiusMeters, deliveryRadiusMeters]);
+    const initialLat = pickerMode === 'drop' ? safeDrop.lat : activeLocation.lat;
+    const initialLng = pickerMode === 'drop' ? safeDrop.lng : activeLocation.lng;
+    const initialZoom = pickerMode && pickerMode !== 'preview' ? 14 : 9;
 
-  const handlePointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
-    dragStateRef.current = {
-      active: true,
-      startX: e.clientX,
-      startY: e.clientY,
-      origX: pan.x,
-      origY: pan.y
-    };
-    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
-    if (!dragStateRef.current.active) return;
-    const dx = e.clientX - dragStateRef.current.startX;
-    const dy = e.clientY - dragStateRef.current.startY;
-    setPan({
-      x: Math.max(-320, Math.min(320, dragStateRef.current.origX + dx)),
-      y: Math.max(-220, Math.min(220, dragStateRef.current.origY + dy))
+    const map = L.map(el, {
+      center: [initialLat, initialLng],
+      zoom: initialZoom,
+      zoomControl: false,
+      attributionControl: true
     });
-  };
 
-  const handlePointerUp = () => {
-    dragStateRef.current.active = false;
-  };
+    const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    });
+    tileLayer.on('load', () => setTilesLoaded(true));
+    tileLayer.addTo(map);
+
+    const layerGroup = L.layerGroup().addTo(map);
+    mapRef.current = map;
+    overlayLayerRef.current = layerGroup;
+
+    // Emit center changes in interactive location picker mode
+    map.on('moveend', () => {
+      if (isProgrammaticRef.current) {
+        isProgrammaticRef.current = false;
+        return;
+      }
+      if (pickerModeRef.current && pickerModeRef.current !== 'preview' && onCenterChangeRef.current) {
+        const c = map.getCenter();
+        onCenterChangeRef.current(c.lat, c.lng);
+      }
+    });
+
+    // Ensure Leaflet recalculates size after modal/tab transitions
+    const resizeTimer = setTimeout(() => {
+      map.invalidateSize();
+    }, 180);
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            map.invalidateSize();
+          })
+        : null;
+    if (resizeObserver) resizeObserver.observe(el);
+
+    return () => {
+      clearTimeout(resizeTimer);
+      resizeObserver?.disconnect();
+      map.remove();
+      mapRef.current = null;
+      overlayLayerRef.current = null;
+      hasFittedRef.current = false;
+    };
+  }, []);
+
+  // 2. Programmatic fly-to when search result or step changes in FreightLocationPicker
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !flyToTarget) return;
+    isProgrammaticRef.current = true;
+    map.setView([flyToTarget.lat, flyToTarget.lng], flyToTarget.zoom ?? 15, { animate: true });
+  }, [flyToTarget]);
+
+  // 3. Render markers, route corridor line, GPS breadcrumb trail, and geo-fences
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = overlayLayerRef.current;
+    if (!map || !layer) return;
+
+    layer.clearLayers();
+
+    const isPickingPin = pickerMode === 'pickup' || pickerMode === 'drop';
+
+    if (isPickingPin) {
+      // Show the opposite confirmed pin as a reference while user drags the center pin
+      if (pickerMode === 'drop') {
+        L.marker([safePickup.lat, safePickup.lng], {
+          icon: makePinIcon('A', '#16A34A', `Pickup: ${safePickup.city}`)
+        }).addTo(layer);
+      } else if (pickerMode === 'pickup' && drop.address) {
+        L.marker([safeDrop.lat, safeDrop.lng], {
+          icon: makePinIcon('B', '#DC2626', `Drop: ${safeDrop.city}`)
+        }).addTo(layer);
+      }
+      return;
+    }
+
+    // Geo-fence circular perimeters (only in tracking mode, not simple route preview)
+    if (!pickerMode) {
+      L.circle([safePickup.lat, safePickup.lng], {
+        radius: Math.max(150, pickupRadiusMeters),
+        color: '#10B981',
+        weight: insidePickup ? 2.5 : 1.5,
+        dashArray: '5 4',
+        fillColor: '#10B981',
+        fillOpacity: insidePickup ? 0.22 : 0.1
+      }).addTo(layer);
+
+      L.circle([safeDrop.lat, safeDrop.lng], {
+        radius: Math.max(150, deliveryRadiusMeters),
+        color: '#E83E83',
+        weight: insideDelivery ? 2.5 : 1.5,
+        dashArray: '5 4',
+        fillColor: '#E83E83',
+        fillOpacity: insideDelivery ? 0.24 : 0.1
+      }).addTo(layer);
+    }
+
+    // Planned corridor path
+    const midLat = (safePickup.lat + safeDrop.lat) / 2 + 0.03;
+    const midLng = (safePickup.lng + safeDrop.lng) / 2;
+    L.polyline(
+      [
+        [safePickup.lat, safePickup.lng],
+        [midLat, midLng],
+        [safeDrop.lat, safeDrop.lng]
+      ],
+      {
+        color: '#E83E83',
+        weight: 4,
+        opacity: 0.8,
+        dashArray: '8 6'
+      }
+    ).addTo(layer);
+
+    // Actual traveled GPS breadcrumb trail
+    const trailPts = historyPings
+      .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng))
+      .map((p) => [p.lat, p.lng] as [number, number]);
+    if (!pickerMode && currentLocation && Number.isFinite(currentLocation.lat) && Number.isFinite(currentLocation.lng)) {
+      trailPts.push([currentLocation.lat, currentLocation.lng]);
+    }
+    if (trailPts.length > 1) {
+      L.polyline(trailPts, {
+        color: '#10B981',
+        weight: 4,
+        opacity: 0.92
+      }).addTo(layer);
+    }
+
+    // Pickup marker
+    L.marker([safePickup.lat, safePickup.lng], {
+      icon: makePinIcon('A', '#16A34A', `Pickup: ${safePickup.city}`)
+    })
+      .bindPopup(
+        `<strong>Pickup: ${escapeHtml(safePickup.city)}</strong><br/>${escapeHtml(safePickup.address || '')}<br/><small>Geo-fence: ${formatMetersOrKm(pickupRadiusMeters)}</small>`
+      )
+      .addTo(layer);
+
+    // Drop marker
+    L.marker([safeDrop.lat, safeDrop.lng], {
+      icon: makePinIcon('B', '#DC2626', `Drop: ${safeDrop.city}`)
+    })
+      .bindPopup(
+        `<strong>Drop: ${escapeHtml(safeDrop.city)}</strong><br/>${escapeHtml(safeDrop.address || '')}<br/><small>Geo-fence: ${formatMetersOrKm(deliveryRadiusMeters)}</small>`
+      )
+      .addTo(layer);
+
+    // Live vehicle marker (in tracking mode)
+    if (!pickerMode) {
+      L.marker([activeLocation.lat, activeLocation.lng], {
+        icon: makeTruckIcon(vehicleNumber, speedKmh, heading),
+        zIndexOffset: 500
+      })
+        .bindPopup(
+          `<strong>${escapeHtml(vehicleNumber)}</strong><br/>Speed: ${speedKmh} km/h • Heading: ${Math.round(heading)}°<br/><small>${activeLocation.lat.toFixed(5)}°N, ${activeLocation.lng.toFixed(5)}°E</small>`
+        )
+        .addTo(layer);
+    }
+
+    // Fit route bounds once on mount or when entering preview mode
+    if (!hasFittedRef.current || pickerMode === 'preview') {
+      const bounds = L.latLngBounds([
+        [safePickup.lat, safePickup.lng],
+        [safeDrop.lat, safeDrop.lng]
+      ]);
+      if (!pickerMode) {
+        bounds.extend([activeLocation.lat, activeLocation.lng]);
+      }
+      isProgrammaticRef.current = true;
+      map.fitBounds(bounds, { padding: [55, 55], maxZoom: 14 });
+      hasFittedRef.current = true;
+    }
+  }, [
+    safePickup,
+    safeDrop,
+    drop.address,
+    activeLocation,
+    currentLocation,
+    historyPings,
+    vehicleNumber,
+    speedKmh,
+    heading,
+    pickupRadiusMeters,
+    deliveryRadiusMeters,
+    insidePickup,
+    insideDelivery,
+    pickerMode
+  ]);
+
+  const handleZoomIn = () => mapRef.current?.zoomIn();
+  const handleZoomOut = () => mapRef.current?.zoomOut();
 
   const handleCenterVehicle = () => {
-    const cx = projection.W / 2 - projection.vehiclePt.x;
-    const cy = projection.H / 2 - projection.vehiclePt.y;
-    setZoom(1.45);
-    setPan({ x: cx * 1.45, y: cy * 1.45 });
+    if (!mapRef.current) return;
+    isProgrammaticRef.current = true;
+    mapRef.current.setView([activeLocation.lat, activeLocation.lng], 13, { animate: true });
   };
 
   const handleFitRoute = () => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
+    if (!mapRef.current) return;
+    const bounds = L.latLngBounds([
+      [safePickup.lat, safePickup.lng],
+      [safeDrop.lat, safeDrop.lng],
+      [activeLocation.lat, activeLocation.lng]
+    ]);
+    isProgrammaticRef.current = true;
+    mapRef.current.fitBounds(bounds, { padding: [55, 55], maxZoom: 14 });
   };
 
-  const trailPathD = useMemo(() => {
-    const pts = [...projection.trailPts, projection.vehiclePt];
-    if (pts.length < 2) return '';
-    return pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
-  }, [projection.trailPts, projection.vehiclePt]);
-
   const googleMapsVehicleUrl = `https://www.google.com/maps/search/?api=1&query=${activeLocation.lat},${activeLocation.lng}`;
-  const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${pickup.lat},${pickup.lng}&destination=${drop.lat},${drop.lng}&travelmode=driving`;
+  const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${safePickup.lat},${safePickup.lng}&destination=${safeDrop.lat},${safeDrop.lng}&travelmode=driving`;
 
   return (
-    <div className="relative w-full h-full bg-[#120F15] text-white overflow-hidden select-none flex flex-col">
-      {/* Interactive SVG Geospatial Telemetry Map */}
-      <div className="relative flex-1 w-full h-full overflow-hidden">
-        <svg
-          viewBox={`0 0 ${projection.W} ${projection.H}`}
-          preserveAspectRatio="xMidYMid slice"
-          className="w-full h-full cursor-grab active:cursor-grabbing"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-        >
-          <defs>
-            <pattern id="zuggi-grid-minor" width="36" height="36" patternUnits="userSpaceOnUse">
-              <path d="M 36 0 L 0 0 0 36" fill="none" stroke="rgba(255,255,255,0.045)" strokeWidth="1" />
-            </pattern>
-            <pattern id="zuggi-grid-major" width="144" height="144" patternUnits="userSpaceOnUse">
-              <rect width="144" height="144" fill="url(#zuggi-grid-minor)" />
-              <path d="M 144 0 L 0 0 0 144" fill="none" stroke="rgba(232,62,131,0.12)" strokeWidth="1" />
-            </pattern>
-            <radialGradient id="zuggi-radar-glow" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#E83E83" stopOpacity="0.24" />
-              <stop offset="100%" stopColor="#E83E83" stopOpacity="0" />
-            </radialGradient>
-            <linearGradient id="zuggi-route-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#10B981" />
-              <stop offset="55%" stopColor="#E83E83" />
-              <stop offset="100%" stopColor="#F43F5E" />
-            </linearGradient>
-          </defs>
+    <div className="relative w-full h-full bg-[#E8EEF4] text-[#171318] overflow-hidden select-none flex flex-col">
+      {/* Real Interactive Road Map Canvas (OpenStreetMap via Leaflet) */}
+      <div className="relative flex-1 w-full h-full min-h-0 overflow-hidden">
+        <div
+          ref={containerRef}
+          className="w-full h-full z-0"
+          style={{ width: '100%', height: '100%', background: '#E8EEF4' }}
+        />
 
-          {/* Tactical coordinate grid */}
-          <rect width={projection.W} height={projection.H} fill="#120F15" />
-          <rect width={projection.W} height={projection.H} fill="url(#zuggi-grid-major)" />
-
-          {/* Transformed Geospatial Layer */}
-          <g
-            transform={`translate(${projection.W / 2 + pan.x}, ${projection.H / 2 + pan.y}) scale(${zoom}) translate(${-projection.W / 2}, ${-projection.H / 2})`}
-          >
-            {/* Subtle radar glow around live truck */}
-            <circle
-              cx={projection.vehiclePt.x}
-              cy={projection.vehiclePt.y}
-              r={88}
-              fill="url(#zuggi-radar-glow)"
-            />
-
-            {/* Pickup Geo-Fence Perimeter */}
-            <circle
-              cx={projection.pickupPt.x}
-              cy={projection.pickupPt.y}
-              r={projection.pickupGeoPx}
-              fill={insidePickup ? 'rgba(16,185,129,0.25)' : 'rgba(16,185,129,0.11)'}
-              stroke="#10B981"
-              strokeWidth={insidePickup ? 2.5 : 1.5}
-              strokeDasharray="4 3"
-            />
-
-            {/* Delivery Geo-Fence Perimeter */}
-            <circle
-              cx={projection.dropPt.x}
-              cy={projection.dropPt.y}
-              r={projection.dropGeoPx}
-              fill={insideDelivery ? 'rgba(232,62,131,0.28)' : 'rgba(232,62,131,0.11)'}
-              stroke="#E83E83"
-              strokeWidth={insideDelivery ? 2.5 : 1.5}
-              strokeDasharray="4 3"
-            />
-
-            {/* Planned Highway Corridor Curve */}
-            <path
-              d={`M ${projection.pickupPt.x} ${projection.pickupPt.y} Q ${projection.ctrlX} ${projection.ctrlY} ${projection.dropPt.x} ${projection.dropPt.y}`}
-              fill="none"
-              stroke="url(#zuggi-route-grad)"
-              strokeOpacity="0.6"
-              strokeWidth="4"
-              strokeDasharray="9 7"
-              strokeLinecap="round"
-            />
-
-            {/* Actual Traveled GPS Breadcrumb Trail */}
-            {trailPathD && (
-              <path
-                d={trailPathD}
-                fill="none"
-                stroke="#10B981"
-                strokeWidth="4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            )}
-
-            {/* Breadcrumb Ping Dots */}
-            {projection.trailPts.map((pt, idx) => (
-              <circle
-                key={idx}
-                cx={pt.x}
-                cy={pt.y}
-                r={3}
-                fill="#34D399"
-                stroke="#064E3B"
-                strokeWidth="1"
-              />
-            ))}
-
-            {/* Pickup Origin Marker */}
-            <g
-              transform={`translate(${projection.pickupPt.x}, ${projection.pickupPt.y})`}
-              className="cursor-pointer"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedPin((prev) => (prev === 'pickup' ? null : 'pickup'));
-              }}
-            >
-              <circle r="11" fill="#10B981" stroke="#FFFFFF" strokeWidth="2.5" />
-              <circle r="4" fill="#FFFFFF" />
-              <g transform="translate(0, -24)">
-                <rect
-                  x="-54"
-                  y="-12"
-                  width="108"
-                  height="20"
-                  rx="6"
-                  fill="rgba(16,185,129,0.92)"
-                />
-                <text
-                  textAnchor="middle"
-                  y="2"
-                  fill="#052E16"
-                  fontSize="10"
-                  fontWeight="800"
-                  fontFamily="system-ui, sans-serif"
-                >
-                  PICKUP: {(pickup.city || 'Origin').slice(0, 12)}
-                </text>
-              </g>
-            </g>
-
-            {/* Delivery Destination Marker */}
-            <g
-              transform={`translate(${projection.dropPt.x}, ${projection.dropPt.y})`}
-              className="cursor-pointer"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedPin((prev) => (prev === 'drop' ? null : 'drop'));
-              }}
-            >
-              <circle r="11" fill="#EF4444" stroke="#FFFFFF" strokeWidth="2.5" />
-              <circle r="4" fill="#FFFFFF" />
-              <g transform="translate(0, 26)">
-                <rect
-                  x="-54"
-                  y="-10"
-                  width="108"
-                  height="20"
-                  rx="6"
-                  fill="rgba(239,68,68,0.92)"
-                />
-                <text
-                  textAnchor="middle"
-                  y="4"
-                  fill="#FFFFFF"
-                  fontSize="10"
-                  fontWeight="800"
-                  fontFamily="system-ui, sans-serif"
-                >
-                  DROP: {(drop.city || 'Dest').slice(0, 12)}
-                </text>
-              </g>
-            </g>
-
-            {/* Live Moving Vehicle Marker */}
-            <g
-              transform={`translate(${projection.vehiclePt.x}, ${projection.vehiclePt.y})`}
-              className="cursor-pointer"
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedPin((prev) => (prev === 'vehicle' ? null : 'vehicle'));
-              }}
-            >
-              {/* Pulsing Radar Ring */}
-              <circle r="22" fill="rgba(232,62,131,0.28)">
-                <animate attributeName="r" values="14;32;14" dur="2s" repeatCount="indefinite" />
-                <animate attributeName="opacity" values="0.65;0.05;0.65" dur="2s" repeatCount="indefinite" />
-              </circle>
-              {/* Rotating Directional Beacon */}
-              <circle r="15" fill="#E83E83" stroke="#FFFFFF" strokeWidth="2.5" />
-              <g transform={`rotate(${heading})`}>
-                <polygon points="0,-8 6,6 0,3 -6,6" fill="#FFFFFF" />
-              </g>
-              {/* Vehicle Number & Speed Tag */}
-              <g transform="translate(0, 28)">
-                <rect
-                  x="-64"
-                  y="-10"
-                  width="128"
-                  height="20"
-                  rx="10"
-                  fill="#171318"
-                  stroke="#E83E83"
-                  strokeWidth="1.2"
-                />
-                <text
-                  textAnchor="middle"
-                  y="4"
-                  fill="#FFFFFF"
-                  fontSize="10"
-                  fontWeight="800"
-                  fontFamily="ui-monospace, monospace"
-                >
-                  {vehicleNumber.slice(0, 13)} • {speedKmh} km/h
-                </text>
-              </g>
-            </g>
-          </g>
-        </svg>
+        {!tilesLoaded && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#E8EEF4]/60 z-[5]">
+            <div className="px-3 py-1.5 rounded-full bg-white/95 border border-gray-200 shadow-sm text-[11px] font-bold text-[#171318]">
+              Loading live street & highway map...
+            </div>
+          </div>
+        )}
 
         {/* Right Floating Map Controls */}
-        <div className="absolute right-3 bottom-16 z-20 flex flex-col gap-1.5">
+        <div className={`absolute right-3 ${pickerMode ? 'bottom-24' : 'bottom-4'} z-[400] flex flex-col gap-1.5`}>
           <button
             type="button"
-            onClick={() => setZoom((z) => Math.min(3, +(z + 0.3).toFixed(2)))}
-            className="w-8 h-8 rounded-lg bg-[#171318]/90 hover:bg-[#241E26] border border-gray-700 flex items-center justify-center text-white shadow-md cursor-pointer"
+            onClick={handleZoomIn}
+            className="w-8 h-8 rounded-lg bg-white/95 hover:bg-white border border-gray-300 flex items-center justify-center text-[#171318] shadow-md cursor-pointer"
             title="Zoom In"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
           <button
             type="button"
-            onClick={() => setZoom((z) => Math.max(0.7, +(z - 0.3).toFixed(2)))}
-            className="w-8 h-8 rounded-lg bg-[#171318]/90 hover:bg-[#241E26] border border-gray-700 flex items-center justify-center text-white shadow-md cursor-pointer"
+            onClick={handleZoomOut}
+            className="w-8 h-8 rounded-lg bg-white/95 hover:bg-white border border-gray-300 flex items-center justify-center text-[#171318] shadow-md cursor-pointer"
             title="Zoom Out"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
-          <button
-            type="button"
-            onClick={handleCenterVehicle}
-            className="w-8 h-8 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] border border-pink-400/50 flex items-center justify-center text-white shadow-md cursor-pointer"
-            title="Focus on Live Vehicle"
-          >
-            <Crosshair className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            onClick={handleFitRoute}
-            className="w-8 h-8 rounded-lg bg-[#171318]/90 hover:bg-[#241E26] border border-gray-700 flex items-center justify-center text-white shadow-md cursor-pointer"
-            title="Fit Entire Corridor"
-          >
-            <Maximize2 className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Left Floating Pin Details Popover */}
-        {selectedPin && (
-          <div className="absolute left-3 bottom-16 z-20 max-w-xs bg-[#171318]/95 backdrop-blur-md border border-gray-700 rounded-xl p-3 text-xs shadow-2xl">
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <span className="font-black uppercase text-[10px] tracking-wider text-[#E83E83] flex items-center gap-1">
-                <MapPin className="w-3 h-3" />
-                {selectedPin === 'pickup'
-                  ? `Pickup Zone (${formatMetersOrKm(pickupRadiusMeters)})`
-                  : selectedPin === 'drop'
-                  ? `Delivery Zone (${formatMetersOrKm(deliveryRadiusMeters)})`
-                  : `Live Vehicle: ${vehicleNumber}`}
-              </span>
+          {!pickerMode && (
+            <>
               <button
                 type="button"
-                onClick={() => setSelectedPin(null)}
-                className="text-gray-400 hover:text-white text-xs cursor-pointer"
+                onClick={handleCenterVehicle}
+                className="w-8 h-8 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] border border-pink-400/50 flex items-center justify-center text-white shadow-md cursor-pointer"
+                title="Focus on Live Vehicle"
               >
-                ✕
+                <Crosshair className="w-4 h-4" />
               </button>
-            </div>
-            {selectedPin === 'pickup' && (
-              <div className="text-gray-200 space-y-0.5">
-                <div className="font-bold">{pickup.city || 'Pickup Origin'}</div>
-                {pickup.address && <div className="text-[11px] text-gray-400">{pickup.address}</div>}
-                <div className="text-[10px] font-mono text-emerald-400">
-                  {pickup.lat.toFixed(4)}° N, {pickup.lng.toFixed(4)}° E
-                </div>
-              </div>
-            )}
-            {selectedPin === 'drop' && (
-              <div className="text-gray-200 space-y-0.5">
-                <div className="font-bold">{drop.city || 'Delivery Destination'}</div>
-                {drop.address && <div className="text-[11px] text-gray-400">{drop.address}</div>}
-                <div className="text-[10px] font-mono text-rose-400">
-                  {drop.lat.toFixed(4)}° N, {drop.lng.toFixed(4)}° E
-                </div>
-              </div>
-            )}
-            {selectedPin === 'vehicle' && (
-              <div className="text-gray-200 space-y-1">
-                <div className="font-mono text-emerald-400 font-bold">
-                  {activeLocation.lat.toFixed(5)}° N, {activeLocation.lng.toFixed(5)}° E
-                </div>
-                <div className="text-[11px] text-gray-300">
-                  Speed: <strong>{speedKmh} km/h</strong> • Heading: <strong>{heading}°</strong>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom Live Corridor Bar + Direct Google Maps External Navigation */}
-      <div className="bg-[#171318]/95 border-t border-gray-800 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] z-20">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold shrink-0">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Live GPS Radar</span>
-          </span>
-          <span className="text-gray-400 font-mono truncate hidden sm:inline">
-            {activeLocation.lat.toFixed(4)}°N, {activeLocation.lng.toFixed(4)}°E
-          </span>
-          <div className="hidden md:flex items-center gap-2">
-            <div className="w-24 h-1.5 rounded-full bg-gray-800 overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-emerald-400 to-[#E83E83] rounded-full transition-all duration-500"
-                style={{ width: `${projection.progressPct}%` }}
-              />
-            </div>
-            <span className="text-gray-300 font-mono font-bold">{projection.progressPct}%</span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <a
-            href={googleMapsVehicleUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] text-white font-bold transition"
-          >
-            <Navigation className="w-3 h-3" />
-            <span>Open Vehicle in Google Maps</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
-          <a
-            href={googleMapsRouteUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-semibold transition"
-          >
-            <Compass className="w-3 h-3 text-emerald-400" />
-            <span>Route</span>
-          </a>
+              <button
+                type="button"
+                onClick={handleFitRoute}
+                className="w-8 h-8 rounded-lg bg-white/95 hover:bg-white border border-gray-300 flex items-center justify-center text-[#171318] shadow-md cursor-pointer"
+                title="Fit Entire Corridor"
+              >
+                <Maximize2 className="w-4 h-4" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Subtle status cue only when auth or quota failed */}
-      {(reason === 'auth_error' || reason === 'quota_exceeded') && (
-        <div className="bg-amber-950/90 border-t border-amber-800/70 px-3 py-1 text-[10px] text-amber-200 text-center">
-          {reason === 'quota_exceeded'
-            ? 'Google Maps tile quota temporarily reached — Live GPS Telemetry Radar active.'
-            : 'Google Maps road tiles could not authenticate for this domain — Live GPS Telemetry Radar active.'}
+      {/* Bottom Live Corridor Bar (hidden in compact picker mode so FreightLocationPicker bar isn't covered) */}
+      {!pickerMode && (
+        <div className="bg-[#171318]/95 border-t border-gray-800 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-white z-[410]">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold shrink-0">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Live Road Map</span>
+            </span>
+            <span className="text-gray-300 font-mono truncate hidden sm:inline">
+              {activeLocation.lat.toFixed(4)}°N, {activeLocation.lng.toFixed(4)}°E
+            </span>
+            <div className="hidden md:flex items-center gap-2">
+              <div className="w-24 h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-emerald-400 to-[#E83E83] rounded-full transition-all duration-500"
+                  style={{ width: `${progressMetrics.progressPct}%` }}
+                />
+              </div>
+              <span className="text-gray-300 font-mono font-bold">{progressMetrics.progressPct}%</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <a
+              href={googleMapsVehicleUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] text-white font-bold transition"
+            >
+              <Navigation className="w-3 h-3" />
+              <span>Navigate in Google Maps</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+            <a
+              href={googleMapsRouteUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-semibold transition"
+            >
+              <Compass className="w-3 h-3 text-emerald-400" />
+              <span>Route</span>
+            </a>
+          </div>
+        </div>
+      )}
+
+      {/* Subtle status cue only when quota reached */}
+      {!pickerMode && reason === 'quota_exceeded' && (
+        <div className="bg-amber-50 border-t border-amber-200 px-3 py-1 text-[10px] text-amber-900 text-center font-medium">
+          OpenStreetMap road view active while Google Maps quota resets.
         </div>
       )}
     </div>

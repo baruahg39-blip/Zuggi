@@ -34,8 +34,14 @@ import { MobileAppInstallModal } from './components/mobile/MobileAppInstallModal
 import { MobileBottomNav } from './components/mobile/MobileBottomNav';
 import { ToastContainer } from './components/shared/Toast';
 import { DriverWebTrackingPage } from './components/tracking/DriverWebTrackingPage';
+import { PartnerPermissionsModal } from './components/partner/PartnerPermissionsModal';
 import { ShieldAlert, LogIn, Lock, Truck, Building2, ArrowRight, ShieldCheck } from 'lucide-react';
 import { AppPortalMode, detectPortalMode, isPartnerRole, navigateToPortal } from './utils/portalMode';
+import {
+  areCoreDriverPermissionsGranted,
+  getDevicePermissionsSnapshot,
+  hasAcknowledgedPartnerPermissions
+} from './utils/devicePermissions';
 import { applyClientSeo } from './utils/seo';
 
 function isPublicCatalogRoute(pathname: string): boolean {
@@ -82,6 +88,7 @@ export default function App() {
 
   // Mobile App / APK Install Modal State
   const [showInstallModal, setShowInstallModal] = useState(false);
+  const [showPartnerPermissionsModal, setShowPartnerPermissionsModal] = useState(false);
 
   // Customer Navigation State
   const [customerActiveLoadId, setCustomerActiveLoadId] = useState<string | null>(null);
@@ -98,6 +105,38 @@ export default function App() {
 
   // Invoice Modal State
   const [activeInvoiceBookingId, setActiveInvoiceBookingId] = useState<string | null>(null);
+
+  // Auto-prompt drivers/partners for required Location, Camera, Notifications & Contacts on first sign-in or app install
+  useEffect(() => {
+    const openManually = () => setShowPartnerPermissionsModal(true);
+    window.addEventListener('zuggi-open-partner-permissions', openManually);
+    const onAppInstalled = () => {
+      const user = logisticsStore.getCurrentUser();
+      if (user && isPartnerRole(user.role)) {
+        setShowPartnerPermissionsModal(true);
+      }
+    };
+    window.addEventListener('appinstalled', onAppInstalled);
+    return () => {
+      window.removeEventListener('zuggi-open-partner-permissions', openManually);
+      window.removeEventListener('appinstalled', onAppInstalled);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser || !isPartnerRole(currentUser.role)) return;
+    if (hasAcknowledgedPartnerPermissions(currentUser.id)) return;
+    let cancelled = false;
+    getDevicePermissionsSnapshot().then((snap) => {
+      if (cancelled) return;
+      if (!areCoreDriverPermissionsGranted(snap)) {
+        setShowPartnerPermissionsModal(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id, currentUser?.role]);
 
   // Test Firestore Connection on boot per Skill constraint
   useEffect(() => {
@@ -296,14 +335,14 @@ export default function App() {
     <div className="min-h-screen bg-[#F8F6F8] text-[#171318] flex flex-col font-sans selection:bg-[#E83E83] selection:text-white w-full max-w-full overflow-x-hidden">
       {/* Mandatory Google Maps Platform Quota Banner per Section 8 Case A */}
       {quotaExceeded && (
-        <div className="bg-rose-50 border-b border-rose-200 text-rose-900 px-4 py-2 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
           <span>
             Google Maps Platform quota reached. If you are the app owner, visit{' '}
             <a
               href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
               target="_blank"
               rel="noopener noreferrer"
-              className="underline font-semibold text-rose-950 hover:text-rose-800"
+              className="underline font-semibold text-amber-950 hover:text-amber-800"
             >
               maps developer site
             </a>{' '}
@@ -498,6 +537,7 @@ export default function App() {
                     onNavigateToEarnings={() => setDriverSubView('earnings')}
                     onNavigateToTripHistory={() => setDriverSubView('history')}
                     onOpenSupport={handleOpenSupport}
+                    onOpenPermissions={() => setShowPartnerPermissionsModal(true)}
                   />
                 )}
 
@@ -668,6 +708,19 @@ export default function App() {
         <MobileAppInstallModal
           isOpen={showInstallModal}
           onClose={() => setShowInstallModal(false)}
+          onOpenPermissions={() => {
+            setShowInstallModal(false);
+            setShowPartnerPermissionsModal(true);
+          }}
+        />
+      )}
+
+      {/* Driver / Partner Device Permissions Setup Modal */}
+      {showPartnerPermissionsModal && (
+        <PartnerPermissionsModal
+          isOpen={showPartnerPermissionsModal}
+          userId={currentUser?.id || 'partner_guest'}
+          onClose={() => setShowPartnerPermissionsModal(false)}
         />
       )}
 

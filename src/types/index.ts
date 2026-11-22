@@ -258,6 +258,23 @@ export interface BusinessPaymentSettings {
   updatedAt?: string;
 }
 
+export interface BookingLiveEta {
+  distanceMeters: number;
+  distanceKm: number;
+  durationSeconds: number;
+  staticDurationSeconds: number;
+  trafficDelayMinutes: number;
+  trafficCondition: 'clear' | 'moderate' | 'heavy';
+  etaIso: string;
+  formattedDuration: string;
+  formattedArrivalTime: string;
+  originLat: number;
+  originLng: number;
+  destinationCity: string;
+  calculatedAt: string;
+  source: 'google_routes_matrix' | 'gps_estimate';
+}
+
 export interface Booking {
   id: string;
   loadId: string;
@@ -309,6 +326,7 @@ export interface Booking {
   podSignatureUrl?: string;
   eWayBillNumber?: string;
   trackingToken?: string;
+  liveEta?: BookingLiveEta;
   geofenceConfig?: GeofenceZoneConfig;
   geofenceState?: GeofenceZoneState;
   isTestBooking?: boolean;
@@ -501,6 +519,12 @@ export interface TripLiveTrackingResponse {
     minutes: number;
     formatted: string;
     distance_remaining_km: number;
+    eta_iso?: string;
+    formatted_arrival_time?: string;
+    traffic_condition?: 'clear' | 'moderate' | 'heavy';
+    traffic_delay_minutes?: number;
+    source?: 'google_routes_matrix' | 'gps_estimate';
+    calculated_at?: string;
   };
   tracking_token?: string;
   tracking_source: GpsTrackingType;

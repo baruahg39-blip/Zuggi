@@ -106,6 +106,17 @@ export interface TripRecord {
   geofence_config?: GeofenceConfigRecord;
   geofence_state?: GeofenceStateRecord;
   geofence_events?: GeofenceEventRecord[];
+  live_eta?: {
+    minutes: number;
+    formatted: string;
+    distance_remaining_km: number;
+    eta_iso: string;
+    formatted_arrival_time: string;
+    traffic_condition: 'clear' | 'moderate' | 'heavy';
+    traffic_delay_minutes: number;
+    source: 'google_routes_matrix' | 'gps_estimate';
+    calculated_at: string;
+  };
 }
 
 // In-Memory Database for Vehicles, Drivers, Trips & Location Pings
@@ -1197,11 +1208,23 @@ tripsRouter.get('/:id/live-tracking', async (req, res) => {
         gps_type: vehicle.gps_type,
         gps_device_id: vehicle.gps_device_id
       },
-      eta: {
-        minutes: remainingMinutes,
-        formatted: etaFormatted,
-        distance_remaining_km: remainingKm
-      },
+      eta: (() => {
+        // Prefer driver's fresh Google Maps Route Matrix live ETA when updated within last 15 minutes
+        if (trip.live_eta && trip.status !== 'DELIVERED') {
+          const etaAgeMs = Date.now() - new Date(trip.live_eta.calculated_at).getTime();
+          if (Number.isFinite(etaAgeMs) && etaAgeMs <= 15 * 60 * 1000) {
+            return trip.live_eta;
+          }
+        }
+        return {
+          minutes: remainingMinutes,
+          formatted: etaFormatted,
+          distance_remaining_km: remainingKm,
+          eta_iso: new Date(Date.now() + remainingMinutes * 60 * 1000).toISOString(),
+          source: 'gps_estimate' as const,
+          calculated_at: latest.recorded_at
+        };
+      })(),
       tracking_source: trip.tracking_source,
       offline_buffer_status: {
         is_live: isLive,
@@ -1221,6 +1244,57 @@ tripsRouter.get('/:id/live-tracking', async (req, res) => {
   } catch (error: any) {
     console.error('[Live Tracking Error]', error);
     res.status(500).json({ success: false, message: error.message || 'Internal error retrieving tracking data.' });
+  }
+});
+
+// --- 3b. POST /trips/:id/live-eta ---
+// Receives driver-calculated live traffic-aware ETA (Google Routes API Route Matrix) and exposes it in live-tracking for the shipper.
+tripsRouter.post('/:id/live-eta', async (req, res) => {
+  try {
+    const tripId = req.params.id;
+    let trip = tripsDb.get(tripId);
+    if (!trip) {
+      const recoveredTrip = await loadTripFromSupabase(tripId);
+      if (recoveredTrip) {
+        trip = recoveredTrip;
+        tripsDb.set(recoveredTrip.id, recoveredTrip);
+        tripsDb.set(recoveredTrip.load_id, recoveredTrip);
+      }
+    }
+    if (!trip) {
+      return res.status(404).json({ success: false, message: `Trip '${tripId}' not found.` });
+    }
+
+    const body = req.body || {};
+    const minutes = Math.max(0, Math.round(Number(body.minutes) || 0));
+    const distanceRemainingKm = Math.max(0, Math.round((Number(body.distance_remaining_km) || 0) * 10) / 10);
+    const trafficCondition: 'clear' | 'moderate' | 'heavy' =
+      body.traffic_condition === 'heavy' || body.traffic_condition === 'moderate'
+        ? body.traffic_condition
+        : 'clear';
+    const source: 'google_routes_matrix' | 'gps_estimate' =
+      body.source === 'google_routes_matrix' ? 'google_routes_matrix' : 'gps_estimate';
+
+    trip.live_eta = {
+      minutes,
+      formatted: typeof body.formatted === 'string' && body.formatted.trim() ? body.formatted.trim() : `${minutes} mins`,
+      distance_remaining_km: distanceRemainingKm,
+      eta_iso: typeof body.eta_iso === 'string' ? body.eta_iso : new Date(Date.now() + minutes * 60 * 1000).toISOString(),
+      formatted_arrival_time:
+        typeof body.formatted_arrival_time === 'string' ? body.formatted_arrival_time : '',
+      traffic_condition: trafficCondition,
+      traffic_delay_minutes: Math.max(0, Math.round(Number(body.traffic_delay_minutes) || 0)),
+      source,
+      calculated_at: typeof body.calculated_at === 'string' ? body.calculated_at : new Date().toISOString()
+    };
+    trip.updated_at = new Date().toISOString();
+    tripsDb.set(trip.id, trip);
+    tripsDb.set(trip.load_id, trip);
+
+    return res.status(200).json({ success: true, live_eta: trip.live_eta });
+  } catch (error: any) {
+    console.error('[Live ETA Sync Error]', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to sync live ETA.' });
   }
 });
 

@@ -1469,6 +1469,188 @@ app.post('/api/maps/compute-route', async (req, res) => {
   }
 });
 
+// 3. Endpoint: Compute Route Matrix (Modern replacement for legacy Distance Matrix API)
+// Uses Google Maps Platform Routes API v2: https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix
+app.post('/api/maps/route-matrix', async (req, res) => {
+  try {
+    const { origin, destination } = req.body || {};
+    const origLat = Number(origin?.lat);
+    const origLng = Number(origin?.lng);
+    const destLat = Number(destination?.lat);
+    const destLng = Number(destination?.lng);
+
+    if (
+      !Number.isFinite(origLat) ||
+      !Number.isFinite(origLng) ||
+      !Number.isFinite(destLat) ||
+      !Number.isFinite(destLng) ||
+      origLat < -90 ||
+      origLat > 90 ||
+      destLat < -90 ||
+      destLat > 90 ||
+      origLng < -180 ||
+      origLng > 180 ||
+      destLng < -180 ||
+      destLng > 180
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid origin and destination coordinates (lat/lng) are required.'
+      });
+    }
+
+    const parseDurationSeconds = (raw?: string): number => {
+      if (!raw || typeof raw !== 'string') return 0;
+      const matched = raw.match(/^(\d+(?:\.\d+)?)s$/);
+      return matched ? Math.round(Number(matched[1])) : 0;
+    };
+
+    const googleMapsKey = getGoogleMapsKey();
+    if (googleMapsKey) {
+      try {
+        const matrixUrl = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix';
+        const matrixBody = {
+          origins: [
+            {
+              waypoint: {
+                location: {
+                  latLng: {
+                    latitude: origLat,
+                    longitude: origLng
+                  }
+                }
+              }
+            }
+          ],
+          destinations: [
+            {
+              waypoint: {
+                location: {
+                  latLng: {
+                    latitude: destLat,
+                    longitude: destLng
+                  }
+                }
+              }
+            }
+          ],
+          travelMode: 'DRIVE',
+          routingPreference: 'TRAFFIC_AWARE'
+        };
+
+        const gRes = await fetch(matrixUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': googleMapsKey,
+            'X-Goog-FieldMask':
+              'originIndex,destinationIndex,duration,staticDuration,distanceMeters,status,condition',
+            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio'
+          },
+          body: JSON.stringify(matrixBody)
+        });
+
+        const rawText = await gRes.text();
+        let parsed: any = null;
+        try {
+          parsed = rawText ? JSON.parse(rawText) : null;
+        } catch {
+          parsed = null;
+        }
+
+        // Propagate Demo/Quota exhaustion cleanly so client can trigger gmp-quota-exceeded fallback
+        if (
+          gRes.status === 429 ||
+          parsed?.error?.status === 'RESOURCE_EXHAUSTED' ||
+          parsed?.error?.code === 429
+        ) {
+          return res.status(429).json({
+            success: false,
+            quotaExceeded: true,
+            message: parsed?.error?.message || 'Google Maps Platform daily quota exceeded.'
+          });
+        }
+
+        if (gRes.ok && Array.isArray(parsed) && parsed.length > 0) {
+          const element =
+            parsed.find((el: any) => (el?.originIndex ?? 0) === 0 && (el?.destinationIndex ?? 0) === 0) ||
+            parsed[0];
+
+          const hasElementError = Boolean(element?.status && element.status.code && element.status.code !== 0);
+          if (element && !hasElementError && element.condition !== 'ROUTE_NOT_FOUND') {
+            const distanceMeters = Math.max(0, Number(element.distanceMeters) || 0);
+            const durationSeconds = parseDurationSeconds(element.duration);
+            const staticDurationSeconds = parseDurationSeconds(element.staticDuration) || durationSeconds;
+            const trafficDelaySeconds = Math.max(0, durationSeconds - staticDurationSeconds);
+            const trafficDelayMinutes = Math.round(trafficDelaySeconds / 60);
+            const delayRatio = staticDurationSeconds > 0 ? trafficDelaySeconds / staticDurationSeconds : 0;
+
+            let trafficCondition: 'clear' | 'moderate' | 'heavy' = 'clear';
+            if (trafficDelayMinutes >= 20 || delayRatio >= 0.25) {
+              trafficCondition = 'heavy';
+            } else if (trafficDelayMinutes >= 7 || delayRatio >= 0.1) {
+              trafficCondition = 'moderate';
+            }
+
+            const calculatedAt = new Date().toISOString();
+            const etaIso = new Date(Date.now() + durationSeconds * 1000).toISOString();
+
+            return res.json({
+              success: true,
+              source: 'google_routes_matrix',
+              distanceMeters,
+              distanceKm: Math.round((distanceMeters / 1000) * 10) / 10,
+              durationSeconds,
+              staticDurationSeconds,
+              trafficDelayMinutes,
+              trafficCondition,
+              etaIso,
+              calculatedAt
+            });
+          }
+        }
+      } catch (matrixErr) {
+        console.warn('[Route Matrix API Notice] Falling back to GPS estimate:', matrixErr);
+      }
+    }
+
+    // Graceful road-distance estimation fallback if key unavailable or upstream unreachable
+    const R = 6371000;
+    const dLat = ((destLat - origLat) * Math.PI) / 180;
+    const dLon = ((destLng - origLng) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((origLat * Math.PI) / 180) *
+        Math.cos((destLat * Math.PI) / 180) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const straightMeters = R * c;
+    const distanceMeters = Math.max(0, Math.round(straightMeters * 1.28));
+    const distanceKm = Math.round((distanceMeters / 1000) * 10) / 10;
+    // Average commercial freight highway speed ~ 44 km/h
+    const durationSeconds = distanceMeters <= 250 ? 0 : Math.max(60, Math.round((distanceKm / 44) * 3600));
+    const calculatedAt = new Date().toISOString();
+    const etaIso = new Date(Date.now() + durationSeconds * 1000).toISOString();
+
+    return res.json({
+      success: true,
+      source: 'gps_estimate',
+      distanceMeters,
+      distanceKm,
+      durationSeconds,
+      staticDurationSeconds: durationSeconds,
+      trafficDelayMinutes: 0,
+      trafficCondition: 'clear',
+      etaIso,
+      calculatedAt
+    });
+  } catch (error: any) {
+    console.error('[Route Matrix Error]', error);
+    res.status(500).json({ success: false, message: error.message || 'Route matrix computation failed.' });
+  }
+});
+
 // --- PUBLIC FREIGHT CATALOG & SEO CRAWLER ENDPOINTS ---
 const CANONICAL_BASE_URL = (
   process.env.PRIMARY_DOMAIN

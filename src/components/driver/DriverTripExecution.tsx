@@ -18,8 +18,19 @@ import {
   RefreshCw,
   Image as ImageIcon
 } from 'lucide-react';
-import { Booking, GeofenceEvent, GeofenceZoneConfig, GeofenceZoneState, LoadItem } from '../../types';
+import {
+  Booking,
+  BookingLiveEta,
+  GeofenceEvent,
+  GeofenceZoneConfig,
+  GeofenceZoneState,
+  LoadItem
+} from '../../types';
 import { logisticsStore } from '../../services/store';
+import {
+  calculateLiveDestinationEta,
+  computeHaversineMeters
+} from '../../services/routeMatrixEta';
 import { LiveTrackingMap } from '../maps/LiveTrackingMap';
 import { GeofenceMonitorPanel } from '../tracking/GeofenceMonitorPanel';
 import { showToast } from '../shared/Toast';
@@ -98,10 +109,18 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
   const [geofenceEvents, setGeofenceEvents] = useState<GeofenceEvent[]>(() =>
     logisticsStore.getGeofenceEvents(bookingId || 'none')
   );
+  const [liveEta, setLiveEta] = useState<BookingLiveEta | null>(() => {
+    const initialBooking = bookingId ? logisticsStore.getBookingById(bookingId) : undefined;
+    return initialBooking?.liveEta || null;
+  });
+  const [isCalculatingEta, setIsCalculatingEta] = useState<boolean>(false);
 
   const loadingFileInputRef = useRef<HTMLInputElement | null>(null);
   const podFileInputRef = useRef<HTMLInputElement | null>(null);
   const lastWatchSentAtRef = useRef<number>(0);
+  const lastEtaCalcAtRef = useRef<number>(0);
+  const lastEtaCoordRef = useRef<{ lat: number; lng: number } | null>(null);
+  const etaInFlightRef = useRef<boolean>(false);
 
   useEffect(() => {
     const update = () => {
@@ -116,6 +135,7 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         setLoad(logisticsStore.getLoadById(b.loadId));
         if (b.podDocumentUrl) setPodPhotoDataUrl(b.podDocumentUrl);
         if (b.loadingProofUrl) setLoadingProofDataUrl(b.loadingProofUrl);
+        if (b.liveEta) setLiveEta(b.liveEta);
       }
       setGeofenceConfig(logisticsStore.getGeofenceConfig(bookingId));
       setGeofenceState(logisticsStore.getGeofenceState(bookingId));
@@ -198,6 +218,114 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     }
   }, [booking?.id, booking?.trackingToken, load?.id, ensureBackendTripToken]);
 
+  // Compute live traffic-aware ETA to destination via Google Maps Platform Routes API (Compute Route Matrix)
+  // and sync immediately to both local logisticsStore and backend /trips/:id/live-eta for the shipper.
+  const refreshLiveEta = useCallback(
+    async (
+      b: Booking,
+      originLat: number,
+      originLng: number,
+      force = false
+    ): Promise<BookingLiveEta | null> => {
+      if (b.status === 'completed' || b.status === 'cancelled') return null;
+      if (etaInFlightRef.current) return null;
+
+      const nowMs = Date.now();
+      const prevCoord = lastEtaCoordRef.current;
+      const elapsedMs = nowMs - lastEtaCalcAtRef.current;
+      const movedMeters = prevCoord
+        ? computeHaversineMeters(prevCoord.lat, prevCoord.lng, originLat, originLng)
+        : Infinity;
+
+      // Throttle automatic refreshes to protect API quota unless driver moved >= 500m or >= 60s elapsed
+      if (!force && elapsedMs < 60_000 && movedMeters < 500) {
+        return null;
+      }
+
+      etaInFlightRef.current = true;
+      setIsCalculatingEta(true);
+      try {
+        const computed = await calculateLiveDestinationEta({
+          origin: { lat: originLat, lng: originLng },
+          destination: { lat: b.delivery.lat, lng: b.delivery.lng },
+          destinationCity: b.delivery.city
+        });
+
+        lastEtaCalcAtRef.current = Date.now();
+        lastEtaCoordRef.current = { lat: originLat, lng: originLng };
+        setLiveEta(computed);
+        logisticsStore.updateBookingLiveEta(b.id, computed);
+
+        // Relay live ETA to backend trip record so cross-device shipper views receive it in /live-tracking
+        fetch(`/trips/${encodeURIComponent(b.id)}/live-eta`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            minutes: Math.max(0, Math.round(computed.durationSeconds / 60)),
+            formatted: computed.formattedDuration,
+            distance_remaining_km: computed.distanceKm,
+            eta_iso: computed.etaIso,
+            formatted_arrival_time: computed.formattedArrivalTime,
+            traffic_condition: computed.trafficCondition,
+            traffic_delay_minutes: computed.trafficDelayMinutes,
+            source: computed.source,
+            calculated_at: computed.calculatedAt
+          })
+        }).catch(() => {});
+
+        return computed;
+      } finally {
+        etaInFlightRef.current = false;
+        setIsCalculatingEta(false);
+      }
+    },
+    []
+  );
+
+  // Auto-calculate initial live ETA when trip opens, and refresh whenever a new GPS ping arrives from map controls
+  useEffect(() => {
+    if (!booking || booking.status === 'completed' || booking.status === 'cancelled') return;
+
+    const latestPing = logisticsStore.getLatestPing(booking.id);
+    const originLat = latestPing?.lat ?? booking.pickup.lat;
+    const originLng = latestPing?.lng ?? booking.pickup.lng;
+
+    // Trigger immediate calculation if no fresh ETA exists yet
+    const existingAgeMs = booking.liveEta
+      ? Date.now() - new Date(booking.liveEta.calculatedAt).getTime()
+      : Infinity;
+    if (!booking.liveEta || existingAgeMs > 90_000) {
+      void refreshLiveEta(booking, originLat, originLng, true);
+    }
+
+    const unsub = logisticsStore.subscribe(() => {
+      const updatedBooking = logisticsStore.getBookingById(booking.id);
+      if (!updatedBooking || updatedBooking.status === 'completed' || updatedBooking.status === 'cancelled') {
+        return;
+      }
+      const ping = logisticsStore.getLatestPing(booking.id);
+      if (ping) {
+        void refreshLiveEta(updatedBooking, ping.lat, ping.lng, false);
+      }
+    });
+
+    return unsub;
+  }, [booking?.id, booking?.status, refreshLiveEta]);
+
+  const handleManualRefreshEta = useCallback(async () => {
+    if (!booking) return;
+    const latestPing = logisticsStore.getLatestPing(booking.id);
+    const originLat = latestPing?.lat ?? booking.pickup.lat;
+    const originLng = latestPing?.lng ?? booking.pickup.lng;
+    const updated = await refreshLiveEta(booking, originLat, originLng, true);
+    if (updated) {
+      showToast(
+        `Live ETA updated: ${updated.formattedDuration} (${updated.distanceKm} km) — shared with shipper.`,
+        'success'
+      );
+    }
+  }, [booking, refreshLiveEta]);
+
   const transmitGpsPoint = useCallback(
     async (
       b: Booking,
@@ -261,6 +389,9 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       );
 
+      // Recalculate traffic-aware ETA to destination from the new GPS ping (throttled for quota efficiency)
+      void refreshLiveEta(b, lat, lng, !silent);
+
       if (!silent) {
         const msg =
           localEvents.length > 0
@@ -270,7 +401,7 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         showToast(msg, 'success');
       }
     },
-    [ensureBackendTripToken]
+    [ensureBackendTripToken, refreshLiveEta]
   );
 
   // Continuous phone GPS watchPosition when Auto Live GPS is toggled on during active driving stages
@@ -536,11 +667,118 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         </div>
       )}
 
+      {/* Live Destination ETA Banner (Google Maps Routes API Route Matrix — Shared Live with Shipper) */}
+      {booking.status !== 'completed' && booking.status !== 'cancelled' && (
+        <div className="p-4 sm:p-5 rounded-3xl bg-[#171318] border border-gray-800 text-white shadow-xl space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="w-9 h-9 rounded-xl bg-[#E83E83]/15 border border-[#E83E83]/35 flex items-center justify-center text-[#FF85B7] shrink-0">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-extrabold uppercase tracking-wider text-white">
+                    Live Destination ETA
+                  </span>
+                  <span className="text-[11px] font-semibold text-emerald-400">
+                    • Shared Live with Shipper
+                  </span>
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  To {booking.delivery.city} ({booking.delivery.address})
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleManualRefreshEta}
+              disabled={isCalculatingEta}
+              className="min-h-[44px] px-3.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 text-xs font-bold text-gray-100 flex items-center gap-1.5 transition cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isCalculatingEta ? 'animate-spin text-[#E83E83]' : ''}`} />
+              <span>{isCalculatingEta ? 'Updating ETA...' : 'Refresh Live ETA'}</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1">
+            <div className="p-3 rounded-2xl bg-[#060309] border border-gray-800">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Est. Arrival
+              </span>
+              <span className="mt-0.5 block text-base sm:text-lg font-black font-mono tabular-nums text-emerald-400">
+                {liveEta ? liveEta.formattedArrivalTime : isCalculatingEta ? 'Calculating...' : '--'}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#060309] border border-gray-800">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Drive Time Left
+              </span>
+              <span className="mt-0.5 block text-base sm:text-lg font-black font-mono tabular-nums text-white">
+                {liveEta ? liveEta.formattedDuration : isCalculatingEta ? '...' : '--'}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#060309] border border-gray-800">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Road Distance
+              </span>
+              <span className="mt-0.5 block text-base sm:text-lg font-black font-mono tabular-nums text-[#FF85B7]">
+                {liveEta ? `${liveEta.distanceKm} km` : '--'}
+              </span>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#060309] border border-gray-800">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Live Traffic
+              </span>
+              <span
+                className={`mt-0.5 block text-sm sm:text-base font-extrabold ${
+                  liveEta?.trafficCondition === 'heavy'
+                    ? 'text-rose-400'
+                    : liveEta?.trafficCondition === 'moderate'
+                    ? 'text-amber-300'
+                    : 'text-emerald-400'
+                }`}
+              >
+                {liveEta
+                  ? liveEta.trafficCondition === 'heavy'
+                    ? `Heavy (+${liveEta.trafficDelayMinutes}m)`
+                    : liveEta.trafficCondition === 'moderate'
+                    ? `Moderate (+${liveEta.trafficDelayMinutes}m)`
+                    : 'Clear Highway'
+                  : 'Checking...'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-400 pt-1 border-t border-gray-800/80">
+            <span>
+              Source:{' '}
+              <strong className="text-gray-200">
+                {liveEta?.source === 'google_routes_matrix'
+                  ? 'Google Maps Live Traffic Route Matrix'
+                  : 'GPS Corridor Estimate'}
+              </strong>
+            </span>
+            <span className="font-mono tabular-nums">
+              {liveEta?.calculatedAt
+                ? `Updated ${new Date(liveEta.calculatedAt).toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit'
+                  })}`
+                : 'Awaiting GPS fix'}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Main Map Visualizer + Live Auto-GPS Controls */}
       <div className="space-y-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span className="font-extrabold flex items-center gap-1.5 text-[#171318]">
-            <Radio className={`w-4 h-4 ${autoGpsEnabled ? 'text-emerald-600 animate-pulse' : 'text-[#E83E83]'}`} />
+            <Radio className={`w-4 h-4 ${autoGpsEnabled ? 'text-emerald-600' : 'text-[#E83E83]'}`} />
             <span>Live Navigation &amp; GPS Telemetry</span>
             {lastGpsPingTime && (
               <span className="text-[10px] font-mono text-[#77717A] font-normal">

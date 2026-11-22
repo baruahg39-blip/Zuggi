@@ -15,10 +15,12 @@ import {
   AlertTriangle,
   Sparkles,
   Crosshair,
-  Maximize2
+  Maximize2,
+  Clock
 } from 'lucide-react';
 import { TripLiveTrackingResponse, TripLocationPing, TripStatus, GeofenceZoneConfig } from '../../types';
 import { logisticsStore } from '../../services/store';
+import { calculateLiveDestinationEta, formatArrivalClock } from '../../services/routeMatrixEta';
 import { DEFAULT_GEOFENCE_CONFIG } from '../../utils/geofence';
 import { GeofenceOverlay } from '../maps/GeofenceOverlay';
 import { GeofenceMonitorPanel } from './GeofenceMonitorPanel';
@@ -204,6 +206,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
   );
   const [isLoading, setIsLoading] = useState<boolean>(() => !buildLocalTrackingFallback(tripId, loadId));
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [isRefreshingEta, setIsRefreshingEta] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
   const [syncError, setSyncError] = useState<string | null>(null);
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
@@ -372,14 +375,25 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
 
     const unsub = logisticsStore.subscribe(() => {
       const latestLocal = buildLocalTrackingFallback(tripId, loadId);
-      if (latestLocal?.latest_location) {
-        const localTime = new Date(latestLocal.latest_location.recorded_at).getTime();
+      if (latestLocal) {
+        const localTime = latestLocal.latest_location
+          ? new Date(latestLocal.latest_location.recorded_at).getTime()
+          : 0;
+        const localEtaTime = latestLocal.eta.calculated_at
+          ? new Date(latestLocal.eta.calculated_at).getTime()
+          : 0;
+
         setTrackingData((prev) => {
           if (!prev) return latestLocal;
           const prevTime = prev.latest_location ? new Date(prev.latest_location.recorded_at).getTime() : 0;
+          const prevEtaTime = prev.eta.calculated_at ? new Date(prev.eta.calculated_at).getTime() : 0;
+
           if (localTime > prevTime) {
             applyAnimatedLocation(latestLocal.latest_location);
             return latestLocal;
+          }
+          if (localEtaTime > prevEtaTime) {
+            return { ...prev, eta: latestLocal.eta };
           }
           return prev;
         });
@@ -392,6 +406,46 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     };
   }, [fetchLiveTracking, tripId, loadId, applyAnimatedLocation]);
+
+  // Allow shipper to trigger an on-demand Google Maps Route Matrix ETA refresh from latest truck coordinates
+  const handleShipperRefreshEta = useCallback(async () => {
+    if (!trackingData || isRefreshingEta) return;
+    const originLat = trackingData.latest_location?.lat ?? trackingData.pickup.lat;
+    const originLng = trackingData.latest_location?.lng ?? trackingData.pickup.lng;
+    setIsRefreshingEta(true);
+    try {
+      const computed = await calculateLiveDestinationEta({
+        origin: { lat: originLat, lng: originLng },
+        destination: { lat: trackingData.drop.lat, lng: trackingData.drop.lng },
+        destinationCity: trackingData.drop.city
+      });
+      const targetId = trackingData.trip_id || tripId;
+      logisticsStore.updateBookingLiveEta(targetId, computed);
+
+      const nextEta = {
+        minutes: Math.max(0, Math.round(computed.durationSeconds / 60)),
+        formatted: computed.formattedDuration,
+        distance_remaining_km: computed.distanceKm,
+        eta_iso: computed.etaIso,
+        formatted_arrival_time: computed.formattedArrivalTime,
+        traffic_condition: computed.trafficCondition,
+        traffic_delay_minutes: computed.trafficDelayMinutes,
+        source: computed.source,
+        calculated_at: computed.calculatedAt
+      };
+      setTrackingData((prev) => (prev ? { ...prev, eta: nextEta } : prev));
+
+      fetch(`/trips/${encodeURIComponent(targetId)}/live-eta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nextEta)
+      }).catch(() => {});
+
+      showToast(`Live ETA refreshed: arriving ${computed.formattedArrivalTime} (${computed.formattedDuration})`, 'success');
+    } finally {
+      setIsRefreshingEta(false);
+    }
+  }, [trackingData, tripId, isRefreshingEta]);
 
   const currentStatusIndex = useMemo(() => {
     if (!trackingData) return 0;
@@ -512,6 +566,76 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
         </div>
       ) : null}
 
+      {/* LIVE TRAFFIC-AWARE DESTINATION ETA CARD FOR SHIPPER */}
+      {trackingData && trackingData.status !== 'DELIVERED' && (() => {
+        const arrivalClock =
+          trackingData.eta.formatted_arrival_time ||
+          (trackingData.eta.eta_iso ? formatArrivalClock(trackingData.eta.eta_iso) : null);
+        const trafficCond = trackingData.eta.traffic_condition || 'clear';
+        const delayMins = trackingData.eta.traffic_delay_minutes || 0;
+        const isGoogleMatrix = trackingData.eta.source === 'google_routes_matrix';
+
+        return (
+          <div className="bg-[#171318] text-white p-4 rounded-2xl border border-gray-800 shadow-sm flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3 min-w-[200px]">
+              <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-extrabold uppercase tracking-wider text-gray-300">
+                    Estimated Arrival at {trackingData.drop.city}
+                  </span>
+                  <span className="text-[10px] font-semibold text-emerald-400">
+                    • {isGoogleMatrix ? 'Google Live Traffic' : 'GPS Corridor Estimate'}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-baseline gap-2.5 mt-0.5">
+                  <span className="text-lg sm:text-xl font-black font-mono tabular-nums text-emerald-400">
+                    {arrivalClock || trackingData.eta.formatted}
+                  </span>
+                  <span className="text-xs font-mono tabular-nums text-gray-300">
+                    ({trackingData.eta.formatted} · {trackingData.eta.distance_remaining_km} km left)
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 ml-auto">
+              <div className="text-right text-xs">
+                <span className="block text-[10px] uppercase font-bold text-gray-400">Traffic Condition</span>
+                <span
+                  className={`font-bold ${
+                    trafficCond === 'heavy'
+                      ? 'text-rose-400'
+                      : trafficCond === 'moderate'
+                      ? 'text-amber-300'
+                      : 'text-emerald-400'
+                  }`}
+                >
+                  {trafficCond === 'heavy'
+                    ? `Heavy Traffic (+${delayMins}m)`
+                    : trafficCond === 'moderate'
+                    ? `Moderate Traffic (+${delayMins}m)`
+                    : 'Clear Highway'}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleShipperRefreshEta}
+                disabled={isRefreshingEta}
+                className="min-h-[44px] px-3.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 text-xs font-bold text-gray-100 flex items-center gap-1.5 transition cursor-pointer disabled:opacity-60"
+                title="Recalculate live traffic ETA to destination"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingEta ? 'animate-spin text-[#E83E83]' : ''}`} />
+                <span>{isRefreshingEta ? 'Updating...' : 'Update ETA'}</span>
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* MAIN TRACKING MAP CONTAINER */}
       <div className="relative w-full h-[460px] md:h-[540px] rounded-3xl overflow-hidden border border-gray-200 bg-[#E8EEF4] shadow-lg flex flex-col">
         {/* Floating Top Telemetry HUD */}
@@ -540,14 +664,21 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
           <div className="bg-[#171318]/90 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-gray-700 shadow-xl pointer-events-auto flex items-center gap-4 text-white text-xs">
             <div>
               <span className="text-gray-400 block text-[10px] uppercase font-bold">Remaining</span>
-              <span className="text-[#E83E83] font-black font-mono text-sm">
+              <span className="text-[#E83E83] font-black font-mono tabular-nums text-sm">
                 {trackingData?.eta.distance_remaining_km || 0} km
               </span>
             </div>
             <div className="border-l border-gray-700 pl-3">
-              <span className="text-gray-400 block text-[10px] uppercase font-bold">Est. Transit Time</span>
-              <span className="text-white font-black font-mono text-sm">
-                ~{trackingData?.eta.formatted || 'Calculating...'}
+              <span className="text-gray-400 block text-[10px] uppercase font-bold">Est. Arrival</span>
+              <span className="text-emerald-400 font-black font-mono tabular-nums text-sm">
+                {trackingData?.eta.formatted_arrival_time ||
+                  (trackingData?.eta.eta_iso ? formatArrivalClock(trackingData.eta.eta_iso) : trackingData?.eta.formatted || 'Calculating...')}
+              </span>
+            </div>
+            <div className="border-l border-gray-700 pl-3 hidden sm:block">
+              <span className="text-gray-400 block text-[10px] uppercase font-bold">Drive Left</span>
+              <span className="text-white font-black font-mono tabular-nums text-sm">
+                {trackingData?.eta.formatted || 'Calculating...'}
               </span>
             </div>
             <div className="border-l border-gray-700 pl-3 flex items-center gap-1.5">

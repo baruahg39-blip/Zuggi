@@ -182,6 +182,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   const [geofenceState, setGeofenceState] = useState<GeofenceZoneState>(() =>
     logisticsStore.getGeofenceState(bookingId)
   );
+  const [liveEta, setLiveEta] = useState(() => logisticsStore.getBookingById(bookingId)?.liveEta || null);
 
   // Sync live location state from store (resetting cleanly if bookingId changes)
   useEffect(() => {
@@ -191,6 +192,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
       setGpsHistory(logisticsStore.getLocationPings(bookingId));
       setGeofenceConfig(logisticsStore.getGeofenceConfig(bookingId));
       setGeofenceState(logisticsStore.getGeofenceState(bookingId));
+      setLiveEta(logisticsStore.getBookingById(bookingId)?.liveEta || null);
     };
     update();
     const unsub = logisticsStore.subscribe(update);
@@ -352,12 +354,16 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
         <div className="bg-[#171318]/95 backdrop-blur-md px-3.5 py-2.5 rounded-2xl border border-gray-700/80 shadow-lg pointer-events-auto flex items-center gap-4 text-xs">
           <div>
             <span className="text-gray-400 block text-[10px] uppercase font-bold">Remaining Dist</span>
-            <span className="text-[#E83E83] font-black font-mono text-sm">{remainingKm} km</span>
+            <span className="text-[#E83E83] font-black font-mono tabular-nums text-sm">
+              {liveEta ? `${liveEta.distanceKm} km` : `${remainingKm} km`}
+            </span>
           </div>
           <div className="border-l border-gray-800 pl-3">
             <span className="text-gray-400 block text-[10px] uppercase font-bold">Est. Arrival</span>
-            <span className="text-white font-black font-mono text-sm">
-              ~{Math.round((remainingKm / 42) * 10) / 10} hrs
+            <span className="text-white font-black font-mono tabular-nums text-sm">
+              {liveEta
+                ? `${liveEta.formattedArrivalTime} (${liveEta.formattedDuration})`
+                : `~${Math.round((remainingKm / 42) * 10) / 10} hrs`}
             </span>
           </div>
           <div className="border-l border-gray-800 pl-3 hidden sm:block">

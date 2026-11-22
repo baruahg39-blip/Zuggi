@@ -450,12 +450,28 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
 
             <div className="grid grid-cols-3 gap-2 p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs">
               <div>
-                <span className="text-slate-400 block text-[10px]">Estimated Distance</span>
-                <span className="text-amber-400 font-bold font-mono text-sm">{load.estimatedDistanceKm} km</span>
+                <span className="text-slate-400 block text-[10px]">
+                  {booking?.liveEta && load.status !== 'completed' && load.status !== 'delivered'
+                    ? 'Live Distance Left'
+                    : 'Estimated Distance'}
+                </span>
+                <span className="text-amber-400 font-bold font-mono tabular-nums text-sm">
+                  {booking?.liveEta && load.status !== 'completed' && load.status !== 'delivered'
+                    ? `${booking.liveEta.distanceKm} km`
+                    : `${load.estimatedDistanceKm} km`}
+                </span>
               </div>
               <div>
-                <span className="text-slate-400 block text-[10px]">Estimated Duration</span>
-                <span className="text-slate-200 font-bold font-mono text-sm">{load.estimatedDurationHours} hrs</span>
+                <span className="text-slate-400 block text-[10px]">
+                  {booking?.liveEta && load.status !== 'completed' && load.status !== 'delivered'
+                    ? 'Live Destination ETA'
+                    : 'Estimated Duration'}
+                </span>
+                <span className="text-emerald-400 font-bold font-mono tabular-nums text-sm">
+                  {booking?.liveEta && load.status !== 'completed' && load.status !== 'delivered'
+                    ? `${booking.liveEta.formattedArrivalTime} (${booking.liveEta.formattedDuration})`
+                    : `${load.estimatedDurationHours} hrs`}
+                </span>
               </div>
               <div>
                 <span className="text-slate-400 block text-[10px]">Pickup Date</span>

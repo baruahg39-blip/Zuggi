@@ -227,11 +227,29 @@ export function buildLocalTrackingFallback(
       vehicle_type: vehicle?.category || load?.requiredVehicleCategory || 'commercial_truck',
       gps_type: 'MOBILE_APP'
     },
-    eta: {
-      minutes: remainingMinutes,
-      formatted: formattedEta,
-      distance_remaining_km: remainingKm
-    },
+    eta: (() => {
+      if (booking?.liveEta && tripStatus !== 'DELIVERED') {
+        return {
+          minutes: Math.max(0, Math.round(booking.liveEta.durationSeconds / 60)),
+          formatted: booking.liveEta.formattedDuration,
+          distance_remaining_km: booking.liveEta.distanceKm,
+          eta_iso: booking.liveEta.etaIso,
+          formatted_arrival_time: booking.liveEta.formattedArrivalTime,
+          traffic_condition: booking.liveEta.trafficCondition,
+          traffic_delay_minutes: booking.liveEta.trafficDelayMinutes,
+          source: booking.liveEta.source,
+          calculated_at: booking.liveEta.calculatedAt
+        };
+      }
+      return {
+        minutes: remainingMinutes,
+        formatted: formattedEta,
+        distance_remaining_km: remainingKm,
+        eta_iso: new Date(Date.now() + remainingMinutes * 60 * 1000).toISOString(),
+        source: 'gps_estimate' as const,
+        calculated_at: latestPing.recorded_at
+      };
+    })(),
     tracking_source: 'MOBILE_APP',
     offline_buffer_status: {
       is_live: ageSeconds <= 180,

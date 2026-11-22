@@ -1920,6 +1920,18 @@ class LogisticsStore {
     }
   }
 
+  public updateBookingLiveEta(bookingId: string, liveEta: Booking['liveEta']) {
+    if (!liveEta) return;
+    const bookings = this.getBookings();
+    const b = bookings.find((item) => item.id === bookingId);
+    if (b) {
+      b.liveEta = liveEta;
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+      this.syncToSupabase('vs_bookings', b);
+      this.triggerChange();
+    }
+  }
+
   public assignDriverAndVehicleToBooking(
     bookingId: string,
     vehicleId: string,

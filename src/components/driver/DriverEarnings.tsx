@@ -10,9 +10,13 @@ import {
   FileText,
   ExternalLink,
   FileSpreadsheet,
-  History
+  History,
+  Smartphone,
+  Copy,
+  Check,
+  AlertCircle
 } from 'lucide-react';
-import { Settlement, User } from '../../types';
+import { Booking, BusinessPaymentSettings, Settlement, User } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { exportDriverEarningsToCsv } from '../../utils/csvExport';
 
@@ -28,7 +32,13 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
   onNavigateToHistory
 }) => {
   const [settlements, setSettlements] = useState<Settlement[]>([]);
-  const [driverBookings, setDriverBookings] = useState<any[]>([]);
+  const [driverBookings, setDriverBookings] = useState<Booking[]>([]);
+  const [businessPayment, setBusinessPayment] = useState<BusinessPaymentSettings>(() =>
+    logisticsStore.getBusinessPaymentSettings()
+  );
+  const [commissionUtrs, setCommissionUtrs] = useState<Record<string, string>>({});
+  const [commissionFeedback, setCommissionFeedback] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [copiedUpi, setCopiedUpi] = useState<boolean>(false);
   const [liveUser, setLiveUser] = useState<User>(currentUser);
   const [editingBank, setEditingBank] = useState<boolean>(false);
   const [bankForm, setBankForm] = useState({
@@ -66,6 +76,7 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
       );
       setDriverBookings(myBookings);
       setSettlements(mySettlements);
+      setBusinessPayment(logisticsStore.getBusinessPaymentSettings());
     };
     update();
     const unsub = logisticsStore.subscribe(update);
@@ -85,8 +96,60 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
   );
   const disputedHoldAmount = activeDisputes.reduce((sum, d) => sum + d.heldAmountInr, 0);
 
-  const stage1Settled = settlements.filter((s) => s.settlementRef.includes('SPLIT1')).reduce((sum, s) => sum + s.netDisbursed, 0);
-  const stage2Settled = settlements.filter((s) => s.settlementRef.includes('SPLIT2')).reduce((sum, s) => sum + s.netDisbursed, 0);
+  const stage1Settled = settlements
+    .filter((s) => s.settlementRef.includes('SPLIT1'))
+    .reduce((sum, s) => sum + s.netDisbursed, 0);
+  const stage2Settled = settlements
+    .filter((s) => s.settlementRef.includes('SPLIT2'))
+    .reduce((sum, s) => sum + s.netDisbursed, 0);
+
+  const pendingPayoutsDue = driverBookings.reduce((sum, b) => {
+    const net = Number(b.netDriverPayableInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.95);
+    let due = 0;
+    if (
+      b.paymentAdvanceStatus === 'paid' &&
+      b.advancePaymentMethod !== 'pay_driver_direct' &&
+      b.payoutStage1Status !== 'settled'
+    ) {
+      due += Number(b.driverFirstPayoutInr) || Math.round(net * 0.90);
+    }
+    if (
+      b.paymentBalanceStatus === 'paid' &&
+      b.balancePaymentMethod !== 'pay_driver_direct' &&
+      b.payoutStage2Status !== 'settled' &&
+      b.payoutStage2Status !== 'disputed_on_hold'
+    ) {
+      due += Number(b.driverFinalPayoutInr) || Math.round(net * 0.10);
+    }
+    return sum + due;
+  }, 0);
+
+  const cashCommissionBookings = driverBookings.filter(
+    (b) =>
+      (Number(b.driverCommissionDueInr) || 0) > 0 &&
+      (b.driverCommissionStatus === 'due' || b.driverCommissionStatus === 'verifying_utr')
+  );
+  const totalCashCommissionDue = cashCommissionBookings.reduce(
+    (sum, b) => sum + (Number(b.driverCommissionDueInr) || 0),
+    0
+  );
+
+  const handleSubmitCommissionUtr = (bookingId: string) => {
+    const utr = (commissionUtrs[bookingId] || '').trim();
+    const res = logisticsStore.submitDriverCommissionPayment(bookingId, currentUser.id, utr);
+    setCommissionFeedback({ text: res.message, isError: !res.success });
+    if (res.success) {
+      setCommissionUtrs((prev) => ({ ...prev, [bookingId]: '' }));
+    }
+    setTimeout(() => setCommissionFeedback(null), 5000);
+  };
+
+  const handleCopyZuggiUpi = () => {
+    if (!businessPayment.upiId) return;
+    navigator.clipboard?.writeText(businessPayment.upiId).catch(() => {});
+    setCopiedUpi(true);
+    setTimeout(() => setCopiedUpi(false), 1800);
+  };
 
   const handleExportCsv = () => {
     const bookings = logisticsStore.getBookings();
@@ -137,79 +200,221 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
       <div>
         <div className="flex flex-wrap items-center gap-2">
           <IndianRupee className="w-5 h-5 text-[#E83E83]" />
-          <h2 className="text-lg sm:text-xl font-extrabold text-[#171318]">Fleet Net Earnings &amp; Cashfree Settlements</h2>
-          <span className="px-2.5 py-0.5 rounded-full bg-[#FFF0F6] text-[#E83E83] text-[10px] font-bold border border-[#E83E83]/25">
-            Easy Split Enabled
-          </span>
+          <h2 className="text-lg sm:text-xl font-extrabold text-[#171318]">Fleet Earnings &amp; Payouts</h2>
         </div>
         <p className="text-xs text-[#77717A] mt-1">
-          Automated 2-stage vendor settlements: 90% released on verified pickup, remaining 10% released post-delivery and POD clearance.
+          Simple 2-step payouts: 90% at pickup and 10% after delivery — paid to your saved UPI / Bank account or collected directly from the customer.
         </p>
       </div>
 
       {/* Financial Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
-          <span className="text-slate-400 text-xs block">Net Disbursed Earnings</span>
-          <span className="text-2xl font-extrabold text-emerald-400 font-mono">
+          <span className="text-slate-400 text-xs block">Total Received / Settled</span>
+          <span className="text-2xl font-extrabold text-emerald-400 font-mono tabular-nums">
             ₹{totalDisbursed.toLocaleString('en-IN')}
           </span>
-          <span className="text-[10px] text-slate-500 block">Bank account credited</span>
+          <span className="text-[10px] text-slate-500 block">Bank, UPI &amp; direct on-site</span>
         </div>
 
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
-          <span className="text-slate-400 text-xs block">Total Agreed Fares</span>
-          <span className="text-2xl font-extrabold text-white font-mono">
-            ₹{totalGross.toLocaleString('en-IN')}
+          <span className="text-slate-400 text-xs block">Pending Payout Due</span>
+          <span className="text-2xl font-extrabold text-sky-400 font-mono tabular-nums">
+            ₹{pendingPayoutsDue.toLocaleString('en-IN')}
           </span>
-          <span className="text-[10px] text-slate-500 block">Total cargo value hauled</span>
+          <span className="text-[10px] text-slate-500 block">Verified by customer · queued by Admin</span>
         </div>
 
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-slate-400 text-xs block">Zuggi Fee (5%)</span>
-          <span className="text-2xl font-extrabold text-amber-400 font-mono">
+          <span className="text-2xl font-extrabold text-amber-400 font-mono tabular-nums">
             ₹{totalCommission.toLocaleString('en-IN')}
           </span>
-          <span className="text-[10px] text-slate-500 block">Platform commission deducted</span>
+          <span className="text-[10px] text-slate-500 block">Platform fee across settled trips</span>
         </div>
 
         <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
           <span className="text-slate-400 text-xs block">Net Fleet Rate (95%)</span>
-          <span className="text-2xl font-extrabold text-teal-400 font-mono">
+          <span className="text-2xl font-extrabold text-teal-400 font-mono tabular-nums">
             ₹{totalNetFleetEarnings.toLocaleString('en-IN')}
           </span>
-          <span className="text-[10px] text-slate-500 block">After 5% commission</span>
+          <span className="text-[10px] text-slate-500 block">Gross fares: ₹{totalGross.toLocaleString('en-IN')}</span>
         </div>
       </div>
 
-      {/* 2-Stage Cashfree Payout Lifecycle Card */}
+      {/* 2-Step Payout Breakdown */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
-          <span className="text-[10px] uppercase font-bold text-slate-400">Stage 1 Payouts (Pickup - 90%)</span>
-          <div className="text-lg font-bold text-emerald-400 font-mono">
-            ₹{(stage1Settled || Math.round(totalDisbursed * 0.90)).toLocaleString('en-IN')}
+          <span className="text-[10px] uppercase font-bold text-slate-400">Pickup Payouts (90%)</span>
+          <div className="text-lg font-bold text-emerald-400 font-mono tabular-nums">
+            ₹{stage1Settled.toLocaleString('en-IN')}
           </div>
-          <span className="text-[10px] text-slate-500 block">Disbursed on verified pickup</span>
+          <span className="text-[10px] text-slate-500 block">Settled for pickup stage</span>
         </div>
 
         <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
-          <span className="text-[10px] uppercase font-bold text-slate-400">Stage 2 Payouts (POD - 10%)</span>
-          <div className="text-lg font-bold text-slate-200 font-mono">
-            ₹{(stage2Settled || Math.round(totalDisbursed * 0.10)).toLocaleString('en-IN')}
+          <span className="text-[10px] uppercase font-bold text-slate-400">Final Delivery Payouts (10%)</span>
+          <div className="text-lg font-bold text-slate-200 font-mono tabular-nums">
+            ₹{stage2Settled.toLocaleString('en-IN')}
           </div>
-          <span className="text-[10px] text-slate-500 block">Disbursed post delivery clearance</span>
+          <span className="text-[10px] text-slate-500 block">Settled after POD confirmation</span>
         </div>
 
         <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1">
-          <span className="text-[10px] uppercase font-bold text-slate-400">Held in Escrow / Disputes</span>
-          <div className={`text-lg font-bold font-mono ${disputedHoldAmount > 0 ? 'text-rose-400' : 'text-slate-500'}`}>
-            ₹{disputedHoldAmount.toLocaleString('en-IN')}
+          <span className="text-[10px] uppercase font-bold text-slate-400">Cash Trip Commission Due</span>
+          <div className={`text-lg font-bold font-mono tabular-nums ${totalCashCommissionDue > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+            ₹{totalCashCommissionDue.toLocaleString('en-IN')}
           </div>
           <span className="text-[10px] text-slate-500 block">
-            {disputedHoldAmount > 0 ? `${activeDisputes.length} active customer dispute(s)` : 'Zero active disputes'}
+            {totalCashCommissionDue > 0
+              ? `${cashCommissionBookings.length} cash trip(s) · 5% Zuggi fee`
+              : disputedHoldAmount > 0
+              ? `Dispute hold: ₹${disputedHoldAmount.toLocaleString('en-IN')}`
+              : 'All commission cleared'}
           </span>
         </div>
       </div>
+
+      {/* ZUGGI 5% CASH-TRIP COMMISSION SETTLEMENT PANEL */}
+      {cashCommissionBookings.length > 0 && (
+        <div className="p-5 rounded-2xl bg-slate-900 border border-amber-500/40 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-start justify-between gap-3 pb-3 border-b border-slate-800">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <IndianRupee className="w-4 h-4 text-amber-400" />
+                <span>Zuggi 5% Commission Due (Cash / Direct Trips)</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Since the customer paid you directly in cash/UPI, remit Zuggi&apos;s 5% fee via UPI/Bank below or ask Admin to adjust it from your next online trip payout.
+              </p>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] text-slate-400 uppercase block">Total Due</span>
+              <span className="text-xl font-black text-amber-400 font-mono tabular-nums">
+                ₹{totalCashCommissionDue.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+
+          {commissionFeedback && (
+            <div
+              className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                commissionFeedback.isError
+                  ? 'bg-rose-950/70 border-rose-700 text-rose-200'
+                  : 'bg-emerald-950/70 border-emerald-700 text-emerald-200'
+              }`}
+            >
+              {commissionFeedback.isError ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>{commissionFeedback.text}</span>
+            </div>
+          )}
+
+          {businessPayment.upiId && (
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div>
+                <span className="text-[10px] text-slate-400 uppercase block">Pay Commission to {businessPayment.businessName}</span>
+                <span className="font-mono font-bold text-emerald-400">{businessPayment.upiId}</span>
+                {businessPayment.accountNumber && businessPayment.ifscCode && (
+                  <span className="block text-[11px] text-slate-400 font-mono mt-0.5">
+                    Bank: {businessPayment.bankName || 'Account'} · A/C {businessPayment.accountNumber} · IFSC {businessPayment.ifscCode}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyZuggiUpi}
+                className="min-h-[36px] px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+              >
+                {copiedUpi ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedUpi ? 'Copied UPI' : 'Copy UPI ID'}</span>
+              </button>
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {cashCommissionBookings.map((b) => {
+              const dueAmt = Number(b.driverCommissionDueInr) || 0;
+              const isVerifying = b.driverCommissionStatus === 'verifying_utr';
+              const payLink = businessPayment.upiId
+                ? `upi://pay?pa=${encodeURIComponent(businessPayment.upiId)}&pn=${encodeURIComponent(
+                    businessPayment.businessName || 'Zuggi Freight Logistics'
+                  )}&am=${dueAmt}&cu=INR&tn=${encodeURIComponent(`Zuggi 5% Commission ${b.id}`)}`
+                : '';
+
+              return (
+                <div key={b.id} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5 text-xs">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <span className="font-mono font-bold text-white">#{b.id}</span>
+                      <span className="text-slate-300 font-semibold ml-2">
+                        {b.pickup.city} → {b.delivery.city}
+                      </span>
+                      <span className="block text-[11px] text-slate-400 mt-0.5">
+                        Agreed Fare: ₹{(Number(b.totalAgreedAmountInr) || 0).toLocaleString('en-IN')} · 5% Fee Due: ₹{dueAmt.toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono tabular-nums text-base font-black text-amber-400">
+                        ₹{dueAmt.toLocaleString('en-IN')}
+                      </span>
+                      {payLink && !isVerifying && (
+                        <a
+                          href={payLink}
+                          className="min-h-[34px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1"
+                        >
+                          <Smartphone className="w-3.5 h-3.5" />
+                          <span>Pay via UPI</span>
+                        </a>
+                      )}
+                    </div>
+                  </div>
+
+                  {b.driverCommissionRejectionNote && !isVerifying && (
+                    <div className="p-2 rounded-lg bg-rose-950/60 border border-rose-800 text-[11px] text-rose-200">
+                      <strong>Previous UTR rejected:</strong> {b.driverCommissionRejectionNote}
+                    </div>
+                  )}
+
+                  {isVerifying ? (
+                    <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-700/40 text-amber-200 text-[11px] flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>
+                        UTR <strong className="font-mono text-white">{b.driverCommissionUtr}</strong> submitted — waiting for Zuggi Admin bank verification.
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={commissionUtrs[b.id] || ''}
+                        onChange={(e) =>
+                          setCommissionUtrs((prev) => ({
+                            ...prev,
+                            [b.id]: e.target.value.toUpperCase()
+                          }))
+                        }
+                        placeholder="Enter 12-digit UPI / Bank UTR after paying Zuggi"
+                        className="flex-1 min-w-[200px] min-h-[40px] px-3 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 font-mono uppercase focus:outline-none focus:border-amber-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleSubmitCommissionUtr(b.id)}
+                        className="min-h-[40px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold cursor-pointer transition"
+                      >
+                        Submit Commission UTR
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Real Driver Bank / UPI Payout Account */}
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">

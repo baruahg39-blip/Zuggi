@@ -30,6 +30,8 @@ import { exportCustomerBookingsToCsv } from '../../utils/csvExport';
 import { ShipperLiveTracker } from '../tracking/ShipperLiveTracker';
 import { DriverGpsSimulatorModal } from '../tracking/DriverGpsSimulatorModal';
 import { LocationAutocompleteInput, SelectedPlace } from '../shared/LocationAutocompleteInput';
+import { CashfreeEscrowModal } from '../payments/CashfreeEscrowModal';
+import { PaymentReceiptModal } from '../payments/PaymentReceiptModal';
 
 interface CustomerHomeProps {
   currentUser: User;
@@ -66,6 +68,12 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const [showDriverSimulator, setShowDriverSimulator] = useState<boolean>(false);
   const [simulatorTripId, setSimulatorTripId] = useState<string>('trip_demo_01');
   const [simulatorToken, setSimulatorToken] = useState<string>('trk_sec_993821739182371928371923');
+  const [paymentModalTarget, setPaymentModalTarget] = useState<{
+    booking: Booking;
+    stage: 'advance_90' | 'balance_10';
+  } | null>(null);
+  const [receiptBooking, setReceiptBooking] = useState<Booking | null>(null);
+  const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
 
   useEffect(() => {
     const update = () => {
@@ -115,16 +123,25 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   );
 
   const financialStats = useMemo(() => {
-    const completedBookings = bookings.filter((b) => b.status === 'completed' || b.status === 'delivered');
-    const totalSpend = bookings
-      .filter((b) => b.status !== 'cancelled')
-      .reduce((sum, b) => sum + (b.totalAgreedAmountInr || 0), 0);
-    const activeEscrow = bookings
-      .filter((b) => b.status !== 'completed' && b.status !== 'cancelled')
-      .reduce((sum, b) => sum + (b.totalAgreedAmountInr || 0), 0);
+    const validBookings = bookings.filter((b) => b.status !== 'cancelled');
+    const completedBookings = validBookings.filter((b) => b.status === 'completed' || b.status === 'delivered');
+    const totalSpend = validBookings.reduce((sum, b) => sum + (Number(b.totalAgreedAmountInr) || 0), 0);
+    const totalPaid = validBookings.reduce((sum, b) => {
+      const total = Number(b.totalAgreedAmountInr) || 0;
+      let paid = 0;
+      if (b.paymentAdvanceStatus === 'paid') {
+        paid += Number(b.customerAdvanceAmountInr) || Math.round(total * 0.90);
+      }
+      if (b.paymentBalanceStatus === 'paid') {
+        paid += Number(b.customerBalanceAmountInr) || Math.round(total * 0.10);
+      }
+      return sum + paid;
+    }, 0);
+    const totalDue = Math.max(0, totalSpend - totalPaid);
     return {
       totalSpend,
-      activeEscrow,
+      totalPaid,
+      totalDue,
       completedCount: completedBookings.length
     };
   }, [bookings]);
@@ -684,35 +701,188 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       {/* TAB: PAYMENTS */}
       {activeTab === 'payments' && (
         <div className="space-y-6">
+          {paymentNotice && (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{paymentNotice}</span>
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-2">
-              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Total Freight Spend</span>
-              <span className="text-3xl font-black text-[#171318]">
-                ₹{financialStats.totalSpend.toLocaleString('en-IN')}
+            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-1.5">
+              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Verified Paid</span>
+              <span className="text-3xl font-black text-[#16A36A] font-mono tabular-nums block">
+                ₹{financialStats.totalPaid.toLocaleString('en-IN')}
               </span>
               <p className="text-xs text-[#77717A]">
-                Across {bookings.length} booked ({financialStats.completedCount} completed) consignments
+                Out of ₹{financialStats.totalSpend.toLocaleString('en-IN')} across {bookings.length} booking(s)
               </p>
             </div>
 
-            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-2">
-              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Active in Escrow</span>
-              <span className="text-3xl font-black text-[#E83E83]">
-                ₹{financialStats.activeEscrow.toLocaleString('en-IN')}
+            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-1.5">
+              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Pending / Due</span>
+              <span className="text-3xl font-black text-[#E83E83] font-mono tabular-nums block">
+                ₹{financialStats.totalDue.toLocaleString('en-IN')}
               </span>
-              <p className="text-xs text-[#77717A]">Protected until delivery verified</p>
+              <p className="text-xs text-[#77717A]">90% advance before pickup · 10% on delivery</p>
             </div>
 
-            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-2">
-              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Payment Gateway</span>
-              <span className="text-xl font-black text-[#16A36A] flex items-center gap-1.5">
-                <ShieldCheck className="w-5 h-5" />
-                <span>Cashfree Escrow</span>
+            <div className="bg-white rounded-3xl p-6 border border-gray-200 shadow-sm space-y-1.5">
+              <span className="text-xs font-bold text-[#77717A] uppercase tracking-wider block">Payment Options</span>
+              <span className="text-lg font-black text-[#171318] flex items-center gap-1.5">
+                <ShieldCheck className="w-5 h-5 text-[#16A36A]" />
+                <span>UPI · Bank · On-Site</span>
               </span>
-              <p className="text-xs text-[#77717A]">UPI, NetBanking, NEFT & Corporate Cards</p>
+              <p className="text-xs text-[#77717A]">Pay Zuggi via UPI/NEFT or pay the driver directly</p>
             </div>
           </div>
+
+          {/* Booking Payment List */}
+          <div className="bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-extrabold text-[#171318]">Booking Payments</h3>
+                <p className="text-xs text-[#77717A]">Pay 90% advance, settle 10% on delivery, or view receipts</p>
+              </div>
+              <span className="text-xs font-semibold text-[#77717A]">{bookings.length} Booking(s)</span>
+            </div>
+
+            {bookings.length === 0 ? (
+              <div className="p-8 text-center text-xs text-[#77717A]">
+                No booked shipments yet. Once you accept a transporter quote, your payment steps will appear here.
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {bookings.map((b) => {
+                  const advAmt = Number(b.customerAdvanceAmountInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.90);
+                  const balAmt = Number(b.customerBalanceAmountInr) || Math.round((Number(b.totalAgreedAmountInr) || 0) * 0.10);
+                  const advLabel =
+                    b.paymentAdvanceStatus === 'paid'
+                      ? 'Paid'
+                      : b.paymentAdvanceStatus === 'processing'
+                      ? b.advancePaymentMethod === 'pay_driver_direct'
+                        ? 'Pay Driver at Pickup'
+                        : 'Verifying UTR'
+                      : 'Unpaid';
+                  const balLabel =
+                    b.paymentBalanceStatus === 'paid'
+                      ? 'Paid'
+                      : b.paymentBalanceStatus === 'processing'
+                      ? b.balancePaymentMethod === 'pay_driver_direct'
+                        ? 'Pay Driver at Delivery'
+                        : 'Verifying UTR'
+                      : 'On Delivery';
+
+                  return (
+                    <div key={b.id} className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-xs font-bold text-[#77717A]">#{b.id}</span>
+                          <span className="text-sm font-extrabold text-[#171318]">
+                            {b.pickup.city} → {b.delivery.city}
+                          </span>
+                        </div>
+                        <p className="text-xs text-[#77717A]">
+                          {b.goodsDescription} · Total Fare:{' '}
+                          <strong className="text-[#171318] font-mono tabular-nums">
+                            ₹{(Number(b.totalAgreedAmountInr) || 0).toLocaleString('en-IN')}
+                          </strong>
+                        </p>
+                        <div className="flex flex-wrap items-center gap-4 text-xs pt-0.5">
+                          <span className="text-[#77717A]">
+                            Advance (90%):{' '}
+                            <strong
+                              className={
+                                b.paymentAdvanceStatus === 'paid'
+                                  ? 'text-[#16A36A]'
+                                  : b.paymentAdvanceStatus === 'processing'
+                                  ? 'text-amber-600'
+                                  : 'text-[#E83E83]'
+                              }
+                            >
+                              ₹{advAmt.toLocaleString('en-IN')} ({advLabel})
+                            </strong>
+                          </span>
+                          <span className="text-[#77717A]">
+                            Balance (10%):{' '}
+                            <strong
+                              className={
+                                b.paymentBalanceStatus === 'paid'
+                                  ? 'text-[#16A36A]'
+                                  : b.paymentBalanceStatus === 'processing'
+                                  ? 'text-amber-600'
+                                  : 'text-[#171318]'
+                              }
+                            >
+                              ₹{balAmt.toLocaleString('en-IN')} ({balLabel})
+                            </strong>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {b.paymentAdvanceStatus !== 'paid' && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentModalTarget({ booking: b, stage: 'advance_90' })}
+                            className="min-h-[40px] px-4 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs font-bold transition cursor-pointer"
+                          >
+                            {b.paymentAdvanceStatus === 'processing' ? 'Update Advance' : `Pay Advance (₹${advAmt.toLocaleString('en-IN')})`}
+                          </button>
+                        )}
+                        {b.paymentAdvanceStatus === 'paid' && b.paymentBalanceStatus !== 'paid' && (
+                          <button
+                            type="button"
+                            onClick={() => setPaymentModalTarget({ booking: b, stage: 'balance_10' })}
+                            className="min-h-[40px] px-4 rounded-xl bg-[#171318] hover:bg-black text-white text-xs font-bold transition cursor-pointer"
+                          >
+                            {b.paymentBalanceStatus === 'processing' ? 'Update Balance' : `Pay Balance (₹${balAmt.toLocaleString('en-IN')})`}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setReceiptBooking(b)}
+                          className="min-h-[40px] px-3.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-[#171318] text-xs font-semibold transition cursor-pointer"
+                        >
+                          Receipt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onViewInvoice(b.id)}
+                          className="min-h-[40px] px-3.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-[#171318] text-xs font-semibold transition cursor-pointer"
+                        >
+                          GST Invoice
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+      )}
+
+      {/* Payment Modal from Payments Tab */}
+      {paymentModalTarget && (
+        <CashfreeEscrowModal
+          booking={paymentModalTarget.booking}
+          stage={paymentModalTarget.stage}
+          currentUser={currentUser}
+          onClose={() => setPaymentModalTarget(null)}
+          onPaymentSuccess={(msg) => {
+            setPaymentNotice(msg);
+            setTimeout(() => setPaymentNotice(null), 6000);
+          }}
+        />
+      )}
+
+      {/* Receipt Modal from Payments Tab */}
+      {receiptBooking && (
+        <PaymentReceiptModal
+          booking={receiptBooking}
+          onClose={() => setReceiptBooking(null)}
+        />
       )}
 
       {/* Driver GPS Simulator Modal */}

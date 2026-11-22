@@ -1,19 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import {
   ShieldCheck,
-  Lock,
   CheckCircle2,
   X,
   CreditCard,
   Smartphone,
   Banknote,
+  Building2,
   AlertCircle,
   ArrowRight,
   Info,
   Copy,
-  Check
+  Check,
+  Clock
 } from 'lucide-react';
-import { Booking, User } from '../../types';
+import { Booking, BusinessPaymentSettings, User } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { cashfreeClient, CashfreeGatewayConfig } from '../../services/cashfreeClient';
 
@@ -25,6 +26,8 @@ interface CashfreeEscrowModalProps {
   onPaymentSuccess: (message: string) => void;
 }
 
+type PaymentTab = 'upi' | 'pay_driver_direct' | 'bank_transfer' | 'online_gateway';
+
 export const CashfreeEscrowModal: React.FC<CashfreeEscrowModalProps> = ({
   booking,
   stage,
@@ -32,15 +35,25 @@ export const CashfreeEscrowModal: React.FC<CashfreeEscrowModalProps> = ({
   onClose,
   onPaymentSuccess
 }) => {
-  const [selectedMethod, setSelectedMethod] = useState<'direct_upi' | 'pay_on_site' | 'online_gateway'>('direct_upi');
+  const [businessSettings, setBusinessSettings] = useState<BusinessPaymentSettings>(() =>
+    logisticsStore.getBusinessPaymentSettings()
+  );
+  const [selectedMethod, setSelectedMethod] = useState<PaymentTab>(() => {
+    const cfg = logisticsStore.getBusinessPaymentSettings();
+    return cfg.upiId ? 'upi' : 'pay_driver_direct';
+  });
   const [utrReference, setUtrReference] = useState<string>('');
-  const [copiedUpi, setCopiedUpi] = useState<boolean>(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [gatewayConfig, setGatewayConfig] = useState<CashfreeGatewayConfig | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     cashfreeClient.getConfig().then(setGatewayConfig);
+    const unsub = logisticsStore.subscribe(() => {
+      setBusinessSettings(logisticsStore.getBusinessPaymentSettings());
+    });
+    return unsub;
   }, []);
 
   const isAdvance = stage === 'advance_90';
@@ -52,349 +65,477 @@ export const CashfreeEscrowModal: React.FC<CashfreeEscrowModalProps> = ({
   const platformCommission = Number(booking.platformCommissionInr) || Math.round(totalAgreedFare * 0.05);
   const netFleetEarnings = Number(booking.netDriverPayableInr) || Math.max(0, totalAgreedFare - platformCommission);
 
-  // Use assigned driver's verified UPI if available, else Zuggi's primary merchant UPI
-  const driverUser = logisticsStore.getUserById(booking.driverId);
-  const merchantUpiId =
-    (import.meta as any).env?.VITE_ZUGGI_MERCHANT_UPI ||
-    driverUser?.bankDetails?.upiId ||
-    'zuggi.freight@okaxis';
-  const merchantName = (import.meta as any).env?.VITE_ZUGGI_MERCHANT_NAME || 'Zuggi Freight Logistics';
+  const hasBusinessUpi = Boolean(businessSettings.upiId && businessSettings.upiId.includes('@'));
+  const hasBusinessBank = Boolean(businessSettings.accountNumber && businessSettings.ifscCode);
+  const isLiveGatewayReady = gatewayConfig?.environment === 'PRODUCTION' && gatewayConfig?.isConfigured;
 
-  const upiDeepLink = `upi://pay?pa=${encodeURIComponent(merchantUpiId)}&pn=${encodeURIComponent(
-    merchantName
-  )}&am=${amountToPay}&cu=INR&tn=${encodeURIComponent(`Zuggi Booking ${booking.id} ${isAdvance ? 'Advance' : 'Balance'}`)}`;
+  const rejectionNote = isAdvance ? booking.advanceRejectionNote : booking.balanceRejectionNote;
 
-  const handleCopyUpi = () => {
-    navigator.clipboard?.writeText(merchantUpiId).catch(() => {});
-    setCopiedUpi(true);
-    setTimeout(() => setCopiedUpi(false), 2000);
+  const upiDeepLink = hasBusinessUpi
+    ? `upi://pay?pa=${encodeURIComponent(businessSettings.upiId)}&pn=${encodeURIComponent(
+        businessSettings.businessName || 'Zuggi Freight Logistics'
+      )}&am=${amountToPay}&cu=INR&tn=${encodeURIComponent(
+        `Zuggi ${booking.id} ${isAdvance ? 'Advance' : 'Balance'}`
+      )}`
+    : '';
+
+  const handleCopy = (key: string, value: string) => {
+    if (!value) return;
+    navigator.clipboard?.writeText(value).catch(() => {});
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1800);
   };
 
-  const handleProcessPayment = async () => {
+  const handleSubmit = async () => {
     setIsProcessing(true);
     setErrorMessage(null);
 
     try {
-      if (selectedMethod === 'direct_upi') {
-        const cleanUtr = utrReference.trim();
-        if (cleanUtr.length < 6) {
-          setErrorMessage('Please complete the UPI payment and enter the 12-digit UPI UTR / Transaction Reference ID.');
+      if (selectedMethod === 'upi' || selectedMethod === 'bank_transfer') {
+        const cleanUtr = utrReference.trim().toUpperCase();
+        if (!/^[A-Z0-9_-]{8,30}$/.test(cleanUtr)) {
+          setErrorMessage(
+            'Enter the real 8–30 character UTR / Transaction Reference ID from your UPI app or bank transfer receipt.'
+          );
           setIsProcessing(false);
           return;
         }
-        const refId = `UPI_UTR_${cleanUtr}`;
-        const updateRes = isAdvance
-          ? logisticsStore.payCustomerAdvance(booking.id, refId, 'Direct UPI Transfer')
-          : logisticsStore.payCustomerBalance(booking.id, refId, 'Direct UPI Transfer');
 
-        if (!updateRes.success) throw new Error(updateRes.message);
-        onPaymentSuccess(
-          isAdvance
-            ? `Advance payment of ₹${amountToPay.toLocaleString('en-IN')} recorded (UTR: ${cleanUtr}). Driver notified for pickup!`
-            : `Final balance of ₹${amountToPay.toLocaleString('en-IN')} recorded (UTR: ${cleanUtr}). Trip settlement complete!`
-        );
+        const res = logisticsStore.submitCustomerPayment(booking.id, stage, {
+          method: selectedMethod,
+          utrReference: cleanUtr
+        });
+        if (!res.success) throw new Error(res.message);
+
+        onPaymentSuccess(res.message);
         onClose();
         return;
       }
 
-      if (selectedMethod === 'pay_on_site') {
-        const label = isAdvance ? 'Cash / Direct UPI at Loading Point' : 'Cash / Direct UPI at Delivery';
-        const refId = `${isAdvance ? 'PAY_AT_PICKUP' : 'PAY_AT_DELIVERY'}_${Date.now().toString().slice(-6)}`;
-        const updateRes = isAdvance
-          ? logisticsStore.payCustomerAdvance(booking.id, refId, label)
-          : logisticsStore.payCustomerBalance(booking.id, refId, label);
+      if (selectedMethod === 'pay_driver_direct') {
+        const res = logisticsStore.submitCustomerPayment(booking.id, stage, {
+          method: 'pay_driver_direct'
+        });
+        if (!res.success) throw new Error(res.message);
 
-        if (!updateRes.success) throw new Error(updateRes.message);
-        onPaymentSuccess(
-          isAdvance
-            ? `Confirmed ₹${amountToPay.toLocaleString('en-IN')} payable at Loading Point. Truck dispatched for pickup!`
-            : `Confirmed ₹${amountToPay.toLocaleString('en-IN')} settled directly at Delivery.`
-        );
+        onPaymentSuccess(res.message);
         onClose();
         return;
       }
 
-      // Online Gateway (Cashfree Escrow)
-      const result = await cashfreeClient.createOrder({
-        bookingId: booking.id,
-        stage,
-        amount: amountToPay,
-        customer: {
-          id: currentUser.id,
-          name: currentUser.name,
-          email: currentUser.email || 'customer@zuggi.in',
-          phone: currentUser.phone || ''
-        },
-        driverVendorId: `vnd_${booking.driverId}`,
-        driverPayoutAmount: isAdvance ? booking.driverFirstPayoutInr : booking.driverFinalPayoutInr
-      });
+      // Live Production Payment Gateway (only rendered when live production keys are active)
+      if (selectedMethod === 'online_gateway' && isLiveGatewayReady) {
+        const result = await cashfreeClient.createOrder({
+          bookingId: booking.id,
+          stage,
+          amount: amountToPay,
+          customer: {
+            id: currentUser.id,
+            name: currentUser.name,
+            email: currentUser.email || 'customer@zuggi.in',
+            phone: currentUser.phone || ''
+          },
+          driverVendorId: `vnd_${booking.driverId}`,
+          driverPayoutAmount: isAdvance ? booking.driverFirstPayoutInr : booking.driverFinalPayoutInr
+        });
 
-      if (!result.success) {
-        throw new Error(result.message || 'Online gateway initiation failed. Please use Direct UPI or Pay at Pickup.');
+        if (!result.success) {
+          throw new Error(result.message || 'Online gateway could not start. Please use UPI or Bank Transfer.');
+        }
+
+        const updateRes = isAdvance
+          ? logisticsStore.payCustomerAdvance(booking.id, result.data?.order_id, 'Online Gateway')
+          : logisticsStore.payCustomerBalance(booking.id, result.data?.order_id, 'Online Gateway');
+
+        if (!updateRes.success) throw new Error(updateRes.message);
+        onPaymentSuccess(updateRes.message);
+        onClose();
+        return;
       }
 
-      await new Promise((r) => setTimeout(r, 900));
-
-      const updateRes = isAdvance
-        ? logisticsStore.payCustomerAdvance(booking.id, result.data?.order_id, 'Cashfree Online Escrow')
-        : logisticsStore.payCustomerBalance(booking.id, result.data?.order_id, 'Cashfree Online Escrow');
-
-      if (!updateRes.success) throw new Error(updateRes.message);
-
-      onPaymentSuccess(
-        isAdvance
-          ? `Advance payment of ₹${amountToPay.toLocaleString('en-IN')} secured in Escrow! Transporter dispatched.`
-          : `Final balance of ₹${amountToPay.toLocaleString('en-IN')} paid successfully! Trip settlement complete.`
-      );
-      onClose();
+      setErrorMessage('Please select a payment method to continue.');
+      setIsProcessing(false);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Payment confirmation failed. Please try again.');
+      setErrorMessage(err?.message || 'Could not record payment. Please check details and try again.');
       setIsProcessing(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
       <div className="relative w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="p-5 bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950/40 border-b border-slate-800 flex items-center justify-between">
+        <div className="px-5 py-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <ShieldCheck className="w-6 h-6" />
+            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+              <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-base font-bold text-white">Zuggi Freight Payment</h3>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[10px] font-bold border border-emerald-500/30 uppercase">
-                  {gatewayConfig?.environment === 'PRODUCTION' ? 'LIVE ESCROW' : 'INSTANT ACTIVE'}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                {isAdvance ? 'Stage 1: 90% Advance (Before Loading)' : 'Stage 2: 10% Final Balance (Upon Delivery)'}
+              <h3 className="text-base font-bold text-white leading-tight">
+                {isAdvance ? 'Pay Step 1: 90% Advance' : 'Pay Step 2: 10% Final Balance'}
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                {isAdvance ? 'Pay before or at pickup loading' : 'Pay upon safe delivery & unloading'}
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+            aria-label="Close payment modal"
+            className="w-10 h-10 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Content Body */}
+        {/* Body */}
         <div className="p-5 overflow-y-auto space-y-4">
+          {rejectionNote && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-amber-300">Previous UTR could not be verified</p>
+                <p className="text-amber-200/80 mt-0.5">{rejectionNote}</p>
+              </div>
+            </div>
+          )}
+
           {errorMessage && (
-            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
               <span>{errorMessage}</span>
             </div>
           )}
 
-          {/* Amount Hero */}
-          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800/90 text-center space-y-1">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-              {isAdvance ? 'Advance Freight Payable (90%)' : 'Final Balance Due (10%)'}
-            </span>
-            <div className="text-3xl font-black text-emerald-400 font-mono">
+          {/* Payable Amount Summary */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-4">
+            <div>
+              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                {isAdvance ? '90% Advance Due' : '10% Balance Due'}
+              </span>
+              <span className="text-[11px] text-slate-500 block mt-0.5">
+                Total Fare ₹{totalAgreedFare.toLocaleString('en-IN')} · Booking #{booking.id}
+              </span>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono tabular-nums">
               ₹{amountToPay.toLocaleString('en-IN')}
             </div>
-            <p className="text-[11px] text-slate-500">
-              Total Agreed Fare: ₹{totalAgreedFare.toLocaleString('en-IN')} • Booking #{booking.id}
-            </p>
           </div>
 
-          {/* Payment Method Selector */}
+          {/* Method Selector */}
           <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
-              Select Practical Payment Option
-            </label>
-            <div className="grid grid-cols-3 gap-2">
+            <label className="text-xs font-bold text-slate-300 block">Choose how you want to pay</label>
+            <div className={`grid gap-2 ${isLiveGatewayReady ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'}`}>
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedMethod('direct_upi');
+                  setSelectedMethod('upi');
                   setErrorMessage(null);
                 }}
-                className={`p-3 rounded-xl border text-center transition flex flex-col items-center gap-1.5 cursor-pointer ${
-                  selectedMethod === 'direct_upi'
-                    ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200 shadow-sm'
+                className={`min-h-[76px] p-2.5 rounded-xl border text-center transition flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                  selectedMethod === 'upi'
+                    ? 'bg-emerald-500/15 border-emerald-500 text-emerald-200'
                     : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Smartphone className="w-5 h-5 text-emerald-400" />
-                <span className="text-xs font-bold">Direct UPI</span>
-                <span className="text-[9px] text-slate-400">GPay / PhonePe</span>
+                <Smartphone className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-bold">UPI</span>
+                <span className="text-[10px] text-slate-400">GPay / PhonePe</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedMethod('pay_on_site');
+                  setSelectedMethod('bank_transfer');
                   setErrorMessage(null);
                 }}
-                className={`p-3 rounded-xl border text-center transition flex flex-col items-center gap-1.5 cursor-pointer ${
-                  selectedMethod === 'pay_on_site'
-                    ? 'bg-amber-600/20 border-amber-500 text-amber-200 shadow-sm'
+                className={`min-h-[76px] p-2.5 rounded-xl border text-center transition flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                  selectedMethod === 'bank_transfer'
+                    ? 'bg-sky-500/15 border-sky-500 text-sky-200'
                     : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Banknote className="w-5 h-5 text-amber-400" />
-                <span className="text-xs font-bold">{isAdvance ? 'Pay at Pickup' : 'Pay on Delivery'}</span>
-                <span className="text-[9px] text-slate-400">Cash / UPI On-Site</span>
+                <Building2 className="w-4 h-4 text-sky-400" />
+                <span className="text-xs font-bold">NEFT / IMPS</span>
+                <span className="text-[10px] text-slate-400">Bank Transfer</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => {
-                  setSelectedMethod('online_gateway');
+                  setSelectedMethod('pay_driver_direct');
                   setErrorMessage(null);
                 }}
-                className={`p-3 rounded-xl border text-center transition flex flex-col items-center gap-1.5 cursor-pointer ${
-                  selectedMethod === 'online_gateway'
-                    ? 'bg-indigo-600/20 border-indigo-500 text-indigo-200 shadow-sm'
+                className={`min-h-[76px] p-2.5 rounded-xl border text-center transition flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                  selectedMethod === 'pay_driver_direct'
+                    ? 'bg-amber-500/15 border-amber-500 text-amber-200'
                     : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <CreditCard className="w-5 h-5 text-indigo-400" />
-                <span className="text-xs font-bold">Cards / NetBank</span>
-                <span className="text-[9px] text-slate-400">Cashfree Escrow</span>
+                <Banknote className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold">Pay Driver</span>
+                <span className="text-[10px] text-slate-400">
+                  {isAdvance ? 'At Pickup' : 'At Delivery'}
+                </span>
               </button>
+
+              {isLiveGatewayReady && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMethod('online_gateway');
+                    setErrorMessage(null);
+                  }}
+                  className={`min-h-[76px] p-2.5 rounded-xl border text-center transition flex flex-col items-center justify-center gap-1 cursor-pointer ${
+                    selectedMethod === 'online_gateway'
+                      ? 'bg-indigo-500/15 border-indigo-500 text-indigo-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <CreditCard className="w-4 h-4 text-indigo-400" />
+                  <span className="text-xs font-bold">Cards</span>
+                  <span className="text-[10px] text-slate-400">Online Pay</span>
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Direct UPI Flow */}
-          {selectedMethod === 'direct_upi' && (
-            <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2 bg-slate-900 p-3 rounded-lg border border-slate-800">
-                <div>
-                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Pay to Zuggi / Fleet UPI ID</span>
-                  <span className="text-sm font-mono font-bold text-emerald-400">{merchantUpiId}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={handleCopyUpi}
-                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    {copiedUpi ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedUpi ? 'Copied' : 'Copy'}</span>
-                  </button>
-                  <a
-                    href={upiDeepLink}
-                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold"
-                  >
-                    Open UPI App
-                  </a>
-                </div>
-              </div>
+          {/* 1. UPI Payment Panel */}
+          {selectedMethod === 'upi' && (
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3.5">
+              {hasBusinessUpi ? (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 p-3 rounded-xl border border-slate-800">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-semibold block">
+                        Pay to {businessSettings.businessName}
+                      </span>
+                      <span className="text-sm font-mono font-bold text-emerald-400 break-all">
+                        {businessSettings.upiId}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleCopy('upi', businessSettings.upiId)}
+                        className="min-h-[36px] px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedKey === 'upi' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedKey === 'upi' ? 'Copied' : 'Copy'}</span>
+                      </button>
+                      <a
+                        href={upiDeepLink}
+                        className="min-h-[36px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center"
+                      >
+                        Open UPI App
+                      </a>
+                    </div>
+                  </div>
 
-              <div>
-                <label className="text-[11px] font-semibold text-slate-300 block mb-1">
-                  Enter UPI UTR / Transaction Reference Number *
-                </label>
-                <input
-                  type="text"
-                  value={utrReference}
-                  onChange={(e) => setUtrReference(e.target.value)}
-                  placeholder="e.g. 432519876543 (from Google Pay / PhonePe / Paytm)"
-                  className="w-full px-3 py-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
-                />
-                <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                  <span>Zero extra gateway fee. UTR is logged on your booking &amp; GST invoice.</span>
-                </p>
-              </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-200 block mb-1.5">
+                      Step 2: Enter 12-Digit UPI UTR / Reference Number *
+                    </label>
+                    <input
+                      type="text"
+                      value={utrReference}
+                      onChange={(e) => setUtrReference(e.target.value.toUpperCase())}
+                      placeholder="e.g. 432519876543"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono uppercase"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1.5 flex items-start gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <span>
+                        After you submit the UTR, status shows <strong>Verifying UTR</strong> until Zuggi Admin confirms receipt in the bank statement.
+                      </span>
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-1.5">
+                  <p className="font-bold text-amber-300">Zuggi Business UPI ID not configured yet</p>
+                  <p className="text-amber-200/80">
+                    The Admin can add their real Business UPI ID in <strong>Admin → Payments → Collection Account</strong>. Meanwhile, you can use <strong>Pay Driver</strong> directly on-site.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Pay at Pickup / Delivery Flow */}
-          {selectedMethod === 'pay_on_site' && (
+          {/* 2. Bank Transfer Panel */}
+          {selectedMethod === 'bank_transfer' && (
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3.5">
+              {hasBusinessBank ? (
+                <>
+                  <div className="bg-slate-900 p-3 rounded-xl border border-slate-800 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Account Holder</span>
+                      <span className="font-bold text-white">{businessSettings.accountHolderName}</span>
+                    </div>
+                    {businessSettings.bankName && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Bank Name</span>
+                        <span className="font-semibold text-slate-200">{businessSettings.bankName}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Account No.</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-sky-300">{businessSettings.accountNumber}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy('acc', businessSettings.accountNumber)}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 font-semibold cursor-pointer"
+                        >
+                          {copiedKey === 'acc' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">IFSC Code</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-sky-300">{businessSettings.ifscCode}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy('ifsc', businessSettings.ifscCode)}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 font-semibold cursor-pointer"
+                        >
+                          {copiedKey === 'ifsc' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-200 block mb-1.5">
+                      Enter NEFT / IMPS UTR Reference Number *
+                    </label>
+                    <input
+                      type="text"
+                      value={utrReference}
+                      onChange={(e) => setUtrReference(e.target.value.toUpperCase())}
+                      placeholder="e.g. SBINH24321987654"
+                      className="w-full min-h-[44px] px-3.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono uppercase"
+                    />
+                    <p className="text-[11px] text-slate-400 mt-1.5">
+                      Zuggi Admin will verify this UTR in the bank statement and mark your booking paid.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-1.5">
+                  <p className="font-bold text-amber-300">Zuggi Business Bank Account not configured yet</p>
+                  <p className="text-amber-200/80">
+                    The Admin can add the Business Bank Account &amp; IFSC in <strong>Admin → Payments → Collection Account</strong>. Meanwhile, you can use <strong>UPI</strong> or <strong>Pay Driver</strong>.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3. Pay Driver Directly Panel */}
+          {selectedMethod === 'pay_driver_direct' && (
             <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-2 text-xs text-amber-100">
               <p className="font-bold text-amber-300">
-                {isAdvance ? 'Pay Directly at Loading Point (Cash / UPI)' : 'Pay Final Balance Directly at Unloading Point'}
-              </p>
-              <p className="text-[11px] text-amber-200/80 leading-relaxed">
                 {isAdvance
-                  ? `Confirm dispatch now and pay ₹${amountToPay.toLocaleString('en-IN')} directly to the driver or transport supervisor after the truck arrives and loading begins.`
-                  : `Settle the remaining ₹${amountToPay.toLocaleString('en-IN')} directly upon safe unloading and verification of goods before sharing your 4-digit Delivery OTP.`}
+                  ? 'Pay Driver Directly at Pickup (Cash or Direct UPI)'
+                  : 'Pay Driver Directly at Delivery (Cash or Direct UPI)'}
               </p>
-            </div>
-          )}
-
-          {/* Online Gateway Flow */}
-          {selectedMethod === 'online_gateway' && (
-            <div className="p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-800/40 text-[11px] text-indigo-200/90 flex items-start gap-2.5">
-              <Lock className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-bold text-white">Cashfree Marketplace Escrow Protection</p>
-                <p className="text-[10px] text-indigo-300/80 mt-0.5">
-                  Funds are protected in escrow — 90% is released to the fleet only after confirmed loading, and the final 10% after signed POD &amp; Delivery OTP verification.
-                </p>
+              <p className="text-amber-100/80 leading-relaxed">
+                {isAdvance
+                  ? `Pay ₹${amountToPay.toLocaleString('en-IN')} directly to the driver when the truck reaches pickup and starts loading. Once the driver taps "Confirm Received" on their screen, this step turns Paid.`
+                  : `Pay the remaining ₹${amountToPay.toLocaleString('en-IN')} directly to the driver after inspecting your goods at delivery. The driver will tap "Confirm Received" on their screen to close the trip payment.`}
+              </p>
+              <div className="pt-1 flex items-center gap-1.5 text-[11px] text-emerald-300">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Two-sided confirmation: both you and the driver see the verified receipt.</span>
               </div>
             </div>
           )}
 
-          {/* Transparent Fare Breakdown */}
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/60 space-y-1.5 text-[11px]">
-            <div className="flex items-center justify-between text-slate-300 font-semibold pb-1 border-b border-slate-800">
+          {/* 4. Live Online Gateway (Production only) */}
+          {selectedMethod === 'online_gateway' && isLiveGatewayReady && (
+            <div className="p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-700/40 text-xs text-indigo-200 space-y-1">
+              <p className="font-bold text-white">Online Payment Gateway</p>
+              <p className="text-[11px] text-indigo-200/80">
+                Pay securely via Credit/Debit Card or NetBanking. Your payment is verified automatically upon completion.
+              </p>
+            </div>
+          )}
+
+          {/* Clear Fare Breakdown */}
+          <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5 text-xs">
+            <div className="flex items-center justify-between text-slate-300 font-semibold pb-1.5 border-b border-slate-800">
               <span className="flex items-center gap-1.5">
-                <Info className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Transparent Fare Breakdown</span>
+                <Info className="w-3.5 h-3.5 text-slate-400" />
+                <span>Fare Summary</span>
               </span>
-              <span className="text-slate-400 text-[10px]">No Hidden Charges</span>
+              <span className="text-[11px] text-slate-400">Transparent Pricing</span>
             </div>
             <div className="flex justify-between text-slate-400">
-              <span>Agreed Total Booking Fare:</span>
-              <span className="font-mono text-slate-200 font-bold">₹{totalAgreedFare.toLocaleString('en-IN')}</span>
+              <span>Total Agreed Freight</span>
+              <span className="font-mono tabular-nums text-white font-bold">
+                ₹{totalAgreedFare.toLocaleString('en-IN')}
+              </span>
             </div>
             <div className="flex justify-between text-slate-400">
-              <span>Zuggi Platform Fee (5% included):</span>
-              <span className="font-mono text-amber-400 font-bold">₹{platformCommission.toLocaleString('en-IN')}</span>
+              <span>Zuggi Service Fee (5% included)</span>
+              <span className="font-mono tabular-nums text-amber-400 font-semibold">
+                ₹{platformCommission.toLocaleString('en-IN')}
+              </span>
             </div>
             <div className="flex justify-between text-slate-400">
-              <span>Net Payable to Fleet (95%):</span>
-              <span className="font-mono text-emerald-400 font-bold">₹{netFleetEarnings.toLocaleString('en-IN')}</span>
+              <span>Driver / Fleet Net Earnings (95%)</span>
+              <span className="font-mono tabular-nums text-emerald-400 font-semibold">
+                ₹{netFleetEarnings.toLocaleString('en-IN')}
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Footer Actions */}
-        <div className="p-5 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-3">
+        {/* Footer */}
+        <div className="px-5 py-4 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-3">
           <button
             type="button"
             onClick={onClose}
             disabled={isProcessing}
-            className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+            className="min-h-[44px] px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold transition cursor-pointer"
           >
             Cancel
           </button>
 
           <button
             type="button"
-            onClick={handleProcessPayment}
-            disabled={isProcessing}
-            className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition cursor-pointer active:scale-98 disabled:opacity-50"
+            onClick={handleSubmit}
+            disabled={
+              isProcessing ||
+              (selectedMethod === 'upi' && !hasBusinessUpi) ||
+              (selectedMethod === 'bank_transfer' && !hasBusinessBank)
+            }
+            className="flex-1 min-h-[44px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {isProcessing ? (
-              <span className="flex items-center gap-2">
-                <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                <span>Confirming Payment...</span>
-              </span>
+              <span>Submitting...</span>
             ) : (
-              <span className="flex items-center gap-2">
-                <Lock className="w-4 h-4" />
+              <>
                 <span>
-                  {selectedMethod === 'direct_upi'
-                    ? `Confirm UPI Payment (₹${amountToPay.toLocaleString('en-IN')})`
-                    : selectedMethod === 'pay_on_site'
+                  {selectedMethod === 'upi'
+                    ? `Submit UPI UTR (₹${amountToPay.toLocaleString('en-IN')})`
+                    : selectedMethod === 'bank_transfer'
+                    ? `Submit Bank UTR (₹${amountToPay.toLocaleString('en-IN')})`
+                    : selectedMethod === 'pay_driver_direct'
                     ? isAdvance
-                      ? `Confirm Dispatch (Pay at Pickup)`
-                      : `Confirm On-Site Settlement`
-                    : `Pay ₹${amountToPay.toLocaleString('en-IN')} via Escrow`}
+                      ? `Confirm Pay Driver at Pickup`
+                      : `Confirm Pay Driver at Delivery`
+                    : `Pay ₹${amountToPay.toLocaleString('en-IN')}`}
                 </span>
                 <ArrowRight className="w-4 h-4" />
-              </span>
+              </>
             )}
           </button>
         </div>

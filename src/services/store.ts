@@ -2,6 +2,7 @@ import {
   AdminReviewLog,
   AppNotification,
   Booking,
+  BusinessPaymentSettings,
   CashfreeVendor,
   CommercialVehicle,
   DigitalAcceptanceSubmission,
@@ -19,6 +20,7 @@ import {
   PartnerType,
   PartnerUploadedDoc,
   PaymentDispute,
+  PracticalPaymentMethod,
   Quotation,
   Settlement,
   SupportTicket,
@@ -271,7 +273,8 @@ const STORAGE_KEYS = {
   USER_REGISTRY: 'vs_user_profile_registry',
   GEOFENCE_CONFIGS: 'vs_geofence_configs',
   GEOFENCE_STATES: 'vs_geofence_states',
-  GEOFENCE_EVENTS: 'vs_geofence_events'
+  GEOFENCE_EVENTS: 'vs_geofence_events',
+  BUSINESS_PAYMENT_SETTINGS: 'vs_business_payment_settings'
 };
 
 const BROADCAST_NAME = 'vahansetu_state_sync';
@@ -2221,15 +2224,42 @@ class LogisticsStore {
       }
     }
 
-    // Persist status and metadata BEFORE releasing payouts so payout helpers read latest state without being overwritten
+    // Persist status and metadata
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
 
-    if (milestone === 'at_pickup' && booking.payoutStage1Status !== 'settled') {
-      // Automatically disburse 90% first fleet payout upon verified pickup
-      this.releaseStage1Payout(booking.id);
+    // Notify Admin when a real driver payout becomes eligible (never auto-fake a bank transfer)
+    if (
+      milestone === 'at_pickup' &&
+      booking.paymentAdvanceStatus === 'paid' &&
+      booking.advancePaymentMethod !== 'pay_driver_direct' &&
+      booking.payoutStage1Status !== 'settled'
+    ) {
+      const dueAmt = booking.driverFirstPayoutInr || Math.round(booking.netDriverPayableInr * 0.90);
+      this.addNotification({
+        recipientRole: 'admin',
+        recipientId: 'admin',
+        title: 'Pickup Payout Due to Driver',
+        message: `Booking ${booking.id} reached pickup. Release ₹${dueAmt.toLocaleString('en-IN')} (90% pickup payout) to driver from Admin Payments.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
     }
-    if (milestone === 'completed' && (!dispute || dispute.status === 'RESOLVED_RELEASED')) {
-      this.releaseStage2Payout(booking.id);
+    if (
+      milestone === 'completed' &&
+      booking.paymentBalanceStatus === 'paid' &&
+      booking.balancePaymentMethod !== 'pay_driver_direct' &&
+      booking.payoutStage2Status !== 'settled' &&
+      (!dispute || dispute.status === 'RESOLVED_RELEASED')
+    ) {
+      const dueAmt = booking.driverFinalPayoutInr || Math.round(booking.netDriverPayableInr * 0.10);
+      this.addNotification({
+        recipientRole: 'admin',
+        recipientId: 'admin',
+        title: 'Final Delivery Payout Due to Driver',
+        message: `Booking ${booking.id} completed with POD. Release ₹${dueAmt.toLocaleString('en-IN')} (10% final payout) to driver from Admin Payments.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
     }
 
     // Keep associated load status in sync
@@ -2796,8 +2826,762 @@ class LogisticsStore {
     return this.getDisputes().find((d) => d.bookingId === bookingId);
   }
 
+  // --- Zuggi Business Payment Collection Settings ---
+  public getBusinessPaymentSettings(): BusinessPaymentSettings {
+    const fallback: BusinessPaymentSettings = {
+      businessName: (import.meta as any).env?.VITE_ZUGGI_MERCHANT_NAME || 'Zuggi Freight Logistics',
+      upiId: (import.meta as any).env?.VITE_ZUGGI_MERCHANT_UPI || '',
+      bankName: '',
+      accountHolderName: (import.meta as any).env?.VITE_ZUGGI_MERCHANT_NAME || 'Zuggi Freight Logistics',
+      accountNumber: '',
+      ifscCode: '',
+      supportPhone: ''
+    };
+    const saved = this.safeJsonParse<Partial<BusinessPaymentSettings> | null>(
+      STORAGE_KEYS.BUSINESS_PAYMENT_SETTINGS,
+      null
+    );
+    if (!saved) return fallback;
+    return {
+      businessName: String(saved.businessName || fallback.businessName).trim(),
+      upiId: String(saved.upiId ?? fallback.upiId).trim(),
+      bankName: String(saved.bankName || '').trim(),
+      accountHolderName: String(saved.accountHolderName || fallback.accountHolderName).trim(),
+      accountNumber: String(saved.accountNumber || '').trim(),
+      ifscCode: String(saved.ifscCode || '').trim().toUpperCase(),
+      supportPhone: String(saved.supportPhone || '').trim(),
+      updatedAt: saved.updatedAt
+    };
+  }
+
+  public saveBusinessPaymentSettings(
+    settings: Partial<BusinessPaymentSettings>
+  ): { success: boolean; message: string; data: BusinessPaymentSettings } {
+    const current = this.getBusinessPaymentSettings();
+    const next: BusinessPaymentSettings = {
+      businessName: String(settings.businessName ?? current.businessName).trim() || 'Zuggi Freight Logistics',
+      upiId: String(settings.upiId ?? current.upiId).trim(),
+      bankName: String(settings.bankName ?? current.bankName).trim(),
+      accountHolderName: String(settings.accountHolderName ?? current.accountHolderName).trim() || 'Zuggi Freight Logistics',
+      accountNumber: String(settings.accountNumber ?? current.accountNumber).trim(),
+      ifscCode: String(settings.ifscCode ?? current.ifscCode).trim().toUpperCase(),
+      supportPhone: String(settings.supportPhone ?? current.supportPhone).trim(),
+      updatedAt: new Date().toISOString()
+    };
+    localStorage.setItem(STORAGE_KEYS.BUSINESS_PAYMENT_SETTINGS, JSON.stringify(next));
+    this.triggerChange();
+    return { success: true, message: 'Zuggi collection UPI & bank details saved.', data: next };
+  }
+
+  private resolveDriverBankSnapshot(booking: Booking): {
+    driverName: string;
+    bankName: string;
+    accountNumberMasked: string;
+    ifsc: string;
+    upiId: string;
+  } {
+    const driverObj = this.getUserById(booking.driverId) || this.getUserById(booking.transporterId);
+    const vehObj = this.getVehicleById(booking.vehicleId);
+    const bank = driverObj?.bankDetails;
+    const rawAcc = String(bank?.accountNumber || '').trim();
+    const maskedAcc = rawAcc.length >= 4 ? `•••• •••• ${rawAcc.slice(-4)}` : rawAcc || 'Not Provided';
+    return {
+      driverName: driverObj?.name || vehObj?.driverName || vehObj?.transporterName || 'Assigned Driver',
+      bankName: bank?.bankName || (bank?.upiId ? 'Direct UPI Transfer' : 'Bank Details Pending'),
+      accountNumberMasked: maskedAcc,
+      ifsc: bank?.ifscCode || '—',
+      upiId: bank?.upiId || '—'
+    };
+  }
+
   /**
-   * 1. Customer Advance Payment (90% before pickup)
+   * Practical Customer Payment Submission (Real-World Two-Step Verification)
+   * - UPI / Bank Transfer: requires real UTR (8-30 chars), enters 'processing' until Admin verifies bank statement.
+   * - Pay Driver Directly: enters 'processing' until assigned Driver taps "Confirm Received" on their trip screen.
+   */
+  public submitCustomerPayment(
+    bookingId: string,
+    stage: 'advance_90' | 'balance_10',
+    payload: {
+      method: 'upi' | 'bank_transfer' | 'pay_driver_direct';
+      utrReference?: string;
+    }
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const isAdvance = stage === 'advance_90';
+    const currentStatus = isAdvance ? booking.paymentAdvanceStatus : booking.paymentBalanceStatus;
+    if (currentStatus === 'paid') {
+      return { success: false, message: isAdvance ? 'Advance payment is already verified & paid.' : 'Final balance is already verified & paid.' };
+    }
+
+    const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
+    const amountInr = isAdvance
+      ? Number(booking.customerAdvanceAmountInr) || Math.round(totalAgreed * 0.90)
+      : Number(booking.customerBalanceAmountInr) || Math.round(totalAgreed * 0.10);
+
+    if (amountInr <= 0) {
+      return { success: false, message: 'Invalid payable amount on this booking.' };
+    }
+
+    const cleanUtr = String(payload.utrReference || '').trim().toUpperCase();
+    if (payload.method === 'upi' || payload.method === 'bank_transfer') {
+      if (!/^[A-Z0-9_-]{8,30}$/.test(cleanUtr)) {
+        return {
+          success: false,
+          message: 'Please enter a valid 8–30 character UTR / Transaction Reference ID (letters and numbers only).'
+        };
+      }
+      const otherUtr = isAdvance ? booking.balancePaymentUtr : booking.advancePaymentUtr;
+      if (otherUtr && otherUtr.toUpperCase() === cleanUtr) {
+        return {
+          success: false,
+          message: 'This UTR was already submitted for the other payment step. Please enter the new transfer UTR.'
+        };
+      }
+    }
+
+    const methodLabel =
+      payload.method === 'upi'
+        ? 'UPI Transfer to Zuggi'
+        : payload.method === 'bank_transfer'
+        ? 'NEFT / IMPS Bank Transfer to Zuggi'
+        : isAdvance
+        ? 'Pay Driver Directly at Pickup (Cash / UPI)'
+        : 'Pay Driver Directly at Delivery (Cash / UPI)';
+
+    const orderRef =
+      payload.method === 'pay_driver_direct'
+        ? `DIRECT_${isAdvance ? 'PICKUP' : 'DELIVERY'}_${Date.now().toString().slice(-6)}`
+        : cleanUtr;
+
+    if (isAdvance) {
+      booking.customerAdvanceAmountInr = amountInr;
+      booking.paymentAdvanceStatus = 'processing';
+      booking.advancePaymentMethod = payload.method;
+      booking.advancePaymentUtr = payload.method === 'pay_driver_direct' ? undefined : cleanUtr;
+      booking.advanceRejectionNote = undefined;
+      booking.cashfreeAdvanceOrderId = orderRef;
+    } else {
+      booking.customerBalanceAmountInr = amountInr;
+      booking.paymentBalanceStatus = 'processing';
+      booking.balancePaymentMethod = payload.method;
+      booking.balancePaymentUtr = payload.method === 'pay_driver_direct' ? undefined : cleanUtr;
+      booking.balanceRejectionNote = undefined;
+      booking.cashfreeBalanceOrderId = orderRef;
+    }
+
+    if (payload.method === 'bank_transfer') booking.paymentMode = 'bank_transfer';
+    else if (payload.method === 'pay_driver_direct') booking.paymentMode = 'cash_on_delivery';
+    else booking.paymentMode = 'online_upi';
+
+    this.recordPaymentTransaction({
+      id: `tx_${Date.now()}_${isAdvance ? 'adv' : 'bal'}`,
+      bookingId: booking.id,
+      type: isAdvance ? 'customer_advance_90' : 'customer_balance_10',
+      amountInr,
+      orderId: orderRef,
+      cfPaymentId: cleanUtr || orderRef,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      notes:
+        payload.method === 'pay_driver_direct'
+          ? `${methodLabel}. Awaiting driver confirmation of ₹${amountInr.toLocaleString('en-IN')} receipt.`
+          : `${methodLabel} submitted with UTR ${cleanUtr}. Pending Admin bank verification.`
+    });
+
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    if (payload.method === 'pay_driver_direct') {
+      this.addNotification({
+        recipientRole: 'driver',
+        recipientId: booking.driverId,
+        title: isAdvance ? 'Collect 90% Advance at Pickup' : 'Collect 10% Balance at Delivery',
+        message: `Customer chose to pay ₹${amountInr.toLocaleString('en-IN')} directly to you (${isAdvance ? 'at pickup' : 'at delivery'}). Tap "Confirm Received" on your trip screen once paid.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+      this.addNotification({
+        recipientRole: 'admin',
+        recipientId: 'admin',
+        title: 'Direct-to-Driver Payment Selected',
+        message: `Booking ${booking.id}: Customer selected direct payment of ₹${amountInr.toLocaleString('en-IN')} to driver (${isAdvance ? '90% Advance' : '10% Balance'}).`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+    } else {
+      this.addNotification({
+        recipientRole: 'admin',
+        recipientId: 'admin',
+        title: 'Verify Customer Payment UTR',
+        message: `Booking ${booking.id}: Customer submitted ${methodLabel} for ₹${amountInr.toLocaleString('en-IN')} (UTR: ${cleanUtr}). Please verify in bank statement.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+    }
+
+    this.triggerChange();
+    return {
+      success: true,
+      message:
+        payload.method === 'pay_driver_direct'
+          ? `Recorded! Pay ₹${amountInr.toLocaleString('en-IN')} directly to the driver ${isAdvance ? 'at pickup' : 'at delivery'}. Driver will confirm receipt in the app.`
+          : `UTR ${cleanUtr} submitted for ₹${amountInr.toLocaleString('en-IN')}. Zuggi Admin will verify receipt in bank statement shortly.`
+    };
+  }
+
+  /**
+   * Admin verifies (approves or rejects) a customer's submitted UPI / NEFT payment UTR
+   */
+  public adminVerifyCustomerPayment(
+    bookingId: string,
+    stage: 'advance_90' | 'balance_10',
+    decision: 'approve' | 'reject',
+    note?: string
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const isAdvance = stage === 'advance_90';
+    const amountInr = isAdvance
+      ? Number(booking.customerAdvanceAmountInr) || Math.round((Number(booking.totalAgreedAmountInr) || 0) * 0.90)
+      : Number(booking.customerBalanceAmountInr) || Math.round((Number(booking.totalAgreedAmountInr) || 0) * 0.10);
+    const utr = isAdvance ? booking.advancePaymentUtr : booking.balancePaymentUtr;
+    const txType = isAdvance ? 'customer_advance_90' : 'customer_balance_10';
+
+    const txs = this.getPaymentTransactions();
+    const matchingTx = txs.find((t) => t.bookingId === booking.id && t.type === txType && t.status === 'pending');
+
+    if (decision === 'approve') {
+      if (isAdvance) {
+        booking.paymentAdvanceStatus = 'paid';
+        booking.advanceRejectionNote = undefined;
+        booking.paymentStatus = booking.paymentBalanceStatus === 'paid' ? 'completed' : 'advance_paid';
+      } else {
+        booking.paymentBalanceStatus = 'paid';
+        booking.balanceRejectionNote = undefined;
+        if (booking.paymentAdvanceStatus === 'paid') {
+          booking.paymentStatus = 'completed';
+        }
+      }
+
+      if (matchingTx) {
+        matchingTx.status = 'success';
+        matchingTx.notes = `Verified by Admin (${new Date().toLocaleDateString('en-IN')}). UTR: ${utr || matchingTx.orderId}${note ? ` — ${note}` : ''}`;
+        localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
+      } else {
+        this.recordPaymentTransaction({
+          id: `tx_${Date.now()}_${isAdvance ? 'adv' : 'bal'}_ver`,
+          bookingId: booking.id,
+          type: txType,
+          amountInr,
+          orderId: utr || booking.id,
+          status: 'success',
+          timestamp: new Date().toISOString(),
+          notes: `Payment verified by Admin. UTR: ${utr || 'Manual Bank Verification'}`
+        });
+      }
+
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+      this.syncToSupabase('vs_bookings', booking);
+
+      this.addNotification({
+        recipientRole: 'customer',
+        recipientId: booking.customerId,
+        title: isAdvance ? 'Advance Payment Verified' : 'Final Balance Payment Verified',
+        message: `Your payment of ₹${amountInr.toLocaleString('en-IN')}${utr ? ` (UTR: ${utr})` : ''} has been verified by Zuggi.`,
+        type: 'payment_received',
+        linkId: booking.loadId
+      });
+
+      this.addNotification({
+        recipientRole: 'driver',
+        recipientId: booking.driverId,
+        title: isAdvance ? 'Customer Advance Received by Zuggi' : 'Customer Final Balance Received',
+        message: `Customer's ₹${amountInr.toLocaleString('en-IN')} ${isAdvance ? '90% advance' : '10% balance'} is verified. ${isAdvance ? 'Proceed to pickup.' : 'Final payout queued by Admin.'}`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+
+      this.triggerChange();
+      return {
+        success: true,
+        message: `Verified ₹${amountInr.toLocaleString('en-IN')} ${isAdvance ? 'Advance' : 'Final Balance'} for Booking ${booking.id}.`
+      };
+    }
+
+    // Reject submitted UTR
+    const rejectReason = String(note || '').trim() || 'UTR not found in bank statement. Please check and re-submit.';
+    if (isAdvance) {
+      booking.paymentAdvanceStatus = 'pending';
+      booking.advanceRejectionNote = rejectReason;
+    } else {
+      booking.paymentBalanceStatus = 'pending';
+      booking.balanceRejectionNote = rejectReason;
+    }
+
+    if (matchingTx) {
+      matchingTx.status = 'failed';
+      matchingTx.notes = `Rejected by Admin: ${rejectReason}`;
+      localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
+    }
+
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    this.addNotification({
+      recipientRole: 'customer',
+      recipientId: booking.customerId,
+      title: 'Payment UTR Could Not Be Verified',
+      message: `Booking ${booking.id}: ${rejectReason} Please re-submit the correct UTR.`,
+      type: 'alert',
+      linkId: booking.loadId
+    });
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: `Payment rejected and returned to customer for re-submission (${booking.id}).`
+    };
+  }
+
+  /**
+   * Driver confirms receipt of direct on-site cash / UPI payment from customer
+   */
+  public driverConfirmDirectPayment(
+    bookingId: string,
+    stage: 'advance_90' | 'balance_10',
+    confirmedByUserId: string
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const actor = this.getUserById(confirmedByUserId) || this.getCurrentUser();
+    const isAuthorized =
+      confirmedByUserId === booking.driverId ||
+      confirmedByUserId === booking.transporterId ||
+      actor?.role === 'admin';
+    if (!isAuthorized) {
+      return { success: false, message: 'Only the assigned driver or fleet owner can confirm direct payment receipt.' };
+    }
+
+    const isAdvance = stage === 'advance_90';
+    const method = isAdvance ? booking.advancePaymentMethod : booking.balancePaymentMethod;
+    const status = isAdvance ? booking.paymentAdvanceStatus : booking.paymentBalanceStatus;
+
+    if (status === 'paid') {
+      return { success: false, message: 'This payment step is already marked paid.' };
+    }
+    if (method !== 'pay_driver_direct') {
+      return { success: false, message: 'This payment was sent to Zuggi, not direct to driver.' };
+    }
+
+    const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
+    const totalCommission = Number(booking.platformCommissionInr) || Math.round(totalAgreed * 0.05);
+    const stage1Commission = Math.round(totalCommission * 0.90);
+    const stageCommission = isAdvance ? stage1Commission : Math.max(0, totalCommission - stage1Commission);
+
+    const amountInr = isAdvance
+      ? Number(booking.customerAdvanceAmountInr) || Math.round(totalAgreed * 0.90)
+      : Number(booking.customerBalanceAmountInr) || Math.round(totalAgreed * 0.10);
+    const driverNetShare = isAdvance
+      ? booking.driverFirstPayoutInr || Math.round((booking.netDriverPayableInr || totalAgreed * 0.95) * 0.90)
+      : booking.driverFinalPayoutInr || Math.round((booking.netDriverPayableInr || totalAgreed * 0.95) * 0.10);
+    const refCode = `DIRECT-${isAdvance ? 'STG1' : 'STG2'}-${Date.now().toString().slice(-6)}`;
+
+    if (isAdvance) {
+      booking.paymentAdvanceStatus = 'paid';
+      booking.payoutStage1Status = 'settled';
+      booking.stage1PayoutUtr = refCode;
+      booking.paymentStatus = booking.paymentBalanceStatus === 'paid' ? 'completed' : 'advance_paid';
+    } else {
+      booking.paymentBalanceStatus = 'paid';
+      booking.payoutStage2Status = 'settled';
+      booking.stage2PayoutUtr = refCode;
+      if (booking.paymentAdvanceStatus === 'paid') {
+        booking.paymentStatus = 'completed';
+      }
+    }
+
+    // Add Zuggi's 5% platform commission for this cash/direct collection to Driver Commission Due
+    if (stageCommission > 0) {
+      booking.driverCommissionDueInr = (Number(booking.driverCommissionDueInr) || 0) + stageCommission;
+      booking.driverCommissionStatus = 'due';
+      booking.driverCommissionRejectionNote = undefined;
+    }
+
+    // Update pending customer transaction to success
+    const txType = isAdvance ? 'customer_advance_90' : 'customer_balance_10';
+    const txs = this.getPaymentTransactions();
+    const matchingTx = txs.find((t) => t.bookingId === booking.id && t.type === txType && t.status === 'pending');
+    if (matchingTx) {
+      matchingTx.status = 'success';
+      matchingTx.notes = `Confirmed received directly by driver on-site (${refCode}). 5% Zuggi commission due: ₹${stageCommission.toLocaleString('en-IN')}.`;
+      localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
+    } else {
+      this.recordPaymentTransaction({
+        id: `tx_${Date.now()}_dir`,
+        bookingId: booking.id,
+        type: txType,
+        amountInr,
+        orderId: refCode,
+        status: 'success',
+        timestamp: new Date().toISOString(),
+        notes: `Direct on-site payment confirmed by driver (${refCode}). 5% Zuggi commission due: ₹${stageCommission.toLocaleString('en-IN')}.`
+      });
+    }
+
+    // Record real settlement entry for driver earnings ledger
+    const bankSnapshot = this.resolveDriverBankSnapshot(booking);
+    const settlements = this.getSettlements();
+    settlements.unshift({
+      id: `set_dir_${Date.now()}`,
+      settlementRef: `ZUG/${isAdvance ? 'SPLIT1' : 'SPLIT2'}/${new Date().getFullYear()}/${Math.floor(10000 + Math.random() * 90000)}`,
+      driverId: booking.driverId,
+      driverName: bankSnapshot.driverName,
+      bookingId: booking.id,
+      grossFreight: amountInr,
+      commission: stageCommission,
+      tdsDeduction: 0,
+      netDisbursed: driverNetShare,
+      bankAccount: {
+        bankName: 'Direct Cash / UPI Collected On-Site',
+        accountNumberMasked: bankSnapshot.accountNumberMasked,
+        ifsc: bankSnapshot.ifsc,
+        upiId: bankSnapshot.upiId
+      },
+      status: 'settled',
+      utrNumber: refCode,
+      settledAt: new Date().toISOString()
+    });
+    localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(settlements));
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    this.addNotification({
+      recipientRole: 'customer',
+      recipientId: booking.customerId,
+      title: isAdvance ? 'Driver Confirmed Advance Receipt' : 'Driver Confirmed Final Balance Receipt',
+      message: `Driver confirmed receiving ₹${amountInr.toLocaleString('en-IN')} directly on-site for Booking ${booking.id}.`,
+      type: 'payment_received',
+      linkId: booking.loadId
+    });
+
+    if (stageCommission > 0) {
+      this.addNotification({
+        recipientRole: 'admin',
+        recipientId: 'admin',
+        title: 'Cash Trip Commission Due from Driver',
+        message: `Booking ${booking.id}: Driver collected ₹${amountInr.toLocaleString('en-IN')} directly. ₹${stageCommission.toLocaleString('en-IN')} (5% commission) added to Driver Commission Dues.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+    }
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: `Confirmed ₹${amountInr.toLocaleString('en-IN')} received directly from customer. Zuggi 5% commission (₹${stageCommission.toLocaleString('en-IN')}) added to Commission Due.`
+    };
+  }
+
+  /**
+   * Driver submits UPI / Bank Transfer UTR to pay 5% cash-trip commission due to Zuggi
+   */
+  public submitDriverCommissionPayment(
+    bookingId: string,
+    submittedByUserId: string,
+    utrReference: string
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const actor = this.getUserById(submittedByUserId) || this.getCurrentUser();
+    const isAuthorized =
+      submittedByUserId === booking.driverId ||
+      submittedByUserId === booking.transporterId ||
+      actor?.role === 'admin';
+    if (!isAuthorized) {
+      return { success: false, message: 'Only the assigned driver or fleet owner can submit commission payment for this trip.' };
+    }
+
+    const dueAmt = Number(booking.driverCommissionDueInr) || 0;
+    if (dueAmt <= 0 || booking.driverCommissionStatus === 'paid' || booking.driverCommissionStatus === 'adjusted_in_payout') {
+      return { success: false, message: 'No unpaid cash commission due on this booking.' };
+    }
+
+    const cleanUtr = String(utrReference || '').trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{8,30}$/.test(cleanUtr)) {
+      return {
+        success: false,
+        message: 'Please enter a valid 8–30 character UPI / Bank UTR reference number.'
+      };
+    }
+
+    booking.driverCommissionStatus = 'verifying_utr';
+    booking.driverCommissionUtr = cleanUtr;
+    booking.driverCommissionRejectionNote = undefined;
+
+    this.recordPaymentTransaction({
+      id: `tx_${Date.now()}_comm`,
+      bookingId: booking.id,
+      type: 'platform_commission',
+      amountInr: dueAmt,
+      orderId: cleanUtr,
+      cfPaymentId: cleanUtr,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      notes: `Driver submitted 5% cash-trip commission via UPI/Bank (UTR: ${cleanUtr}). Pending Admin verification.`
+    });
+
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    this.addNotification({
+      recipientRole: 'admin',
+      recipientId: 'admin',
+      title: 'Verify Driver Commission UTR',
+      message: `Booking ${booking.id}: Driver submitted ₹${dueAmt.toLocaleString('en-IN')} commission payment (UTR: ${cleanUtr}). Verify in Admin Payments.`,
+      type: 'payment_received',
+      linkId: booking.id
+    });
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: `Commission UTR ${cleanUtr} submitted for ₹${dueAmt.toLocaleString('en-IN')}. Zuggi Admin will verify shortly.`
+    };
+  }
+
+  /**
+   * Admin verifies, marks adjusted in payout, or rejects a driver's 5% cash-trip commission due
+   */
+  public adminVerifyDriverCommission(
+    bookingId: string,
+    decision: 'approve' | 'reject' | 'adjusted',
+    note?: string
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const dueAmt = Number(booking.driverCommissionDueInr) || 0;
+    const txs = this.getPaymentTransactions();
+    const matchingTx = txs.find(
+      (t) => t.bookingId === booking.id && t.type === 'platform_commission' && t.status === 'pending'
+    );
+
+    if (decision === 'approve' || decision === 'adjusted') {
+      const refLabel =
+        booking.driverCommissionUtr ||
+        (decision === 'adjusted' ? `ADJ_PAYOUT_${Date.now().toString().slice(-6)}` : `COMM_CASH_${Date.now().toString().slice(-6)}`);
+      const settledAmt = dueAmt || booking.platformCommissionInr || 0;
+
+      booking.driverCommissionStatus = decision === 'adjusted' ? 'adjusted_in_payout' : 'paid';
+      booking.driverCommissionDueInr = 0;
+      booking.driverCommissionRejectionNote = undefined;
+      booking.driverCommissionPaidAt = new Date().toISOString();
+      if (!booking.driverCommissionUtr) {
+        booking.driverCommissionUtr = refLabel;
+      }
+
+      if (matchingTx) {
+        matchingTx.status = 'success';
+        matchingTx.notes =
+          decision === 'adjusted'
+            ? `5% Cash-trip commission (₹${settledAmt.toLocaleString('en-IN')}) adjusted against online payout.${note ? ` ${note}` : ''}`
+            : `5% Cash-trip commission (₹${settledAmt.toLocaleString('en-IN')}) verified by Admin. Ref: ${refLabel}${note ? ` — ${note}` : ''}`;
+        localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
+      } else {
+        this.recordPaymentTransaction({
+          id: `tx_${Date.now()}_comm_ok`,
+          bookingId: booking.id,
+          type: 'platform_commission',
+          amountInr: settledAmt,
+          orderId: refLabel,
+          status: 'success',
+          timestamp: new Date().toISOString(),
+          notes:
+            decision === 'adjusted'
+              ? `5% Cash-trip commission adjusted from online payout.${note ? ` ${note}` : ''}`
+              : `5% Cash-trip commission collected & verified by Admin. Ref: ${refLabel}${note ? ` — ${note}` : ''}`
+        });
+      }
+
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+      this.syncToSupabase('vs_bookings', booking);
+
+      this.addNotification({
+        recipientRole: 'driver',
+        recipientId: booking.driverId,
+        title: 'Commission Cleared',
+        message:
+          decision === 'adjusted'
+            ? `Your ₹${settledAmt.toLocaleString('en-IN')} commission for Booking ${booking.id} was adjusted against your payout.`
+            : `Your ₹${settledAmt.toLocaleString('en-IN')} commission payment for Booking ${booking.id} has been verified.`,
+        type: 'payment_received',
+        linkId: booking.id
+      });
+
+      this.triggerChange();
+      return {
+        success: true,
+        message:
+          decision === 'adjusted'
+            ? `Marked ₹${settledAmt.toLocaleString('en-IN')} commission as adjusted in payout (${booking.id}).`
+            : `Verified ₹${settledAmt.toLocaleString('en-IN')} commission received from driver (${booking.id}).`
+      };
+    }
+
+    // Reject submitted commission UTR
+    const rejectReason = String(note || '').trim() || 'Commission UTR not found in bank statement. Please re-submit.';
+    booking.driverCommissionStatus = 'due';
+    booking.driverCommissionRejectionNote = rejectReason;
+
+    if (matchingTx) {
+      matchingTx.status = 'failed';
+      matchingTx.notes = `Rejected by Admin: ${rejectReason}`;
+      localStorage.setItem(STORAGE_KEYS.PAYMENT_TRANSACTIONS, JSON.stringify(txs));
+    }
+
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    this.addNotification({
+      recipientRole: 'driver',
+      recipientId: booking.driverId,
+      title: 'Commission UTR Not Verified',
+      message: `Booking ${booking.id}: ${rejectReason}`,
+      type: 'alert',
+      linkId: booking.id
+    });
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: `Rejected commission UTR and notified driver (${booking.id}).`
+    };
+  }
+
+  /**
+   * Admin records a REAL driver bank / UPI payout with the actual bank/UPI UTR reference
+   */
+  public adminRecordDriverPayout(
+    bookingId: string,
+    stage: 'stage1' | 'stage2',
+    payoutUtr: string,
+    paymentModeLabel?: string
+  ): { success: boolean; message: string } {
+    const bookings = this.getBookings();
+    const booking = bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const cleanUtr = String(payoutUtr || '').trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{6,30}$/.test(cleanUtr)) {
+      return { success: false, message: 'Please enter the actual 6–30 character Bank / UPI UTR reference for this payout.' };
+    }
+
+    if (stage === 'stage2') {
+      const dispute = this.getDisputeByBookingId(bookingId);
+      if (dispute && (dispute.status === 'OPEN' || dispute.status === 'INVESTIGATING')) {
+        booking.payoutStage2Status = 'disputed_on_hold';
+        localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+        this.triggerChange();
+        return {
+          success: false,
+          message: 'Final payout is locked while a customer cargo dispute is open. Resolve the dispute first.'
+        };
+      }
+      if (booking.payoutStage2Status === 'settled') {
+        return { success: false, message: 'Final 10% payout is already settled.' };
+      }
+    } else if (booking.payoutStage1Status === 'settled') {
+      return { success: false, message: 'Pickup 90% payout is already settled.' };
+    }
+
+    const isStage1 = stage === 'stage1';
+    const netPayable = Number(booking.netDriverPayableInr) || Math.round((Number(booking.totalAgreedAmountInr) || 0) * 0.95);
+    const payoutAmount = isStage1
+      ? Number(booking.driverFirstPayoutInr) || Math.round(netPayable * 0.90)
+      : Number(booking.driverFinalPayoutInr) || Math.round(netPayable * 0.10);
+
+    if (isStage1) {
+      booking.payoutStage1Status = 'settled';
+      booking.stage1PayoutUtr = cleanUtr;
+      booking.cashfreeStage1SplitId = cleanUtr;
+    } else {
+      booking.payoutStage2Status = 'settled';
+      booking.stage2PayoutUtr = cleanUtr;
+      booking.cashfreeStage2SplitId = cleanUtr;
+      if (booking.paymentAdvanceStatus === 'paid' && booking.paymentBalanceStatus === 'paid') {
+        booking.paymentStatus = 'completed';
+      }
+    }
+
+    const bankSnapshot = this.resolveDriverBankSnapshot(booking);
+    const tds = Math.round(payoutAmount * 0.01);
+    const settlements = this.getSettlements();
+    settlements.unshift({
+      id: `set_${stage}_${Date.now()}`,
+      settlementRef: `ZUG/${isStage1 ? 'SPLIT1' : 'SPLIT2'}/${new Date().getFullYear()}/${Math.floor(10000 + Math.random() * 90000)}`,
+      driverId: booking.driverId,
+      driverName: bankSnapshot.driverName,
+      bookingId: booking.id,
+      grossFreight: isStage1 ? booking.customerAdvanceAmountInr : booking.customerBalanceAmountInr,
+      commission: Math.round((booking.platformCommissionInr || 0) * (isStage1 ? 0.90 : 0.10)),
+      tdsDeduction: tds,
+      netDisbursed: Math.max(0, payoutAmount - tds),
+      bankAccount: {
+        bankName: paymentModeLabel || bankSnapshot.bankName,
+        accountNumberMasked: bankSnapshot.accountNumberMasked,
+        ifsc: bankSnapshot.ifsc,
+        upiId: bankSnapshot.upiId
+      },
+      status: 'settled',
+      utrNumber: cleanUtr,
+      settledAt: new Date().toISOString()
+    });
+    localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(settlements));
+
+    this.recordPaymentTransaction({
+      id: `tx_${Date.now()}_${stage}`,
+      bookingId: booking.id,
+      type: isStage1 ? 'driver_payout_stage1' : 'driver_payout_stage2',
+      amountInr: payoutAmount,
+      orderId: cleanUtr,
+      splitId: cleanUtr,
+      status: 'success',
+      timestamp: new Date().toISOString(),
+      notes: `${isStage1 ? '90% Pickup' : '10% Final'} payout transferred to ${bankSnapshot.driverName} (${paymentModeLabel || bankSnapshot.bankName}). UTR: ${cleanUtr}`
+    });
+
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    this.syncToSupabase('vs_bookings', booking);
+
+    this.addNotification({
+      recipientRole: 'driver',
+      recipientId: booking.driverId,
+      title: isStage1 ? 'Pickup Payout Credited!' : 'Final Payout Credited!',
+      message: `₹${payoutAmount.toLocaleString('en-IN')} transferred to your account (UTR: ${cleanUtr}).`,
+      type: 'payment_received',
+      linkId: booking.id
+    });
+
+    this.triggerChange();
+    return {
+      success: true,
+      message: `Recorded ₹${payoutAmount.toLocaleString('en-IN')} ${isStage1 ? 'Pickup' : 'Final'} payout to ${bankSnapshot.driverName} (UTR: ${cleanUtr}).`
+    };
+  }
+
+  /**
+   * 1. Customer Advance Payment (Live Production Gateway callback helper)
    */
   public payCustomerAdvance(
     bookingId: string,
@@ -2815,35 +3599,36 @@ class LogisticsStore {
     const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
     const advanceAmt = Number(booking.customerAdvanceAmountInr) || Math.round(totalAgreed * 0.90);
     const commissionAmt = Number(booking.platformCommissionInr) || Math.round(totalAgreed * 0.05);
-    const methodLabel = paymentMethodLabel || 'Online Escrow / UPI';
+    const methodLabel = paymentMethodLabel || 'Online Payment Gateway';
+    const refId = paymentRef || `ZUG_ADV_${booking.id}_${Date.now()}`;
     booking.customerAdvanceAmountInr = advanceAmt;
     booking.platformCommissionInr = commissionAmt;
     booking.paymentAdvanceStatus = 'paid';
+    booking.advancePaymentMethod = 'online_gateway';
+    booking.advancePaymentUtr = refId;
     booking.paymentStatus = 'advance_paid';
-    booking.cashfreeAdvanceOrderId = paymentRef || `ZUG_ADV_${booking.id}_${Date.now()}`;
+    booking.cashfreeAdvanceOrderId = refId;
 
-    // Record Transaction
     this.recordPaymentTransaction({
       id: `tx_${Date.now()}_adv`,
       bookingId: booking.id,
       type: 'customer_advance_90',
       amountInr: advanceAmt,
-      orderId: booking.cashfreeAdvanceOrderId,
-      cfPaymentId: paymentRef || `pay_${Date.now().toString(36)}`,
+      orderId: refId,
+      cfPaymentId: refId,
       status: 'success',
       timestamp: new Date().toISOString(),
-      notes: `90% Advance confirmed via ${methodLabel}. Ref: ${booking.cashfreeAdvanceOrderId}. Platform fee: ₹${commissionAmt}`
+      notes: `90% Advance paid via ${methodLabel}. Ref: ${refId}. Platform fee: ₹${commissionAmt}`
     });
 
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
     this.syncToSupabase('vs_bookings', booking);
 
-    // Send notifications
     this.addNotification({
       recipientRole: 'driver',
       recipientId: booking.driverId,
       title: 'Advance Payment Confirmed!',
-      message: `Customer confirmed ₹${advanceAmt.toLocaleString('en-IN')} (90% advance) via ${methodLabel}. You may now proceed to pickup.`,
+      message: `Customer paid ₹${advanceAmt.toLocaleString('en-IN')} (90% advance) via ${methodLabel}. Proceed to pickup.`,
       type: 'payment_received',
       linkId: booking.id
     });
@@ -2852,7 +3637,7 @@ class LogisticsStore {
       recipientRole: 'customer',
       recipientId: booking.customerId,
       title: 'Advance Payment Confirmed',
-      message: `₹${advanceAmt.toLocaleString('en-IN')} confirmed via ${methodLabel}. Transporter notified for pickup.`,
+      message: `₹${advanceAmt.toLocaleString('en-IN')} paid via ${methodLabel}. Transporter notified for pickup.`,
       type: 'payment_received',
       linkId: booking.loadId
     });
@@ -2862,80 +3647,18 @@ class LogisticsStore {
   }
 
   /**
-   * 2. Release Stage 1 Fleet Payout (90% of Net Earnings after verified pickup)
+   * 2. Release Stage 1 Fleet Payout (uses driver's real saved bank/UPI)
    */
-  public releaseStage1Payout(bookingId: string): { success: boolean; message: string } {
-    const bookings = this.getBookings();
-    const booking = bookings.find((b) => b.id === bookingId);
-    if (!booking) return { success: false, message: 'Booking not found.' };
-
-    if (booking.payoutStage1Status === 'settled') {
-      return { success: false, message: 'Stage 1 payout already disbursed.' };
-    }
-
-    const firstPayout = booking.driverFirstPayoutInr || Math.round(booking.netDriverPayableInr * 0.90);
-    booking.payoutStage1Status = 'settled';
-    booking.cashfreeStage1SplitId = `split_1_${booking.id}_${Date.now()}`;
-
-    // Create Settlement Record
-    const driverObj = this.getUserById(booking.driverId);
-    const vehObj = this.getVehicleById(booking.vehicleId);
-    const resolvedDriverName = driverObj?.name || vehObj?.driverName || vehObj?.transporterName || 'Assigned Transporter';
-    const settlements = this.getSettlements();
-    const newSettlement: Settlement = {
-      id: `set_stg1_${Date.now()}`,
-      settlementRef: `CF/SPLIT1/${new Date().getFullYear()}/${Math.floor(10000 + Math.random() * 90000)}`,
-      driverId: booking.driverId,
-      driverName: resolvedDriverName,
-      bookingId: booking.id,
-      grossFreight: booking.customerAdvanceAmountInr,
-      commission: Math.round(booking.platformCommissionInr * 0.90),
-      tdsDeduction: Math.round(firstPayout * 0.01), // 1% TDS
-      netDisbursed: firstPayout - Math.round(firstPayout * 0.01),
-      bankAccount: {
-        bankName: 'Cashfree Verified Bank / UPI',
-        accountNumberMasked: '•••• •••• 9102',
-        ifsc: 'HDFC0000128',
-        upiId: 'transporter@okaxis'
-      },
-      status: 'settled',
-      utrNumber: `CFSPLIT${Date.now().toString().slice(-9)}`,
-      settledAt: new Date().toISOString()
-    };
-    settlements.unshift(newSettlement);
-    localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(settlements));
-
-    // Record Transaction
-    this.recordPaymentTransaction({
-      id: `tx_${Date.now()}_stg1`,
-      bookingId: booking.id,
-      type: 'driver_payout_stage1',
-      amountInr: firstPayout,
-      orderId: booking.cashfreeAdvanceOrderId || booking.id,
-      splitId: booking.cashfreeStage1SplitId,
-      status: 'success',
-      timestamp: new Date().toISOString(),
-      notes: `Stage 1 Easy Split payout (90% of net earnings) released to driver upon pickup.`
-    });
-
-    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
-    this.syncToSupabase('vs_bookings', booking);
-
-    this.addNotification({
-      recipientRole: 'driver',
-      recipientId: booking.driverId,
-      title: 'First Payout Disbursed!',
-      message: `₹${firstPayout.toLocaleString('en-IN')} (90% net earnings) credited to your bank via Cashfree Easy Split.`,
-      type: 'payment_received',
-      linkId: booking.id
-    });
-
-    this.triggerChange();
-    return { success: true, message: `First payout of ₹${firstPayout.toLocaleString('en-IN')} disbursed to driver.` };
+  public releaseStage1Payout(bookingId: string, utrOverride?: string): { success: boolean; message: string } {
+    return this.adminRecordDriverPayout(
+      bookingId,
+      'stage1',
+      utrOverride || `PAYOUT1_${Date.now().toString().slice(-8)}`
+    );
   }
 
   /**
-   * 3. Customer Final Balance Payment (10% post delivery)
+   * 3. Customer Final Balance Payment (Live Production Gateway callback helper)
    */
   public payCustomerBalance(
     bookingId: string,
@@ -2952,124 +3675,58 @@ class LogisticsStore {
 
     const totalAgreed = Number(booking.totalAgreedAmountInr) || 0;
     const balanceAmt = Number(booking.customerBalanceAmountInr) || Math.round(totalAgreed * 0.10);
-    const methodLabel = paymentMethodLabel || 'Online Escrow / UPI';
+    const methodLabel = paymentMethodLabel || 'Online Payment Gateway';
+    const refId = paymentRef || `ZUG_BAL_${booking.id}_${Date.now()}`;
     booking.customerBalanceAmountInr = balanceAmt;
     booking.paymentBalanceStatus = 'paid';
-    booking.cashfreeBalanceOrderId = paymentRef || `ZUG_BAL_${booking.id}_${Date.now()}`;
+    booking.balancePaymentMethod = 'online_gateway';
+    booking.balancePaymentUtr = refId;
+    booking.cashfreeBalanceOrderId = refId;
 
-    // Record Transaction
+    const dispute = this.getDisputeByBookingId(bookingId);
+    if (dispute && (dispute.status === 'OPEN' || dispute.status === 'INVESTIGATING')) {
+      booking.payoutStage2Status = 'disputed_on_hold';
+    } else if (booking.paymentAdvanceStatus === 'paid') {
+      booking.paymentStatus = 'completed';
+    }
+
     this.recordPaymentTransaction({
       id: `tx_${Date.now()}_bal`,
       bookingId: booking.id,
       type: 'customer_balance_10',
       amountInr: balanceAmt,
-      orderId: booking.cashfreeBalanceOrderId,
-      cfPaymentId: paymentRef || `pay_bal_${Date.now().toString(36)}`,
+      orderId: refId,
+      cfPaymentId: refId,
       status: 'success',
       timestamp: new Date().toISOString(),
-      notes: `10% final balance confirmed via ${methodLabel}. Ref: ${booking.cashfreeBalanceOrderId}`
-    });
-
-    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
-    this.syncToSupabase('vs_bookings', booking);
-
-    // If trip completed, POD verified, and NO dispute, release Stage 2 final payout automatically
-    const dispute = this.getDisputeByBookingId(bookingId);
-    if (!dispute || dispute.status === 'RESOLVED_RELEASED') {
-      this.releaseStage2Payout(bookingId);
-    } else {
-      booking.payoutStage2Status = 'disputed_on_hold';
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
-    }
-
-    this.triggerChange();
-    return { success: true, message: `Final balance of ₹${booking.customerBalanceAmountInr.toLocaleString('en-IN')} received successfully.` };
-  }
-
-  /**
-   * 4. Release Stage 2 Final Payout (10% of Net Earnings after delivery, POD, and zero disputes)
-   */
-  public releaseStage2Payout(bookingId: string): { success: boolean; message: string } {
-    const bookings = this.getBookings();
-    const booking = bookings.find((b) => b.id === bookingId);
-    if (!booking) return { success: false, message: 'Booking not found.' };
-
-    // HARD LOCK: Check for active customer dispute
-    const dispute = this.getDisputeByBookingId(bookingId);
-    if (dispute && (dispute.status === 'OPEN' || dispute.status === 'INVESTIGATING')) {
-      booking.payoutStage2Status = 'disputed_on_hold';
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
-      this.triggerChange();
-      return {
-        success: false,
-        message: 'Final payout is LOCKED in escrow because a customer cargo dispute is currently active.'
-      };
-    }
-
-    if (booking.payoutStage2Status === 'settled') {
-      return { success: false, message: 'Final payout has already been settled.' };
-    }
-
-    const finalPayout = booking.driverFinalPayoutInr || Math.round(booking.netDriverPayableInr * 0.10);
-    booking.payoutStage2Status = 'settled';
-    booking.paymentStatus = 'completed';
-    booking.cashfreeStage2SplitId = `split_2_${booking.id}_${Date.now()}`;
-
-    // Create Settlement Record
-    const driverObj = this.getUserById(booking.driverId);
-    const vehObj = this.getVehicleById(booking.vehicleId);
-    const resolvedDriverName = driverObj?.name || vehObj?.driverName || vehObj?.transporterName || 'Assigned Transporter';
-    const settlements = this.getSettlements();
-    const newSettlement: Settlement = {
-      id: `set_stg2_${Date.now()}`,
-      settlementRef: `CF/SPLIT2/${new Date().getFullYear()}/${Math.floor(10000 + Math.random() * 90000)}`,
-      driverId: booking.driverId,
-      driverName: resolvedDriverName,
-      bookingId: booking.id,
-      grossFreight: booking.customerBalanceAmountInr,
-      commission: Math.round(booking.platformCommissionInr * 0.10),
-      tdsDeduction: Math.round(finalPayout * 0.01),
-      netDisbursed: finalPayout - Math.round(finalPayout * 0.01),
-      bankAccount: {
-        bankName: 'Cashfree Verified Bank / UPI',
-        accountNumberMasked: '•••• •••• 9102',
-        ifsc: 'HDFC0000128',
-        upiId: 'transporter@okaxis'
-      },
-      status: 'settled',
-      utrNumber: `CFSPLIT${Date.now().toString().slice(-9)}`,
-      settledAt: new Date().toISOString()
-    };
-    settlements.unshift(newSettlement);
-    localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(settlements));
-
-    // Record Transaction
-    this.recordPaymentTransaction({
-      id: `tx_${Date.now()}_stg2`,
-      bookingId: booking.id,
-      type: 'driver_payout_stage2',
-      amountInr: finalPayout,
-      orderId: booking.cashfreeBalanceOrderId || booking.id,
-      splitId: booking.cashfreeStage2SplitId,
-      status: 'success',
-      timestamp: new Date().toISOString(),
-      notes: `Stage 2 final payout (10% of net earnings) released post POD verification.`
+      notes: `10% final balance paid via ${methodLabel}. Ref: ${refId}`
     });
 
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
     this.syncToSupabase('vs_bookings', booking);
 
     this.addNotification({
-      recipientRole: 'driver',
-      recipientId: booking.driverId,
-      title: 'Final Payout Disbursed!',
-      message: `₹${finalPayout.toLocaleString('en-IN')} (remaining 10% net earnings) credited to your bank. Trip fully settled!`,
+      recipientRole: 'admin',
+      recipientId: 'admin',
+      title: 'Customer Final Balance Paid',
+      message: `Booking ${booking.id}: Final 10% balance (₹${balanceAmt.toLocaleString('en-IN')}) received. Release driver final payout from Admin Payments.`,
       type: 'payment_received',
       linkId: booking.id
     });
 
     this.triggerChange();
-    return { success: true, message: `Final payout of ₹${finalPayout.toLocaleString('en-IN')} successfully settled.` };
+    return { success: true, message: `Final balance of ₹${balanceAmt.toLocaleString('en-IN')} received successfully.` };
+  }
+
+  /**
+   * 4. Release Stage 2 Final Payout (uses driver's real saved bank/UPI)
+   */
+  public releaseStage2Payout(bookingId: string, utrOverride?: string): { success: boolean; message: string } {
+    return this.adminRecordDriverPayout(
+      bookingId,
+      'stage2',
+      utrOverride || `PAYOUT2_${Date.now().toString().slice(-8)}`
+    );
   }
 
   /**

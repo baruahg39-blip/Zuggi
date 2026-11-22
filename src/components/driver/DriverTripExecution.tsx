@@ -594,89 +594,182 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
           </span>
         </div>
 
-        {/* CASHFREE EASY SPLIT ESCROW & PAYOUT STATUS BANNER */}
-        <div className="p-3.5 rounded-2xl bg-[#060309] border border-gray-800 space-y-2.5 text-xs">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold">
-            <span className="flex items-center gap-1.5 text-[#FF85B7]">
-              <Lock className="w-3.5 h-3.5" />
-              <span>Cashfree Easy Split Escrow Tracker</span>
-            </span>
-            <span className="text-gray-400 font-mono text-[10px]">
-              Fare: ₹{booking.totalAgreedAmountInr.toLocaleString('en-IN')} (5% Fee: ₹
-              {booking.platformCommissionInr.toLocaleString('en-IN')})
-            </span>
-          </div>
+        {/* PRACTICAL TRIP PAYMENT & PAYOUT STATUS */}
+        {(() => {
+          const activeUser = logisticsStore.getCurrentUser();
+          const driverProfile = logisticsStore.getUserById(booking.driverId) || activeUser;
+          const hasBankOrUpi = Boolean(
+            driverProfile?.bankDetails?.upiId || driverProfile?.bankDetails?.accountNumber
+          );
+          const stage1Amt = booking.driverFirstPayoutInr || Math.round(booking.netDriverPayableInr * 0.9);
+          const stage2Amt = booking.driverFinalPayoutInr || Math.round(booking.netDriverPayableInr * 0.1);
+          const customerAdvAmt =
+            booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.9);
+          const customerBalAmt =
+            booking.customerBalanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.1);
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-            {/* Stage 1: 90% */}
-            <div
-              className={`p-2.5 rounded-xl border ${
-                booking.payoutStage1Status === 'settled'
-                  ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-                  : booking.paymentAdvanceStatus === 'paid'
-                  ? 'bg-indigo-950/40 border-indigo-800/60 text-indigo-300'
-                  : 'bg-amber-950/30 border-amber-800/50 text-amber-300'
-              }`}
-            >
-              <div className="font-bold flex items-center gap-1">
-                {booking.payoutStage1Status === 'settled' ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : (
-                  <Clock className="w-3.5 h-3.5 text-amber-400" />
-                )}
-                <span>
-                  Stage 1 (90%): ₹
-                  {(booking.driverFirstPayoutInr || Math.round(booking.netDriverPayableInr * 0.9)).toLocaleString(
-                    'en-IN'
-                  )}
+          const isStage1DirectPending =
+            booking.paymentAdvanceStatus === 'processing' &&
+            booking.advancePaymentMethod === 'pay_driver_direct';
+          const isStage2DirectPending =
+            booking.paymentBalanceStatus === 'processing' &&
+            booking.balancePaymentMethod === 'pay_driver_direct';
+
+          const handleConfirmDirect = (stage: 'advance_90' | 'balance_10') => {
+            const res = logisticsStore.driverConfirmDirectPayment(
+              booking.id,
+              stage,
+              activeUser?.id || booking.driverId
+            );
+            if (res.success) {
+              showToast(res.message, 'success');
+              setStatusFeedback({ text: res.message, error: false });
+            } else {
+              showToast(res.message, 'error');
+              setStatusFeedback({ text: res.message, error: true });
+            }
+          };
+
+          return (
+            <div className="p-3.5 rounded-2xl bg-[#060309] border border-gray-800 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold">
+                <span className="flex items-center gap-1.5 text-[#FF85B7]">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Trip Payment &amp; Payout Status</span>
+                </span>
+                <span className="text-gray-400 font-mono tabular-nums text-[10px]">
+                  Fare: ₹{booking.totalAgreedAmountInr.toLocaleString('en-IN')} (5% Fee: ₹
+                  {booking.platformCommissionInr.toLocaleString('en-IN')})
                 </span>
               </div>
-              <p className="text-[10px] text-gray-400 mt-0.5">
-                {booking.payoutStage1Status === 'settled'
-                  ? 'Credited to your bank account'
-                  : booking.paymentAdvanceStatus === 'paid'
-                  ? 'Escrowed by customer. Releases at pickup.'
-                  : 'Awaiting customer 90% advance deposit'}
-              </p>
-            </div>
 
-            {/* Stage 2: 10% */}
-            <div
-              className={`p-2.5 rounded-xl border ${
-                booking.dispute && (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING')
-                  ? 'bg-rose-950/40 border-rose-800/60 text-rose-300'
-                  : booking.payoutStage2Status === 'settled'
-                  ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
-                  : 'bg-gray-900 border-gray-800 text-gray-400'
-              }`}
-            >
-              <div className="font-bold flex items-center gap-1">
-                {booking.dispute &&
-                (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING') ? (
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                ) : booking.payoutStage2Status === 'settled' ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                ) : (
-                  <Lock className="w-3.5 h-3.5 text-gray-500" />
-                )}
-                <span>
-                  Stage 2 (10%): ₹
-                  {(booking.driverFinalPayoutInr || Math.round(booking.netDriverPayableInr * 0.1)).toLocaleString(
-                    'en-IN'
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
+                {/* Step 1: 90% Pickup */}
+                <div
+                  className={`p-3 rounded-xl border space-y-2 ${
+                    booking.payoutStage1Status === 'settled'
+                      ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                      : isStage1DirectPending
+                      ? 'bg-amber-950/40 border-amber-600/60 text-amber-200'
+                      : booking.paymentAdvanceStatus === 'paid'
+                      ? 'bg-sky-950/40 border-sky-800/60 text-sky-200'
+                      : 'bg-gray-900/90 border-gray-800 text-gray-300'
+                  }`}
+                >
+                  <div className="font-bold flex items-center gap-1.5">
+                    {booking.payoutStage1Status === 'settled' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span className="font-mono tabular-nums">
+                      Step 1 (90%): ₹{stage1Amt.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-gray-300 leading-snug">
+                    {booking.payoutStage1Status === 'settled'
+                      ? booking.advancePaymentMethod === 'pay_driver_direct'
+                        ? 'Confirmed collected directly from customer at pickup.'
+                        : `Paid to your account${booking.stage1PayoutUtr ? ` · UTR ${booking.stage1PayoutUtr}` : ''}`
+                      : isStage1DirectPending
+                      ? `Customer will pay ₹${customerAdvAmt.toLocaleString('en-IN')} directly to you at pickup (Cash / UPI).`
+                      : booking.paymentAdvanceStatus === 'paid'
+                      ? 'Customer paid Zuggi. Admin will transfer your 90% payout to your UPI/Bank.'
+                      : booking.paymentAdvanceStatus === 'processing'
+                      ? 'Customer submitted UTR — Zuggi Admin is verifying.'
+                      : 'Waiting for customer 90% advance payment.'}
+                  </p>
+
+                  {isStage1DirectPending && (
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmDirect('advance_90')}
+                      className="w-full min-h-[40px] px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition cursor-pointer"
+                    >
+                      Confirm ₹{customerAdvAmt.toLocaleString('en-IN')} Received at Pickup
+                    </button>
                   )}
-                </span>
+                </div>
+
+                {/* Step 2: 10% Final Delivery */}
+                <div
+                  className={`p-3 rounded-xl border space-y-2 ${
+                    booking.dispute &&
+                    (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING')
+                      ? 'bg-rose-950/40 border-rose-800/60 text-rose-300'
+                      : booking.payoutStage2Status === 'settled'
+                      ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                      : isStage2DirectPending
+                      ? 'bg-amber-950/40 border-amber-600/60 text-amber-200'
+                      : booking.paymentBalanceStatus === 'paid'
+                      ? 'bg-sky-950/40 border-sky-800/60 text-sky-200'
+                      : 'bg-gray-900 border-gray-800 text-gray-400'
+                  }`}
+                >
+                  <div className="font-bold flex items-center gap-1.5">
+                    {booking.dispute &&
+                    (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING') ? (
+                      <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    ) : booking.payoutStage2Status === 'settled' ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : (
+                      <Lock className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                    )}
+                    <span className="font-mono tabular-nums">
+                      Step 2 (10%): ₹{stage2Amt.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-gray-300 leading-snug">
+                    {booking.dispute &&
+                    (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING')
+                      ? 'On hold: customer opened a delivery dispute.'
+                      : booking.payoutStage2Status === 'settled'
+                      ? booking.balancePaymentMethod === 'pay_driver_direct'
+                        ? 'Confirmed collected directly from customer at delivery.'
+                        : `Paid to your account${booking.stage2PayoutUtr ? ` · UTR ${booking.stage2PayoutUtr}` : ''}`
+                      : isStage2DirectPending
+                      ? `Customer will pay ₹${customerBalAmt.toLocaleString('en-IN')} directly to you at delivery (Cash / UPI).`
+                      : booking.paymentBalanceStatus === 'paid'
+                      ? 'Customer paid Zuggi. Admin will transfer your 10% final payout.'
+                      : booking.paymentBalanceStatus === 'processing'
+                      ? 'Customer submitted balance UTR — Zuggi Admin is verifying.'
+                      : 'Due after delivery & POD confirmation.'}
+                  </p>
+
+                  {isStage2DirectPending && (
+                    <button
+                      type="button"
+                      onClick={() => handleConfirmDirect('balance_10')}
+                      className="w-full min-h-[40px] px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition cursor-pointer"
+                    >
+                      Confirm ₹{customerBalAmt.toLocaleString('en-IN')} Received at Delivery
+                    </button>
+                  )}
+                </div>
               </div>
-              <p className="text-[10px] text-gray-400 mt-0.5">
-                {booking.dispute &&
-                (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING')
-                  ? 'HELD: Customer raised cargo dispute'
-                  : booking.payoutStage2Status === 'settled'
-                  ? 'Credited to your bank account'
-                  : 'Releases after POD & customer balance'}
-              </p>
+
+              {(Number(booking.driverCommissionDueInr) || 0) > 0 && (
+                <div className="p-2.5 rounded-xl bg-amber-950/35 border border-amber-600/50 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    <strong>Zuggi 5% Commission Due (Cash Collection):</strong>{' '}
+                    <span className="font-mono tabular-nums font-bold text-amber-300">
+                      ₹{(Number(booking.driverCommissionDueInr) || 0).toLocaleString('en-IN')}
+                    </span>{' '}
+                    {booking.driverCommissionStatus === 'verifying_utr'
+                      ? `(UTR ${booking.driverCommissionUtr} verifying with Admin)`
+                      : '— Pay via UPI in Earnings → Commission Due or adjust in next online payout.'}
+                  </span>
+                </div>
+              )}
+
+              {!hasBankOrUpi && (
+                <p className="text-[11px] text-amber-300 bg-amber-950/30 border border-amber-800/50 rounded-xl px-3 py-2">
+                  Tip: Add your UPI ID or Bank Account in <strong>Earnings → Bank / UPI</strong> so Zuggi Admin can transfer your payouts immediately.
+                </p>
+              )}
             </div>
-          </div>
-        </div>
+          );
+        })()}
 
         {/* Dynamic Action according to trip stage */}
         {booking.status === 'assigned' && (

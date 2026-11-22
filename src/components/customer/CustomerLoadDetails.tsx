@@ -568,93 +568,202 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                   </span>
                 </div>
 
-                {/* CASHFREE EASY SPLIT MARKETPLACE 2-STAGE ESCROW CARD */}
+                {/* PRACTICAL 2-STEP FREIGHT PAYMENT CARD */}
                 <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                     <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200">
-                      <Lock className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Cashfree Easy Split Escrow</span>
+                      <CreditCard className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Freight Payment (2 Steps)</span>
                     </div>
-                    <span className="text-[10px] text-indigo-400 font-mono font-semibold">5% Commission Split</span>
+                    <span className="text-[11px] text-slate-400">90% Pickup · 10% Delivery</span>
                   </div>
 
-                  {/* Stage 1: 90% Advance */}
-                  <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/60">
-                    <div>
-                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                        {booking.paymentAdvanceStatus === 'paid' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <div className="w-3.5 h-3.5 rounded-full border border-amber-500/80" />
+                  {/* Step 1: 90% Advance */}
+                  {(() => {
+                    const advAmt = booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.90);
+                    const advStatus = booking.paymentAdvanceStatus;
+                    const advMethod = booking.advancePaymentMethod;
+                    const isPaid = advStatus === 'paid';
+                    const isProcessing = advStatus === 'processing';
+                    const isDirect = advMethod === 'pay_driver_direct';
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/60 gap-2">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                              {isPaid ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              ) : isProcessing ? (
+                                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              ) : (
+                                <div className="w-3.5 h-3.5 rounded-full border border-amber-500/80 shrink-0" />
+                              )}
+                              <span>Step 1: 90% Advance</span>
+                            </div>
+                            <span className="text-[10px] text-slate-400 block mt-0.5 truncate">
+                              {isPaid
+                                ? isDirect
+                                  ? 'Paid directly to driver at pickup'
+                                  : booking.advancePaymentUtr
+                                  ? `Verified · UTR ${booking.advancePaymentUtr}`
+                                  : 'Verified & Paid'
+                                : isProcessing
+                                ? isDirect
+                                  ? 'Pay driver at pickup · Driver will confirm receipt'
+                                  : `UTR ${booking.advancePaymentUtr || ''} · Verifying with Zuggi Admin`
+                                : 'Pay via UPI, Bank Transfer, or Pay Driver at Pickup'}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-mono tabular-nums font-bold text-emerald-400 text-xs">
+                              ₹{advAmt.toLocaleString('en-IN')}
+                            </div>
+                            <span
+                              className={`text-[10px] font-bold uppercase ${
+                                isPaid ? 'text-emerald-400' : isProcessing ? 'text-amber-400' : 'text-slate-400'
+                              }`}
+                            >
+                              {isPaid
+                                ? 'Paid'
+                                : isProcessing
+                                ? isDirect
+                                  ? 'Pay at Pickup'
+                                  : 'Verifying UTR'
+                                : 'Unpaid'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {booking.advanceRejectionNote && !isPaid && !isProcessing && (
+                          <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
+                            <strong>Re-submit needed:</strong> {booking.advanceRejectionNote}
+                          </div>
                         )}
-                        <span>Stage 1: Advance (90%)</span>
-                      </div>
-                      <span className="text-[10px] text-slate-400">Pre-pickup dispatch deposit</span>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono font-bold text-emerald-400 text-xs">
-                        ₹{(booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.90)).toLocaleString('en-IN')}
-                      </div>
-                      <span className={`text-[9px] font-bold uppercase ${booking.paymentAdvanceStatus === 'paid' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                        {booking.paymentAdvanceStatus === 'paid' ? 'Escrowed' : 'Unpaid'}
-                      </span>
-                    </div>
-                  </div>
 
-                  {booking.paymentAdvanceStatus !== 'paid' && (
-                    <button
-                      type="button"
-                      onClick={() => setEscrowModalStage('advance_90')}
-                      className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-98"
-                    >
-                      <CreditCard className="w-4 h-4" />
-                      <span>Pay 90% Advance (₹{(booking.customerAdvanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.90)).toLocaleString('en-IN')}) — UPI / Pickup / Escrow</span>
-                    </button>
-                  )}
-
-                  {/* Stage 2: 10% Final Balance */}
-                  <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/60">
-                    <div>
-                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
-                        {booking.paymentBalanceStatus === 'paid' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <div className="w-3.5 h-3.5 rounded-full border border-slate-700" />
+                        {!isPaid && (
+                          <button
+                            type="button"
+                            onClick={() => setEscrowModalStage('advance_90')}
+                            className={`w-full min-h-[40px] px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer ${
+                              isProcessing
+                                ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                                : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md'
+                            }`}
+                          >
+                            <CreditCard className="w-4 h-4" />
+                            <span>
+                              {isProcessing
+                                ? 'Change Payment Method / Update UTR'
+                                : `Pay 90% Advance (₹${advAmt.toLocaleString('en-IN')})`}
+                            </span>
+                          </button>
                         )}
-                        <span>Stage 2: Final Balance (10%)</span>
                       </div>
-                      <span className="text-[10px] text-slate-400">Post-delivery & POD clearance</span>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-mono font-bold text-slate-200 text-xs">
-                        ₹{(booking.customerBalanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.10)).toLocaleString('en-IN')}
-                      </div>
-                      <span className={`text-[9px] font-bold uppercase ${booking.paymentBalanceStatus === 'paid' ? 'text-emerald-400' : 'text-slate-400'}`}>
-                        {booking.paymentBalanceStatus === 'paid' ? 'Paid & Settled' : 'Pay on Delivery'}
-                      </span>
-                    </div>
-                  </div>
+                    );
+                  })()}
 
-                  {booking.paymentBalanceStatus !== 'paid' && (load.status === 'delivered' || load.status === 'completed' || booking.status === 'completed') && (
-                    <button
-                      type="button"
-                      onClick={() => setEscrowModalStage('balance_10')}
-                      className="w-full py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition cursor-pointer active:scale-98"
-                    >
-                      <CreditCard className="w-4 h-4" />
-                      <span>Pay 10% Final Balance (₹{(booking.customerBalanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.10)).toLocaleString('en-IN')})</span>
-                    </button>
-                  )}
+                  {/* Step 2: 10% Final Balance */}
+                  {(() => {
+                    const balAmt = booking.customerBalanceAmountInr || Math.round(booking.totalAgreedAmountInr * 0.10);
+                    const balStatus = booking.paymentBalanceStatus;
+                    const balMethod = booking.balancePaymentMethod;
+                    const isPaid = balStatus === 'paid';
+                    const isProcessing = balStatus === 'processing';
+                    const isDirect = balMethod === 'pay_driver_direct';
+                    const canPayBalance =
+                      !isPaid &&
+                      (load.status === 'at_destination' ||
+                        load.status === 'delivered' ||
+                        load.status === 'completed' ||
+                        booking.status === 'at_destination' ||
+                        booking.status === 'delivered' ||
+                        booking.status === 'completed');
+
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/60 gap-2">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                              {isPaid ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              ) : isProcessing ? (
+                                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              ) : (
+                                <div className="w-3.5 h-3.5 rounded-full border border-slate-700 shrink-0" />
+                              )}
+                              <span>Step 2: 10% Final Balance</span>
+                            </div>
+                            <span className="text-[10px] text-slate-400 block mt-0.5 truncate">
+                              {isPaid
+                                ? isDirect
+                                  ? 'Paid directly to driver at delivery'
+                                  : booking.balancePaymentUtr
+                                  ? `Verified · UTR ${booking.balancePaymentUtr}`
+                                  : 'Verified & Paid'
+                                : isProcessing
+                                ? isDirect
+                                  ? 'Pay driver at delivery · Driver will confirm receipt'
+                                  : `UTR ${booking.balancePaymentUtr || ''} · Verifying with Zuggi Admin`
+                                : 'Pay upon safe delivery & unloading'}
+                            </span>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="font-mono tabular-nums font-bold text-slate-200 text-xs">
+                              ₹{balAmt.toLocaleString('en-IN')}
+                            </div>
+                            <span
+                              className={`text-[10px] font-bold uppercase ${
+                                isPaid ? 'text-emerald-400' : isProcessing ? 'text-amber-400' : 'text-slate-400'
+                              }`}
+                            >
+                              {isPaid
+                                ? 'Paid'
+                                : isProcessing
+                                ? isDirect
+                                  ? 'Pay at Delivery'
+                                  : 'Verifying UTR'
+                                : 'On Delivery'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {booking.balanceRejectionNote && !isPaid && !isProcessing && (
+                          <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200">
+                            <strong>Re-submit needed:</strong> {booking.balanceRejectionNote}
+                          </div>
+                        )}
+
+                        {canPayBalance && (
+                          <button
+                            type="button"
+                            onClick={() => setEscrowModalStage('balance_10')}
+                            className={`w-full min-h-[40px] px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition cursor-pointer ${
+                              isProcessing
+                                ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                                : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-md'
+                            }`}
+                          >
+                            <CreditCard className="w-4 h-4" />
+                            <span>
+                              {isProcessing
+                                ? 'Change Payment Method / Update UTR'
+                                : `Pay 10% Final Balance (₹${balAmt.toLocaleString('en-IN')})`}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Active Dispute Alert if any */}
                   {booking.dispute && (booking.dispute.status === 'OPEN' || booking.dispute.status === 'INVESTIGATING') && (
                     <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[11px] space-y-1">
                       <div className="font-bold flex items-center gap-1 text-rose-400">
                         <ShieldAlert className="w-3.5 h-3.5" />
-                        <span>Driver Final Payout Frozen (Dispute Active)</span>
+                        <span>Driver Final Payout On Hold (Dispute Open)</span>
                       </div>
                       <p className="text-[10px] text-rose-300/80">
-                        Reason: {booking.dispute.reason.replace('_', ' ').toUpperCase()} — ₹{booking.dispute.heldAmountInr.toLocaleString('en-IN')} held in Cashfree escrow.
+                        Reason: {booking.dispute.reason.replace(/_/g, ' ').toUpperCase()} — ₹{booking.dispute.heldAmountInr.toLocaleString('en-IN')} held pending Admin review.
                       </p>
                     </div>
                   )}
@@ -664,9 +773,9 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                     <button
                       type="button"
                       onClick={() => setShowReceiptModal(true)}
-                      className="py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition border border-slate-800 cursor-pointer"
+                      className="min-h-[38px] px-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition border border-slate-800 cursor-pointer"
                     >
-                      <Receipt className="w-3.5 h-3.5 text-indigo-400" />
+                      <Receipt className="w-3.5 h-3.5 text-emerald-400" />
                       <span>Payment Receipt</span>
                     </button>
 
@@ -674,7 +783,7 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                       <button
                         type="button"
                         onClick={() => setShowDisputeModal(true)}
-                        className="py-1.5 px-2 rounded-lg bg-slate-900 hover:bg-rose-950/40 hover:text-rose-300 text-slate-400 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition border border-slate-800 hover:border-rose-800/50 cursor-pointer"
+                        className="min-h-[38px] px-2 rounded-lg bg-slate-900 hover:bg-rose-950/40 hover:text-rose-300 text-slate-400 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition border border-slate-800 hover:border-rose-800/50 cursor-pointer"
                       >
                         <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
                         <span>Raise Dispute</span>

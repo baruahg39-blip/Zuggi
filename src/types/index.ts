@@ -245,6 +245,19 @@ export interface Quotation {
   createdAt: string;
 }
 
+export type PracticalPaymentMethod = 'upi' | 'bank_transfer' | 'pay_driver_direct' | 'online_gateway';
+
+export interface BusinessPaymentSettings {
+  businessName: string;
+  upiId: string;
+  bankName: string;
+  accountHolderName: string;
+  accountNumber: string;
+  ifscCode: string;
+  supportPhone?: string;
+  updatedAt?: string;
+}
+
 export interface Booking {
   id: string;
   loadId: string;
@@ -271,6 +284,19 @@ export interface Booking {
   paymentBalanceStatus: 'pending' | 'processing' | 'paid' | 'failed';
   payoutStage1Status: 'pending' | 'processing' | 'settled' | 'failed';
   payoutStage2Status: 'pending' | 'processing' | 'settled' | 'disputed_on_hold' | 'failed';
+  advancePaymentMethod?: PracticalPaymentMethod;
+  advancePaymentUtr?: string;
+  advanceRejectionNote?: string;
+  balancePaymentMethod?: PracticalPaymentMethod;
+  balancePaymentUtr?: string;
+  balanceRejectionNote?: string;
+  stage1PayoutUtr?: string;
+  stage2PayoutUtr?: string;
+  driverCommissionDueInr?: number;
+  driverCommissionStatus?: 'none' | 'due' | 'verifying_utr' | 'paid' | 'adjusted_in_payout';
+  driverCommissionUtr?: string;
+  driverCommissionRejectionNote?: string;
+  driverCommissionPaidAt?: string;
   cashfreeAdvanceOrderId?: string;
   cashfreeBalanceOrderId?: string;
   cashfreeStage1SplitId?: string;

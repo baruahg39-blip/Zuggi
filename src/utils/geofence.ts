@@ -1,8 +1,10 @@
 import { GeofenceEvent, GeofenceZoneConfig, GeofenceZoneState } from '../types';
 
+export const GEOFENCE_ALERT_RADIUS_METERS = 500;
+
 export const DEFAULT_GEOFENCE_CONFIG: GeofenceZoneConfig = {
-  pickupRadiusMeters: 800,
-  deliveryRadiusMeters: 500,
+  pickupRadiusMeters: GEOFENCE_ALERT_RADIUS_METERS,
+  deliveryRadiusMeters: GEOFENCE_ALERT_RADIUS_METERS,
   autoUpdateStatus: true
 };
 
@@ -159,3 +161,169 @@ export function buildGeofenceEventMessage(
     : '';
   return `Vehicle ${verb} ${city} ${zoneTitle} (${formatMetersOrKm(distanceMeters)} from center, radius ${formatMetersOrKm(radiusMeters)}).${statusSuffix}`;
 }
+
+// --- 500m Proximity Geo-Fencing & Browser Notification Utility ---
+
+export type BrowserNotificationPermissionState = NotificationPermission | 'unsupported';
+
+export interface ProximityGeofenceResult {
+  distanceToPickupMeters: number;
+  distanceToDeliveryMeters: number;
+  insidePickup: boolean;
+  insideDelivery: boolean;
+  newlyEnteredZones: Array<'pickup' | 'delivery'>;
+  checkedAt: string;
+}
+
+export function check500mGeofenceEntry(params: {
+  lat: number;
+  lng: number;
+  pickup: { lat: number; lng: number };
+  delivery: { lat: number; lng: number };
+  wasInsidePickup: boolean;
+  wasInsideDelivery: boolean;
+  radiusMeters?: number;
+}): ProximityGeofenceResult {
+  const radius = params.radiusMeters ?? GEOFENCE_ALERT_RADIUS_METERS;
+  const exitHysteresisMeters = 50; // Prevents jitter re-triggering right on the 500m boundary
+
+  const distanceToPickupMeters = calculateDistanceMeters(
+    params.lat,
+    params.lng,
+    params.pickup.lat,
+    params.pickup.lng
+  );
+  const distanceToDeliveryMeters = calculateDistanceMeters(
+    params.lat,
+    params.lng,
+    params.delivery.lat,
+    params.delivery.lng
+  );
+
+  const insidePickup = params.wasInsidePickup
+    ? distanceToPickupMeters <= radius + exitHysteresisMeters
+    : distanceToPickupMeters <= radius;
+
+  const insideDelivery = params.wasInsideDelivery
+    ? distanceToDeliveryMeters <= radius + exitHysteresisMeters
+    : distanceToDeliveryMeters <= radius;
+
+  const newlyEnteredZones: Array<'pickup' | 'delivery'> = [];
+  if (!params.wasInsidePickup && distanceToPickupMeters <= radius) {
+    newlyEnteredZones.push('pickup');
+  }
+  if (!params.wasInsideDelivery && distanceToDeliveryMeters <= radius) {
+    newlyEnteredZones.push('delivery');
+  }
+
+  return {
+    distanceToPickupMeters,
+    distanceToDeliveryMeters,
+    insidePickup,
+    insideDelivery,
+    newlyEnteredZones,
+    checkedAt: new Date().toISOString()
+  };
+}
+
+export function getBrowserNotificationPermission(): BrowserNotificationPermissionState {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  return window.Notification.permission;
+}
+
+export async function requestBrowserNotificationPermission(): Promise<BrowserNotificationPermissionState> {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  try {
+    if (window.Notification.permission === 'granted') {
+      return 'granted';
+    }
+    const result = await window.Notification.requestPermission();
+    return result;
+  } catch {
+    return window.Notification.permission || 'denied';
+  }
+}
+
+export interface GeofenceNotificationPayload {
+  zoneType: 'pickup' | 'delivery';
+  city: string;
+  address?: string;
+  distanceMeters: number;
+  radiusMeters?: number;
+  bookingId: string;
+  vehicleRegNumber?: string;
+}
+
+export interface GeofenceNotificationResult {
+  deliveredViaBrowser: boolean;
+  title: string;
+  body: string;
+  timestamp: string;
+}
+
+/**
+ * Fires a native browser Notification when the vehicle enters the 500m geo-fence
+ * around pickup or delivery coordinates (with Service Worker fallback for mobile Chrome).
+ */
+export async function triggerGeofenceBrowserNotification(
+  payload: GeofenceNotificationPayload
+): Promise<GeofenceNotificationResult> {
+  const radius = payload.radiusMeters ?? GEOFENCE_ALERT_RADIUS_METERS;
+  const zoneLabel = payload.zoneType === 'pickup' ? 'Pickup Point' : 'Delivery Destination';
+  const title =
+    payload.zoneType === 'pickup'
+      ? `Entered ${radius}m Pickup Zone — ${payload.city}`
+      : `Entered ${radius}m Delivery Zone — ${payload.city}`;
+
+  const vehiclePrefix = payload.vehicleRegNumber ? `${payload.vehicleRegNumber} is ` : 'Vehicle is ';
+  const addressSuffix = payload.address ? ` (${payload.address})` : '';
+  const body = `${vehiclePrefix}${formatMetersOrKm(payload.distanceMeters)} from ${zoneLabel}${addressSuffix}. Ready for ${
+    payload.zoneType === 'pickup' ? 'loading arrival check-in' : 'unloading & POD handover'
+  }.`;
+
+  const timestamp = new Date().toISOString();
+  let deliveredViaBrowser = false;
+
+  if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
+    const options: NotificationOptions = {
+      body,
+      tag: `zuggi-geofence-${payload.bookingId}-${payload.zoneType}`,
+      renotify: true,
+      requireInteraction: false
+    } as NotificationOptions;
+
+    try {
+      const notification = new window.Notification(title, options);
+      notification.onclick = () => {
+        window.focus();
+        notification.close();
+      };
+      deliveredViaBrowser = true;
+    } catch {
+      // Mobile browsers often require ServiceWorkerRegistration.showNotification
+      try {
+        if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+          const registration = await navigator.serviceWorker.ready;
+          if (registration && typeof registration.showNotification === 'function') {
+            await registration.showNotification(title, options);
+            deliveredViaBrowser = true;
+          }
+        }
+      } catch {
+        deliveredViaBrowser = false;
+      }
+    }
+  }
+
+  return {
+    deliveredViaBrowser,
+    title,
+    body,
+    timestamp
+  };
+}
+

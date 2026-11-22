@@ -351,7 +351,7 @@ tripsDb.set(defaultTrip1.load_id, defaultTrip1);
 tripsDb.set('booking_01', defaultTrip1);
 
 const DEFAULT_TRIP_GEOFENCE_CONFIG: GeofenceConfigRecord = {
-  pickupRadiusMeters: 800,
+  pickupRadiusMeters: 500,
   deliveryRadiusMeters: 500,
   autoUpdateStatus: true
 };

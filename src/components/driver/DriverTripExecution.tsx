@@ -16,7 +16,9 @@ import {
   ExternalLink,
   Search,
   RefreshCw,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Bell,
+  BellOff
 } from 'lucide-react';
 import {
   Booking,
@@ -31,6 +33,16 @@ import {
   calculateLiveDestinationEta,
   computeHaversineMeters
 } from '../../services/routeMatrixEta';
+import {
+  GEOFENCE_ALERT_RADIUS_METERS,
+  BrowserNotificationPermissionState,
+  check500mGeofenceEntry,
+  formatMetersOrKm,
+  getBrowserNotificationPermission,
+  offsetCoordinateByMeters,
+  requestBrowserNotificationPermission,
+  triggerGeofenceBrowserNotification
+} from '../../utils/geofence';
 import { LiveTrackingMap } from '../maps/LiveTrackingMap';
 import { GeofenceMonitorPanel } from '../tracking/GeofenceMonitorPanel';
 import { showToast } from '../shared/Toast';
@@ -114,6 +126,24 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     return initialBooking?.liveEta || null;
   });
   const [isCalculatingEta, setIsCalculatingEta] = useState<boolean>(false);
+  const [notificationPermission, setNotificationPermission] =
+    useState<BrowserNotificationPermissionState>(() => getBrowserNotificationPermission());
+  const [proximity500m, setProximity500m] = useState<{
+    distanceToPickupMeters?: number;
+    distanceToDeliveryMeters?: number;
+    insidePickup: boolean;
+    insideDelivery: boolean;
+    lastAlert?: {
+      zoneType: 'pickup' | 'delivery';
+      title: string;
+      body: string;
+      timestamp: string;
+      deliveredViaBrowser: boolean;
+    };
+  }>({
+    insidePickup: false,
+    insideDelivery: false
+  });
 
   const loadingFileInputRef = useRef<HTMLInputElement | null>(null);
   const podFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -121,6 +151,11 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
   const lastEtaCalcAtRef = useRef<number>(0);
   const lastEtaCoordRef = useRef<{ lat: number; lng: number } | null>(null);
   const etaInFlightRef = useRef<boolean>(false);
+  const wasInside500mRef = useRef<{ pickup: boolean; delivery: boolean }>({
+    pickup: false,
+    delivery: false
+  });
+  const lastEvaluated500mPingKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const update = () => {
@@ -145,6 +180,96 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [bookingId]);
+
+  // Reset 500m geofence entry flags whenever the active booking changes
+  useEffect(() => {
+    wasInside500mRef.current = { pickup: false, delivery: false };
+    lastEvaluated500mPingKeyRef.current = null;
+    setProximity500m({ insidePickup: false, insideDelivery: false });
+    setNotificationPermission(getBrowserNotificationPermission());
+  }, [bookingId]);
+
+  const handleEnableBrowserNotifications = useCallback(async () => {
+    const perm = await requestBrowserNotificationPermission();
+    setNotificationPermission(perm);
+    if (perm === 'granted') {
+      showToast('Browser geo-fence notifications enabled for 500m pickup & delivery zones.', 'success');
+    } else if (perm === 'denied') {
+      showToast('Browser notifications are blocked. Allow notifications in browser site settings.', 'error');
+    } else {
+      showToast('Browser Notification API is not supported on this device; in-app alerts remain active.', 'info');
+    }
+  }, []);
+
+  // Core 500m geo-fencing monitor: detects entry into 500m radius of pickup or delivery coordinates
+  // and dispatches a browser-based Notification (plus in-app banner fallback).
+  const evaluate500mGeofence = useCallback(
+    async (b: Booking, lat: number, lng: number, forceTriggerZone?: 'pickup' | 'delivery') => {
+      if (b.status === 'completed' || b.status === 'cancelled') return;
+
+      const wasInsidePickup = forceTriggerZone === 'pickup' ? false : wasInside500mRef.current.pickup;
+      const wasInsideDelivery = forceTriggerZone === 'delivery' ? false : wasInside500mRef.current.delivery;
+
+      const evaluation = check500mGeofenceEntry({
+        lat,
+        lng,
+        pickup: { lat: b.pickup.lat, lng: b.pickup.lng },
+        delivery: { lat: b.delivery.lat, lng: b.delivery.lng },
+        wasInsidePickup,
+        wasInsideDelivery,
+        radiusMeters: GEOFENCE_ALERT_RADIUS_METERS
+      });
+
+      wasInside500mRef.current = {
+        pickup: evaluation.insidePickup,
+        delivery: evaluation.insideDelivery
+      };
+
+      setProximity500m((prev) => ({
+        ...prev,
+        distanceToPickupMeters: evaluation.distanceToPickupMeters,
+        distanceToDeliveryMeters: evaluation.distanceToDeliveryMeters,
+        insidePickup: evaluation.insidePickup,
+        insideDelivery: evaluation.insideDelivery
+      }));
+
+      if (evaluation.newlyEnteredZones.length === 0) return;
+
+      const vehicleReg = logisticsStore.getVehicleById(b.vehicleId)?.registrationNumber;
+
+      for (const zoneType of evaluation.newlyEnteredZones) {
+        const point = zoneType === 'pickup' ? b.pickup : b.delivery;
+        const distanceMeters =
+          zoneType === 'pickup'
+            ? evaluation.distanceToPickupMeters
+            : evaluation.distanceToDeliveryMeters;
+
+        const notifResult = await triggerGeofenceBrowserNotification({
+          zoneType,
+          city: point.city,
+          address: point.address,
+          distanceMeters,
+          radiusMeters: GEOFENCE_ALERT_RADIUS_METERS,
+          bookingId: b.id,
+          vehicleRegNumber: vehicleReg
+        });
+
+        setNotificationPermission(getBrowserNotificationPermission());
+        setProximity500m((prev) => ({
+          ...prev,
+          lastAlert: {
+            zoneType,
+            title: notifResult.title,
+            body: notifResult.body,
+            timestamp: notifResult.timestamp,
+            deliveredViaBrowser: notifResult.deliveredViaBrowser
+          }
+        }));
+        showToast(`${notifResult.title} (${formatMetersOrKm(distanceMeters)} away)`, 'success');
+      }
+    },
+    []
+  );
 
   // Ensure backend /trips record exists & obtain tracking token if missing
   const ensureBackendTripToken = useCallback(async (b: Booking, l: LoadItem): Promise<string | null> => {
@@ -290,6 +415,15 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     const originLat = latestPing?.lat ?? booking.pickup.lat;
     const originLng = latestPing?.lng ?? booking.pickup.lng;
 
+    // Trigger immediate 500m proximity evaluation on initial trip ping if available
+    if (latestPing) {
+      const initKey = `${latestPing.timestamp}:${latestPing.lat.toFixed(6)},${latestPing.lng.toFixed(6)}`;
+      if (lastEvaluated500mPingKeyRef.current !== initKey) {
+        lastEvaluated500mPingKeyRef.current = initKey;
+        void evaluate500mGeofence(booking, latestPing.lat, latestPing.lng);
+      }
+    }
+
     // Trigger immediate calculation if no fresh ETA exists yet
     const existingAgeMs = booking.liveEta
       ? Date.now() - new Date(booking.liveEta.calculatedAt).getTime()
@@ -305,12 +439,17 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
       }
       const ping = logisticsStore.getLatestPing(booking.id);
       if (ping) {
+        const pingKey = `${ping.timestamp}:${ping.lat.toFixed(6)},${ping.lng.toFixed(6)}`;
+        if (lastEvaluated500mPingKeyRef.current !== pingKey) {
+          lastEvaluated500mPingKeyRef.current = pingKey;
+          void evaluate500mGeofence(updatedBooking, ping.lat, ping.lng);
+        }
         void refreshLiveEta(updatedBooking, ping.lat, ping.lng, false);
       }
     });
 
     return unsub;
-  }, [booking?.id, booking?.status, refreshLiveEta]);
+  }, [booking?.id, booking?.status, refreshLiveEta, evaluate500mGeofence]);
 
   const handleManualRefreshEta = useCallback(async () => {
     if (!booking) return;
@@ -389,6 +528,11 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       );
 
+      // Evaluate 500m pickup/delivery geo-fence & trigger browser notification on zone entry
+      const pingKey = `${now}:${lat.toFixed(6)},${lng.toFixed(6)}`;
+      lastEvaluated500mPingKeyRef.current = pingKey;
+      void evaluate500mGeofence(b, lat, lng);
+
       // Recalculate traffic-aware ETA to destination from the new GPS ping (throttled for quota efficiency)
       void refreshLiveEta(b, lat, lng, !silent);
 
@@ -401,7 +545,36 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         showToast(msg, 'success');
       }
     },
-    [ensureBackendTripToken, refreshLiveEta]
+    [ensureBackendTripToken, refreshLiveEta, evaluate500mGeofence]
+  );
+
+  // One-tap verification helper: positions vehicle 180m inside Pickup or Delivery 500m radius
+  // and invokes the real browser notification + GPS pipeline.
+  const handleSimulate500mZoneEntry = useCallback(
+    async (zoneType: 'pickup' | 'delivery') => {
+      if (!booking || !load) return;
+      if (getBrowserNotificationPermission() === 'default') {
+        const perm = await requestBrowserNotificationPermission();
+        setNotificationPermission(perm);
+      }
+      const target = zoneType === 'pickup' ? booking.pickup : booking.delivery;
+      const insideCoord = offsetCoordinateByMeters(target.lat, target.lng, 140, 110); // ~178m from center
+      wasInside500mRef.current = {
+        ...wasInside500mRef.current,
+        [zoneType]: false
+      };
+      await transmitGpsPoint(
+        booking,
+        load,
+        insideCoord.lat,
+        insideCoord.lng,
+        18,
+        90,
+        `${target.city} ${zoneType === 'pickup' ? 'Pickup' : 'Delivery'} Gate (500m Geo-Fence)`,
+        true
+      );
+    },
+    [booking, load, transmitGpsPoint]
   );
 
   // Continuous phone GPS watchPosition when Auto Live GPS is toggled on during active driving stages
@@ -664,6 +837,41 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
           }`}
         >
           {statusFeedback.text}
+        </div>
+      )}
+
+      {/* Active 500m Geo-Fence Entry Browser Alert Banner */}
+      {proximity500m.lastAlert && (
+        <div className="p-4 rounded-2xl bg-emerald-950 text-emerald-100 border border-emerald-700 shadow-lg flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-300 shrink-0 mt-0.5">
+              <Bell className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-black uppercase tracking-wider text-emerald-300">
+                  {proximity500m.lastAlert.title}
+                </span>
+                <span className="text-[10px] font-semibold text-emerald-400">
+                  • {proximity500m.lastAlert.deliveredViaBrowser ? 'Browser Notification Sent' : 'In-App Geo-Fence Alert'}
+                </span>
+              </div>
+              <p className="text-xs text-emerald-100/90 mt-0.5 leading-snug">
+                {proximity500m.lastAlert.body}
+              </p>
+              <span className="block text-[10px] font-mono tabular-nums text-emerald-400/80 mt-1">
+                Triggered at {new Date(proximity500m.lastAlert.timestamp).toLocaleTimeString('en-IN')}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setProximity500m((prev) => ({ ...prev, lastAlert: undefined }))}
+            className="min-h-[36px] px-3 rounded-xl bg-emerald-900 hover:bg-emerald-800 border border-emerald-700 text-[11px] font-bold text-emerald-100 transition cursor-pointer shrink-0"
+          >
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -1318,6 +1526,143 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
           </div>
         )}
       </div>
+
+      {/* 500m Proximity Geo-Fence Browser Notification Utility Bar */}
+      {booking.status !== 'completed' && booking.status !== 'cancelled' && (
+        <div className="p-4 sm:p-5 rounded-3xl bg-[#171318] border border-gray-800 text-white shadow-xl space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-400 shrink-0">
+                {notificationPermission === 'denied' ? (
+                  <BellOff className="w-4 h-4 text-rose-400" />
+                ) : (
+                  <Bell className="w-4 h-4" />
+                )}
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-black tracking-tight text-white">
+                    500m Arrival Geo-Fence Alerts
+                  </h3>
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md border ${
+                      notificationPermission === 'granted'
+                        ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/70'
+                        : notificationPermission === 'denied'
+                        ? 'bg-rose-950/70 text-rose-300 border-rose-700/70'
+                        : 'bg-amber-950/70 text-amber-300 border-amber-700/70'
+                    }`}
+                  >
+                    {notificationPermission === 'granted'
+                      ? 'Browser Alerts Active'
+                      : notificationPermission === 'denied'
+                      ? 'Browser Alerts Blocked'
+                      : notificationPermission === 'unsupported'
+                      ? 'In-App Alerts Only'
+                      : 'Permission Needed'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-gray-400">
+                  Fires a browser notification automatically when your truck enters within 500 m of Pickup or Delivery coordinates.
+                </p>
+              </div>
+            </div>
+
+            {notificationPermission === 'default' && (
+              <button
+                type="button"
+                onClick={handleEnableBrowserNotifications}
+                className="min-h-[44px] px-4 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs font-extrabold flex items-center gap-1.5 transition cursor-pointer shadow-md"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>Enable Browser Notifications</span>
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+            <div
+              className={`p-3 rounded-2xl border flex items-center justify-between gap-2 ${
+                proximity500m.insidePickup
+                  ? 'bg-emerald-950/45 border-emerald-700/80'
+                  : 'bg-[#060309] border-gray-800'
+              }`}
+            >
+              <div className="min-w-0">
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                  Pickup 500m Zone · {booking.pickup.city}
+                </span>
+                <span className="block font-mono tabular-nums font-black text-sm text-white mt-0.5">
+                  {formatMetersOrKm(
+                    proximity500m.distanceToPickupMeters ?? geofenceState.distanceToPickupMeters
+                  )}{' '}
+                  away
+                </span>
+              </div>
+              <span
+                className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg shrink-0 ${
+                  proximity500m.insidePickup
+                    ? 'bg-emerald-500 text-slate-950'
+                    : 'bg-gray-900 text-gray-400 border border-gray-800'
+                }`}
+              >
+                {proximity500m.insidePickup ? 'Inside 500m' : 'Monitoring'}
+              </span>
+            </div>
+
+            <div
+              className={`p-3 rounded-2xl border flex items-center justify-between gap-2 ${
+                proximity500m.insideDelivery
+                  ? 'bg-pink-950/45 border-[#E83E83]/80'
+                  : 'bg-[#060309] border-gray-800'
+              }`}
+            >
+              <div className="min-w-0">
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                  Delivery 500m Zone · {booking.delivery.city}
+                </span>
+                <span className="block font-mono tabular-nums font-black text-sm text-white mt-0.5">
+                  {formatMetersOrKm(
+                    proximity500m.distanceToDeliveryMeters ?? geofenceState.distanceToDeliveryMeters
+                  )}{' '}
+                  away
+                </span>
+              </div>
+              <span
+                className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg shrink-0 ${
+                  proximity500m.insideDelivery
+                    ? 'bg-[#E83E83] text-white'
+                    : 'bg-gray-900 text-gray-400 border border-gray-800'
+                }`}
+              >
+                {proximity500m.insideDelivery ? 'Inside 500m' : 'Monitoring'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-gray-800/80">
+            <span className="text-[11px] text-gray-400">
+              Verify 500m entry notification:
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSimulate500mZoneEntry('pickup')}
+                className="min-h-[44px] px-3.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 text-xs font-bold text-emerald-300 transition cursor-pointer"
+              >
+                Simulate Pickup 500m Entry
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSimulate500mZoneEntry('delivery')}
+                className="min-h-[44px] px-3.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 text-xs font-bold text-[#FF85B7] transition cursor-pointer"
+              >
+                Simulate Delivery 500m Entry
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Live Auto-Milestone Geo-Fence Monitor */}
       <GeofenceMonitorPanel

@@ -83,8 +83,7 @@ export const FindLoads: React.FC<FindLoadsProps> = ({
       setLoads(logisticsStore.getLoads());
       const allVehs = logisticsStore.getVehicles().filter((v) => !v.isBlocked);
       const myVehs = allVehs.filter((v) => v.ownerId === currentUser.id || v.assignedDriverId === currentUser.id);
-      const isSandbox = Boolean(currentUser.isTestAccount || currentUser.phone?.includes('99999'));
-      const driverVehicles = myVehs.length > 0 ? myVehs : (isSandbox ? allVehs : []);
+      const driverVehicles = myVehs;
       setVehicles(driverVehicles);
       setAllQuotations(logisticsStore.getQuotations());
       if (driverVehicles.length > 0 && !bidVehicleId) {
@@ -135,7 +134,7 @@ export const FindLoads: React.FC<FindLoadsProps> = ({
   }, [allQuotations, currentUser.id]);
 
   const handleOpenBidModal = (load: LoadItem) => {
-    if (!partnerEligibility.isEligible && !currentUser.isTestAccount && !currentUser.phone?.includes('99999')) {
+    if (!partnerEligibility.isEligible) {
       setIsOnboardingModalOpen(true);
       setFeedbackMessage(`Bidding is restricted: ${partnerEligibility.reason}`);
       return;
@@ -158,7 +157,7 @@ export const FindLoads: React.FC<FindLoadsProps> = ({
     e.preventDefault();
     if (!activeBidLoad || bidAmount <= 0 || isSubmittingBid) return;
 
-    if (!partnerEligibility.isEligible && !currentUser.isTestAccount && !currentUser.phone?.includes('99999')) {
+    if (!partnerEligibility.isEligible) {
       setIsOnboardingModalOpen(true);
       setFeedbackMessage(`Bidding is restricted: ${partnerEligibility.reason}`);
       return;

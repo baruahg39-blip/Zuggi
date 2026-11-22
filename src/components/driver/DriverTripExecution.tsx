@@ -954,16 +954,9 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
                     className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-10 pr-3 py-3 text-center text-lg font-mono font-black tracking-widest text-[#FF85B7] focus:outline-none focus:border-[#E83E83]"
                   />
                 </div>
-                {logisticsStore.getCurrentUser()?.isTestAccount || logisticsStore.getCurrentUser()?.phone?.includes('99999') ? (
-                  <p className="text-[10px] text-gray-400 mt-1.5">
-                    Sandbox test consignee OTP:{' '}
-                    <strong className="text-[#FF85B7] font-mono">{booking.deliveryOtp}</strong>
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-amber-300/90 mt-1.5">
-                    Ask the consignee / receiver at the drop point for their secret 4-digit Zuggi Delivery OTP to confirm handover and release your final payout.
-                  </p>
-                )}
+                <p className="text-[11px] text-amber-300/90 mt-1.5">
+                  Ask the consignee / receiver at the drop point for their secret 4-digit Zuggi Delivery OTP to confirm handover and release your final payout.
+                </p>
               </div>
             </div>
 

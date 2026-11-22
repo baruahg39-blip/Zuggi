@@ -44,51 +44,8 @@ export interface DevTestAccount {
 export const DEMO_PHONE_NUMBER = '9678944132';
 export const DEMO_OTP_CODE = '000000';
 
-export const DEV_TEST_ACCOUNTS: DevTestAccount[] = [
-  {
-    id: 'test_shipper_9911',
-    phone: '9999911111',
-    formattedE164: '+919999911111',
-    displayPhone: '+91 99999 11111',
-    role: 'customer',
-    roleLabel: 'Test Shipper (Consignor)',
-    name: 'Brahmaputra Valley Agro Commodities',
-    company: 'Assam Tea Exports & FMCG Ltd',
-    city: 'Guwahati',
-    defaultCode: '123456',
-    description: 'Sandbox account for posting freight loads and comparing driver bids'
-  },
-  {
-    id: 'test_driver_9922',
-    phone: '9999922222',
-    formattedE164: '+919999922222',
-    displayPhone: '+91 99999 22222',
-    role: 'driver',
-    roleLabel: 'Test Driver (Transporter)',
-    name: 'Bikash Highway Transport',
-    company: 'Bikash Logistics Assam',
-    city: 'Nagaon',
-    vehicleReg: 'AS-02-TC-9911',
-    vehicleCategory: 'bolero_pickup',
-    defaultCode: '123456',
-    description: 'Sandbox account for browsing available loads, submitting bids & executing trips'
-  },
-  {
-    id: 'test_driver_9933',
-    phone: '9999933333',
-    formattedE164: '+919999933333',
-    displayPhone: '+91 99999 33333',
-    role: 'driver',
-    roleLabel: 'Test Fleet Owner',
-    name: 'Pragati Multi-Axle Fleet',
-    company: 'Kamrup Heavy Carriers Pvt Ltd',
-    city: 'Jorhat',
-    vehicleReg: 'AS-03-CC-8822',
-    vehicleCategory: 'eicher_14ft',
-    defaultCode: '123456',
-    description: 'Sandbox account for multi-truck fleet owner'
-  }
-];
+// Bot / sandbox test accounts have been permanently removed for live production operations.
+export const DEV_TEST_ACCOUNTS: DevTestAccount[] = [];
 
 class AuthService {
   private confirmationResult: ConfirmationResult | null = null;
@@ -285,21 +242,13 @@ class AuthService {
       return restoredUser;
     }
 
-    // 2. Check Sandbox Test Accounts
-    const testMatch = DEV_TEST_ACCOUNTS.find(
-      (a) => a.phone === cleanPhone || a.formattedE164.endsWith(cleanPhone)
-    );
-    if (testMatch) {
-      return this.loginDevTestAccount(testMatch.id);
-    }
-
     const role: UserRole = preferredRole || 'customer';
 
     if (role === 'admin' || (isBaruah && preferredRole === 'admin')) {
       const adminUser: User = {
         id: 'owner_baruahg39',
         name: 'G. Baruah (Platform Owner)',
-        phone: '+91 94350 88219',
+        phone: '+91 96789 44132',
         email: SUPER_ADMIN_EMAIL,
         role: 'admin',
         businessName: 'Zuggi Technologies India',
@@ -314,63 +263,6 @@ class AuthService {
       logisticsStore.saveUser(adminUser);
       logisticsStore.setCurrentUser(adminUser);
       return adminUser;
-    }
-
-    if (isBaruah) {
-      const baruahUser: User = {
-        id: role === 'customer' ? 'user_shipper_9678944132' : 'user_driver_9678944132',
-        name: 'Gaurov Baruah',
-        phone: '+91 96789 44132',
-        email: 'baruahg39@gmail.com',
-        role,
-        businessName: role === 'customer' ? 'Baruah Tea & Agro Logistics Ltd' : 'Zuggi Assam Express Fleet',
-        city: 'Guwahati',
-        state: 'Assam',
-        isVerified: true,
-        createdAt: '2026-01-01T00:00:00Z'
-      };
-
-      if (role === 'driver') {
-        const vehId = 'veh_demo_9678944132';
-        const existingVeh = logisticsStore.getVehicleById(vehId);
-        if (!existingVeh) {
-          const demoVeh: CommercialVehicle = {
-            id: vehId,
-            ownerId: baruahUser.id,
-            transporterName: baruahUser.businessName || 'Zuggi Assam Express Fleet',
-            registrationNumber: 'AS-01-DM-4413',
-            category: 'bolero_pickup',
-            bodyType: 'tarpaulin',
-            capacityKg: 1750,
-            modelName: 'Mahindra Bolero Maxi Truck Plus',
-            fuelType: 'diesel',
-            permitType: 'all_northeast',
-            currentLocation: {
-              lat: 26.1445,
-              lng: 91.7362,
-              address: 'Beltola Wholesale Transport Yard, Guwahati',
-              city: 'Guwahati'
-            },
-            isOnline: true,
-            isAvailable: true,
-            verificationStatus: 'verified',
-            documents: [],
-            driverName: baruahUser.name,
-            driverPhone: baruahUser.phone,
-            driverRating: 4.9,
-            completedTrips: 24,
-            photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-          };
-          logisticsStore.saveVehicle(demoVeh);
-        }
-      }
-
-      if (typeof window !== 'undefined') {
-        sessionStorage.removeItem('vs_logged_out');
-      }
-      logisticsStore.saveUser(baruahUser);
-      logisticsStore.setCurrentUser(baruahUser);
-      return baruahUser;
     }
 
     // 3. For new users: return a provisional user WITHOUT setting active session!
@@ -494,76 +386,7 @@ class AuthService {
         return this.loginInstantWithPhone(cleanSessionPhone, preferredRole);
       }
 
-      const isBaruah = this.demoSessionPhone.includes('9678944132') || this.demoSessionPhone === '';
-      const role: UserRole = preferredRole || 'customer';
-      const demoUser: User = {
-        id: isBaruah ? (role === 'customer' ? 'user_shipper_9678944132' : 'user_driver_9678944132') : `user_${cleanOtp}`,
-        name: isBaruah ? 'Gaurov Baruah' : (role === 'customer' ? 'Commercial Shipper' : 'Commercial Transporter'),
-        phone: this.demoSessionPhone || '+91 96789 44132',
-        email: isBaruah ? 'baruahg39@gmail.com' : 'partner@zuggi.in',
-        role,
-        businessName: isBaruah 
-          ? (role === 'customer' ? 'Baruah Tea & Agro Logistics Ltd' : 'Zuggi Assam Express Fleet')
-          : (role === 'customer' ? 'Brahmaputra Consignment Ltd' : 'Kamrup Transport Carriers'),
-        city: 'Guwahati',
-        state: 'Assam',
-        isVerified: true,
-        isTestAccount: false,
-        createdAt: '2026-01-01T00:00:00Z'
-      };
-
-      // Provision a test vehicle in case user tests driver features
-      const vehId = 'veh_demo_9678944132';
-      const existingVeh = logisticsStore.getVehicleById(vehId);
-      if (!existingVeh) {
-        const demoVeh: CommercialVehicle = {
-          id: vehId,
-          ownerId: demoUser.id,
-          transporterName: 'Zuggi Demo Transport',
-          registrationNumber: 'AS-01-DM-0000',
-          category: 'bolero_pickup',
-          bodyType: 'tarpaulin',
-          capacityKg: 1750,
-          modelName: 'Mahindra Bolero Maxi Truck Plus',
-          fuelType: 'diesel',
-          permitType: 'all_northeast',
-          currentLocation: {
-            lat: 26.1445,
-            lng: 91.7362,
-            address: 'Beltola Wholesale Transport Yard, Guwahati',
-            city: 'Guwahati'
-          },
-          isOnline: true,
-          isAvailable: true,
-          verificationStatus: 'verified',
-          documents: [
-            {
-              id: `doc_rc_${vehId}`,
-              type: 'rc',
-              documentNumber: 'AS-01-DM-0000',
-              documentUrl: '',
-              expiryDate: '2032-12-31',
-              verificationStatus: 'verified'
-            }
-          ],
-          driverName: demoUser.name,
-          driverPhone: demoUser.phone,
-          driverRating: 4.9,
-          completedTrips: 14,
-          photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-        };
-        logisticsStore.saveVehicle(demoVeh);
-      }
-
-      try {
-        await setDoc(doc(db, 'users', demoUser.id), demoUser);
-      } catch {
-        // Local fallback
-      }
-
-      logisticsStore.saveUser(demoUser);
-      logisticsStore.setCurrentUser(demoUser);
-      return demoUser;
+      throw new Error('Please enter your 10-digit mobile number to sign in.');
     }
 
     if (!this.confirmationResult) {
@@ -1344,98 +1167,8 @@ class AuthService {
    * Enables immediate Android mobile testing of full shipper & driver marketplace workflows.
    * Strictly enforces that Admin privileges can NEVER be accessed via test mode.
    */
-  public loginDevTestAccount(idOrPhone: string): User {
-    const acc = DEV_TEST_ACCOUNTS.find(
-      (a) => a.id === idOrPhone || a.phone === idOrPhone || a.role === idOrPhone
-    ) || DEV_TEST_ACCOUNTS[0];
-
-    // Absolute security guard: Test mode can NEVER grant admin
-    if ((acc.role as string) === 'admin') {
-      throw new Error('Security Error: Admin privileges cannot be accessed via Test Mode.');
-    }
-
-    const existingAccUser = logisticsStore.getUserById(acc.id);
-    if (existingAccUser?.isBlocked) {
-      throw new Error(`Account suspended: ${existingAccUser.blockedReason || 'Blocked by Platform Administrator'}.`);
-    }
-    const testUser: User = {
-      id: acc.id,
-      name: acc.name,
-      phone: acc.displayPhone,
-      email: `${acc.phone}@test.vahansetu.in`,
-      role: acc.role,
-      businessName: acc.company,
-      city: acc.city,
-      state: 'Assam',
-      isVerified: true,
-      isBlocked: existingAccUser?.isBlocked,
-      blockedReason: existingAccUser?.blockedReason,
-      isTestAccount: true,
-      createdAt: existingAccUser?.createdAt || new Date().toISOString()
-    };
-
-    // If driver, ensure driver has a ready verified vehicle in store to submit bids and accept trips immediately
-    if (acc.role === 'driver' && acc.vehicleReg) {
-      const vehId = `veh_${acc.id}`;
-      const existingVeh = logisticsStore.getVehicleById(vehId);
-      if (!existingVeh) {
-        const testVeh: CommercialVehicle = {
-          id: vehId,
-          ownerId: acc.id,
-          transporterName: acc.company,
-          registrationNumber: acc.vehicleReg,
-          category: acc.vehicleCategory || 'bolero_pickup',
-          bodyType: 'tarpaulin',
-          capacityKg: acc.vehicleCategory === 'eicher_14ft' ? 4500 : 1500,
-          modelName: acc.vehicleCategory === 'eicher_14ft' ? 'Eicher Pro 2049' : 'Mahindra Bolero Maxi Truck',
-          fuelType: 'diesel',
-          permitType: 'all_northeast',
-          currentLocation: {
-            lat: 26.1445,
-            lng: 91.7362,
-            address: `${acc.city} Commercial Transport Yard`,
-            city: acc.city
-          },
-          isOnline: true,
-          isAvailable: true,
-          verificationStatus: 'verified',
-          documents: [
-            {
-              id: `doc_rc_${vehId}`,
-              type: 'rc',
-              documentNumber: acc.vehicleReg,
-              documentUrl: '',
-              expiryDate: '2032-12-31',
-              verificationStatus: 'verified'
-            }
-          ],
-          driverName: acc.name,
-          driverPhone: acc.displayPhone,
-          driverRating: 4.9,
-          completedTrips: 18,
-          photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-        };
-        logisticsStore.saveVehicle(testVeh);
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      sessionStorage.removeItem('vs_logged_out');
-    }
-
-    // Persist to permanent registry & store
-    const testVeh = acc.vehicleReg ? logisticsStore.getVehicleById(`veh_${acc.id}`) : undefined;
-    logisticsStore.saveRegisteredProfile(acc.phone, testUser, testVeh);
-    logisticsStore.saveUser(testUser);
-    logisticsStore.setCurrentUser(testUser);
-
-    try {
-      setDoc(doc(db, 'users', testUser.id), testUser).catch(() => {});
-    } catch {
-      // Ignored
-    }
-
-    return testUser;
+  public loginDevTestAccount(_idOrPhone: string): User {
+    throw new Error('Demo and bot accounts have been removed. Please sign in with your real mobile number or Google account.');
   }
 
   /**

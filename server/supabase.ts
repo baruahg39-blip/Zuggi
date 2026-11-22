@@ -38,13 +38,67 @@ export function verifyAdminTokenFromReq(req: express.Request): boolean {
   return Boolean(token && adminSessionTokens.has(token));
 }
 
-function isSandboxTestPartnerRecord(rec: any): boolean {
+const BOT_RECORD_IDS = new Set([
+  'user_cust_01',
+  'user_driver_01',
+  'user_trans_01',
+  'user_admin_01',
+  'user_owner_01',
+  'user_fleet_01',
+  'user_applicant_02',
+  'user_applicant_03',
+  'test_shipper_9911',
+  'test_driver_9922',
+  'test_driver_9933',
+  'user_driver_9678944132',
+  'user_shipper_9678944132',
+  'veh_01',
+  'veh_02',
+  'veh_03',
+  'veh_04',
+  'veh_test_driver_9922',
+  'veh_test_driver_9933',
+  'veh_demo_9678944132',
+  'load_active_01',
+  'load_pending_02',
+  'load_available_03',
+  'quote_01',
+  'quote_02',
+  'booking_01',
+  'booking_completed_01',
+  'booking_completed_02',
+  'booking_completed_03',
+  'booking_completed_04',
+  'tick_01',
+  'tick_02',
+  'tick_03'
+]);
+
+function isLegacyBotRecord(rec: any): boolean {
   if (!rec) return false;
-  if (rec.isTestAccount === true || rec.isTestBid === true || rec.isTestBooking === true) return true;
-  const phone = String(rec.phone || rec.transporterPhone || rec.driverPhone || '');
-  if (phone.includes('99999')) return true;
-  const id = String(rec.id || rec.transporterId || rec.driverId || '');
-  return id.startsWith('test_') || id === 'user_driver_01' || id === 'user_owner_01' || id === 'user_fleet_01';
+  if (rec.id === 'owner_baruahg39') return false;
+  if (rec.isTestAccount === true || rec.isTestLoad === true || rec.isTestBid === true || rec.isTestBooking === true) {
+    return true;
+  }
+  const id = String(rec.id || '');
+  const ownerId = String(rec.ownerId || '');
+  const customerId = String(rec.customerId || '');
+  const driverId = String(rec.driverId || '');
+  const transporterId = String(rec.transporterId || '');
+  const email = String(rec.email || '').toLowerCase();
+  const phone = String(rec.phone || '').replace(/\D/g, '').slice(-10);
+  if (phone === '9999911111' || phone === '9999922222' || phone === '9999933333') return true;
+  if (email.endsWith('@test.vahansetu.in') || email.endsWith('@test.zuggi.in')) return true;
+  return (
+    BOT_RECORD_IDS.has(id) ||
+    id.startsWith('test_') ||
+    id.startsWith('veh_test_') ||
+    id.startsWith('veh_demo_') ||
+    BOT_RECORD_IDS.has(ownerId) ||
+    BOT_RECORD_IDS.has(customerId) ||
+    BOT_RECORD_IDS.has(driverId) ||
+    BOT_RECORD_IDS.has(transporterId)
+  );
 }
 
 function normalizeSupabaseUrl(rawUrl: string): string {
@@ -198,8 +252,8 @@ export async function upsertSupabaseRecords(
             next.isBlocked = prev.isBlocked;
             next.blockedReason = prev.blockedReason;
           }
-          // Strictly enforce backend Admin approval for partner roles (drivers, owners, fleet partners)
-          if (isPartnerRole(next.role) && !isSandboxTestPartnerRecord(next)) {
+          // Strictly enforce backend Admin approval for all partner roles (drivers, owners, fleet partners)
+          if (isPartnerRole(next.role)) {
             next.isVerified = prev.isVerified === true;
           }
         }
@@ -221,9 +275,6 @@ export async function upsertSupabaseRecords(
 
       prepared = prepared.map((rec) => {
         const prev = existingMap.get(String(rec.id));
-        if (isSandboxTestPartnerRecord(rec) || String(rec.id).startsWith('veh_0') || String(rec.id).startsWith('veh_test_')) {
-          return rec;
-        }
         const authoritativeStatus = prev?.verificationStatus || 'pending';
         return {
           ...rec,
@@ -489,12 +540,12 @@ supabaseRouter.get('/bootstrap', async (_req, res) => {
       configured: true,
       tablesReady: true,
       data: {
-        users: (usersRes.data || []).map((r: any) => r.data).filter(Boolean),
-        vehicles: (vehRes.data || []).map((r: any) => r.data).filter(Boolean),
-        loads: (loadsRes.data || []).map((r: any) => r.data).filter(Boolean),
-        quotations: (quotesRes.data || []).map((r: any) => r.data).filter(Boolean),
-        bookings: (bookingsRes.data || []).map((r: any) => r.data).filter(Boolean),
-        tickets: (ticketsRes.data || []).map((r: any) => r.data).filter(Boolean)
+        users: (usersRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
+        vehicles: (vehRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
+        loads: (loadsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
+        quotations: (quotesRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
+        bookings: (bookingsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
+        tickets: (ticketsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r))
       }
     });
   } catch (err: any) {
@@ -518,7 +569,7 @@ supabaseRouter.post('/sync', async (req, res) => {
   // Backend enforcement: block unverified drivers/owners from submitting quotes or accepting loads
   if (!isAdmin && (table === 'vs_quotations' || table === 'vs_bookings')) {
     for (const item of list) {
-      if (!item || isSandboxTestPartnerRecord(item)) continue;
+      if (!item) continue;
       const partnerId = String(item.transporterId || item.driverId || '').trim();
       if (!partnerId) continue;
       const dbUser = await findSupabaseUserById(partnerId);

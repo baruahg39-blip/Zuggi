@@ -157,7 +157,7 @@ export const LiveTrackingMap: React.FC<LiveTrackingMapProps> = ({
   pickup,
   delivery,
   vehicleRegNumber = 'AS-01-QC-4910',
-  driverName = 'Manoj Das',
+  driverName = 'Assigned Driver',
   shipmentStatus: _shipmentStatus,
   isDriverMode: _isDriverMode = false
 }) => {

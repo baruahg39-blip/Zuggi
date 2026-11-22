@@ -41,14 +41,187 @@ import {
 } from '../utils/geofence';
 import {
   HUBS_LOCATIONS,
-  VEHICLE_CATEGORIES,
-  SEED_BOOKINGS,
-  SEED_SETTLEMENTS,
-  SEED_VEHICLES,
-  SEED_LOADS,
-  SEED_QUOTATIONS
+  VEHICLE_CATEGORIES
 } from '../data/mockData';
-import { SEED_PARTNER_APPLICATIONS } from '../data/seedPartnerApplications';
+
+const BOT_USER_IDS = new Set([
+  'user_cust_01',
+  'user_driver_01',
+  'user_trans_01',
+  'user_admin_01',
+  'user_owner_01',
+  'user_fleet_01',
+  'user_applicant_02',
+  'user_applicant_03',
+  'test_shipper_9911',
+  'test_driver_9922',
+  'test_driver_9933',
+  'user_driver_9678944132',
+  'user_shipper_9678944132'
+]);
+
+const BOT_PHONES_10 = new Set([
+  '9999911111',
+  '9999922222',
+  '9999933333',
+  '9864012845',
+  '9435088219',
+  '9854033412',
+  '9123456789',
+  '9864012345',
+  '9435019283',
+  '9864201928'
+]);
+
+const BOT_VEHICLE_IDS = new Set([
+  'veh_01',
+  'veh_02',
+  'veh_03',
+  'veh_04',
+  'veh_test_driver_9922',
+  'veh_test_driver_9933',
+  'veh_demo_9678944132',
+  'veh_seed_01',
+  'veh_fleet_01',
+  'veh_fleet_02'
+]);
+
+const BOT_LOAD_IDS = new Set([
+  'load_active_01',
+  'load_pending_02',
+  'load_available_03'
+]);
+
+const BOT_QUOTE_IDS = new Set([
+  'quote_01',
+  'quote_02'
+]);
+
+const BOT_BOOKING_IDS = new Set([
+  'booking_01',
+  'booking_completed_01',
+  'booking_completed_02',
+  'booking_completed_03',
+  'booking_completed_04'
+]);
+
+const BOT_SETTLEMENT_IDS = new Set([
+  'set_01_split1',
+  'set_01_split2',
+  'set_02_split1',
+  'set_02_split2',
+  'set_03_split1',
+  'set_03_split2',
+  'set_04_split1',
+  'set_04_split2'
+]);
+
+const BOT_APPLICATION_IDS = new Set([
+  'app_part_01',
+  'app_part_02',
+  'app_part_03'
+]);
+
+const BOT_TICKET_IDS = new Set([
+  'tick_01',
+  'tick_02',
+  'tick_03'
+]);
+
+function normalizeLast10(phone?: string): string {
+  return String(phone || '').replace(/\D/g, '').slice(-10);
+}
+
+function isBotUserRecord(u: any): boolean {
+  if (!u || !u.id) return false;
+  if (u.id === 'owner_baruahg39' || (u.role === 'admin' && String(u.email || '').toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase())) {
+    return false;
+  }
+  const id = String(u.id);
+  const email = String(u.email || '').toLowerCase();
+  const phone10 = normalizeLast10(u.phone);
+  return (
+    BOT_USER_IDS.has(id) ||
+    id.startsWith('test_') ||
+    u.isTestAccount === true ||
+    email.endsWith('@test.vahansetu.in') ||
+    email.endsWith('@test.zuggi.in') ||
+    BOT_PHONES_10.has(phone10)
+  );
+}
+
+function isBotVehicleRecord(v: any): boolean {
+  if (!v || !v.id) return false;
+  const id = String(v.id);
+  return (
+    BOT_VEHICLE_IDS.has(id) ||
+    id.startsWith('veh_test_') ||
+    id.startsWith('veh_demo_') ||
+    BOT_USER_IDS.has(String(v.ownerId || '')) ||
+    String(v.ownerId || '').startsWith('test_')
+  );
+}
+
+function isBotLoadRecord(l: any): boolean {
+  if (!l || !l.id) return false;
+  return (
+    BOT_LOAD_IDS.has(String(l.id)) ||
+    l.isTestLoad === true ||
+    BOT_USER_IDS.has(String(l.customerId || '')) ||
+    String(l.customerId || '').startsWith('test_')
+  );
+}
+
+function isBotQuotationRecord(q: any): boolean {
+  if (!q || !q.id) return false;
+  return (
+    BOT_QUOTE_IDS.has(String(q.id)) ||
+    q.isTestBid === true ||
+    BOT_USER_IDS.has(String(q.transporterId || '')) ||
+    String(q.transporterId || '').startsWith('test_') ||
+    BOT_LOAD_IDS.has(String(q.loadId || ''))
+  );
+}
+
+function isBotBookingRecord(b: any): boolean {
+  if (!b || !b.id) return false;
+  return (
+    BOT_BOOKING_IDS.has(String(b.id)) ||
+    b.isTestBooking === true ||
+    BOT_USER_IDS.has(String(b.customerId || '')) ||
+    BOT_USER_IDS.has(String(b.driverId || '')) ||
+    BOT_USER_IDS.has(String(b.transporterId || '')) ||
+    String(b.customerId || '').startsWith('test_') ||
+    String(b.driverId || '').startsWith('test_')
+  );
+}
+
+function isBotSettlementRecord(s: any): boolean {
+  if (!s || !s.id) return false;
+  return (
+    BOT_SETTLEMENT_IDS.has(String(s.id)) ||
+    BOT_USER_IDS.has(String(s.driverId || '')) ||
+    String(s.driverId || '').startsWith('test_')
+  );
+}
+
+function isBotApplicationRecord(a: any): boolean {
+  if (!a || !a.id) return false;
+  return (
+    BOT_APPLICATION_IDS.has(String(a.id)) ||
+    BOT_USER_IDS.has(String(a.userId || '')) ||
+    String(a.userId || '').startsWith('test_')
+  );
+}
+
+function isBotTicketRecord(t: any): boolean {
+  if (!t || !t.id) return false;
+  return (
+    BOT_TICKET_IDS.has(String(t.id)) ||
+    BOT_USER_IDS.has(String(t.userId || '')) ||
+    String(t.userId || '').startsWith('test_')
+  );
+}
 import {
   db,
   doc,
@@ -211,28 +384,70 @@ class LogisticsStore {
   private purgeLegacyDemoData() {
     if (typeof window === 'undefined') return;
 
-    // Purge legacy demo personas & fake records if they exist in localStorage
-    const userRaw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (
-      userRaw && 
-      (userRaw.includes('user_cust_01') || 
-       userRaw.includes('user_trans_01') || 
-       userRaw.includes('user_admin_01') || 
-       userRaw.includes('Rajesh Agarwal') || 
-       userRaw.includes('Bikash Kalita'))
-    ) {
+    // 1. Log out if the stored active session belongs to a bot / seeded / test account
+    try {
+      const userRaw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
+      if (userRaw) {
+        const parsed = JSON.parse(userRaw);
+        if (isBotUserRecord(parsed)) {
+          localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+        }
+      }
+    } catch {
       localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-      localStorage.removeItem(STORAGE_KEYS.USERS);
-      localStorage.removeItem(STORAGE_KEYS.LOADS);
-      localStorage.removeItem(STORAGE_KEYS.QUOTATIONS);
-      localStorage.removeItem(STORAGE_KEYS.BOOKINGS);
-      localStorage.removeItem(STORAGE_KEYS.VEHICLES);
-      localStorage.removeItem(STORAGE_KEYS.INVOICES);
-      localStorage.removeItem(STORAGE_KEYS.SETTLEMENTS);
-      localStorage.removeItem(STORAGE_KEYS.TICKETS);
-      localStorage.removeItem(STORAGE_KEYS.FEEDBACKS);
-      localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
     }
+
+    // 2. Strip bot / seeded / test accounts from local registry while keeping real users intact
+    try {
+      const regRaw = localStorage.getItem(STORAGE_KEYS.USER_REGISTRY);
+      if (regRaw) {
+        const registry = JSON.parse(regRaw);
+        if (registry && typeof registry === 'object') {
+          let regChanged = false;
+          Object.keys(registry).forEach((phoneKey) => {
+            const entry = registry[phoneKey];
+            if (BOT_PHONES_10.has(phoneKey) || isBotUserRecord(entry?.user)) {
+              delete registry[phoneKey];
+              regChanged = true;
+            }
+          });
+          if (regChanged) {
+            localStorage.setItem(STORAGE_KEYS.USER_REGISTRY, JSON.stringify(registry));
+          }
+        }
+      }
+    } catch {
+      // ignore corrupted registry
+    }
+
+    // 3. Surgically filter bot / seeded records out of every collection without touching real data
+    const filterList = <T,>(key: string, isBot: (item: T) => boolean) => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        const arr = JSON.parse(raw);
+        if (!Array.isArray(arr)) return;
+        const cleaned = arr.filter((item) => !isBot(item));
+        if (cleaned.length !== arr.length) {
+          localStorage.setItem(key, JSON.stringify(cleaned));
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    filterList<User>(STORAGE_KEYS.USERS, isBotUserRecord);
+    filterList<CommercialVehicle>(STORAGE_KEYS.VEHICLES, isBotVehicleRecord);
+    filterList<LoadItem>(STORAGE_KEYS.LOADS, isBotLoadRecord);
+    filterList<Quotation>(STORAGE_KEYS.QUOTATIONS, isBotQuotationRecord);
+    filterList<Booking>(STORAGE_KEYS.BOOKINGS, isBotBookingRecord);
+    filterList<Settlement>(STORAGE_KEYS.SETTLEMENTS, isBotSettlementRecord);
+    filterList<PartnerApplication>(STORAGE_KEYS.PARTNER_APPLICATIONS, isBotApplicationRecord);
+    filterList<SupportTicket>(STORAGE_KEYS.TICKETS, isBotTicketRecord);
+    filterList<TripFeedback>(
+      STORAGE_KEYS.FEEDBACKS,
+      (f) => BOT_USER_IDS.has(String(f?.customerId || '')) || BOT_USER_IDS.has(String(f?.driverId || ''))
+    );
   }
 
   public subscribe(listener: () => void): () => void {
@@ -366,13 +581,15 @@ class LogisticsStore {
       let changed = false;
 
       if (Array.isArray(remote.users) && remote.users.length > 0) {
-        changed = this.mergeCollectionById<User>(STORAGE_KEYS.USERS, this.getUsers(), remote.users) || changed;
+        const cleanRemoteUsers = remote.users.filter((u: User) => !isBotUserRecord(u));
+        const cleanRemoteVehicles = Array.isArray(remote.vehicles)
+          ? remote.vehicles.filter((v: CommercialVehicle) => !isBotVehicleRecord(v))
+          : [];
+        changed = this.mergeCollectionById<User>(STORAGE_KEYS.USERS, this.getUsers(), cleanRemoteUsers) || changed;
         const currentUser = this.getCurrentUser();
-        remote.users.forEach((u: User) => {
+        cleanRemoteUsers.forEach((u: User) => {
           if (u?.phone) {
-            const existingVeh = Array.isArray(remote.vehicles)
-              ? remote.vehicles.find((v: CommercialVehicle) => v.ownerId === u.id)
-              : undefined;
+            const existingVeh = cleanRemoteVehicles.find((v: CommercialVehicle) => v.ownerId === u.id);
             this.saveRegisteredProfile(u.phone, u, existingVeh);
           }
           // Keep logged-in session synced with backend verification, block status & saved bank details
@@ -390,19 +607,24 @@ class LogisticsStore {
         });
       }
       if (Array.isArray(remote.vehicles) && remote.vehicles.length > 0) {
-        changed = this.mergeCollectionById<CommercialVehicle>(STORAGE_KEYS.VEHICLES, this.getVehicles(), remote.vehicles) || changed;
+        const cleanVehicles = remote.vehicles.filter((v: CommercialVehicle) => !isBotVehicleRecord(v));
+        changed = this.mergeCollectionById<CommercialVehicle>(STORAGE_KEYS.VEHICLES, this.getVehicles(), cleanVehicles) || changed;
       }
       if (Array.isArray(remote.loads) && remote.loads.length > 0) {
-        changed = this.mergeCollectionById<LoadItem>(STORAGE_KEYS.LOADS, this.getLoads(), remote.loads) || changed;
+        const cleanLoads = remote.loads.filter((l: LoadItem) => !isBotLoadRecord(l));
+        changed = this.mergeCollectionById<LoadItem>(STORAGE_KEYS.LOADS, this.getLoads(), cleanLoads) || changed;
       }
       if (Array.isArray(remote.quotations) && remote.quotations.length > 0) {
-        changed = this.mergeCollectionById<Quotation>(STORAGE_KEYS.QUOTATIONS, this.getQuotations(), remote.quotations) || changed;
+        const cleanQuotes = remote.quotations.filter((q: Quotation) => !isBotQuotationRecord(q));
+        changed = this.mergeCollectionById<Quotation>(STORAGE_KEYS.QUOTATIONS, this.getQuotations(), cleanQuotes) || changed;
       }
       if (Array.isArray(remote.bookings) && remote.bookings.length > 0) {
-        changed = this.mergeCollectionById<Booking>(STORAGE_KEYS.BOOKINGS, this.getBookings(), remote.bookings) || changed;
+        const cleanBookings = remote.bookings.filter((b: Booking) => !isBotBookingRecord(b));
+        changed = this.mergeCollectionById<Booking>(STORAGE_KEYS.BOOKINGS, this.getBookings(), cleanBookings) || changed;
       }
       if (Array.isArray(remote.tickets) && remote.tickets.length > 0) {
-        changed = this.mergeCollectionById<SupportTicket>(STORAGE_KEYS.TICKETS, this.getTickets(), remote.tickets) || changed;
+        const cleanTickets = remote.tickets.filter((t: SupportTicket) => !isBotTicketRecord(t));
+        changed = this.mergeCollectionById<SupportTicket>(STORAGE_KEYS.TICKETS, this.getTickets(), cleanTickets) || changed;
       }
 
       if (changed) {
@@ -445,7 +667,7 @@ class LogisticsStore {
             const remoteLoads: LoadItem[] = [];
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as LoadItem;
-              if (data && data.id) {
+              if (data && data.id && !isBotLoadRecord(data)) {
                 remoteLoads.push(data);
               }
             });
@@ -484,7 +706,7 @@ class LogisticsStore {
             const remoteBids: Quotation[] = [];
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as Quotation;
-              if (data && data.id) {
+              if (data && data.id && !isBotQuotationRecord(data)) {
                 remoteBids.push(data);
               }
             });
@@ -523,7 +745,7 @@ class LogisticsStore {
             const remoteBookings: Booking[] = [];
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as Booking;
-              if (data && data.id) {
+              if (data && data.id && !isBotBookingRecord(data)) {
                 remoteBookings.push(data);
               }
             });
@@ -554,7 +776,7 @@ class LogisticsStore {
             const remoteVehicles: CommercialVehicle[] = [];
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as CommercialVehicle;
-              if (data && data.id) {
+              if (data && data.id && !isBotVehicleRecord(data)) {
                 remoteVehicles.push(data);
               }
             });
@@ -585,7 +807,12 @@ class LogisticsStore {
             const remoteFeedbacks: TripFeedback[] = [];
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as TripFeedback;
-              if (data && data.id) {
+              if (
+                data &&
+                data.id &&
+                !BOT_USER_IDS.has(String(data.customerId || '')) &&
+                !BOT_USER_IDS.has(String(data.driverId || ''))
+              ) {
                 remoteFeedbacks.push(data);
               }
             });
@@ -607,205 +834,18 @@ class LogisticsStore {
   }
 
   public getUsers(): User[] {
-    return this.safeJsonParse<User[]>(STORAGE_KEYS.USERS, []);
+    return this.safeJsonParse<User[]>(STORAGE_KEYS.USERS, []).filter(
+      (u) => !isBotUserRecord(u)
+    );
   }
 
   public getUserById(id: string): User | undefined {
     return this.getUsers().find((u) => u.id === id);
   }
 
-  // --- Permanent User Profile Registry (Keyed by 10-digit mobile number) ---
+  // --- Permanent User Profile Registry (Real registered users only — no bot/seeded users) ---
   public seedRegistryIfEmpty() {
-    if (typeof window === 'undefined') return;
-    const raw = localStorage.getItem(STORAGE_KEYS.USER_REGISTRY);
-    let registry: Record<string, any> = {};
-    if (raw) {
-      try {
-        registry = JSON.parse(raw);
-      } catch {
-        registry = {};
-      }
-    }
-
-    let modified = false;
-
-    // 1. Gaurov Baruah (+91 9678944132)
-    if (!registry['9678944132']) {
-      registry['9678944132'] = {
-        user: {
-          id: 'user_driver_9678944132',
-          name: 'Gaurov Baruah',
-          phone: '+91 96789 44132',
-          email: 'baruahg39@gmail.com',
-          role: 'driver',
-          businessName: 'VahanSetu Assam Express Fleet',
-          city: 'Guwahati',
-          state: 'Assam',
-          isVerified: true,
-          createdAt: '2026-01-01T00:00:00Z'
-        },
-        vehicle: {
-          id: 'veh_demo_9678944132',
-          ownerId: 'user_driver_9678944132',
-          transporterName: 'VahanSetu Assam Express Fleet',
-          registrationNumber: 'AS-01-DM-0000',
-          category: 'bolero_pickup',
-          bodyType: 'tarpaulin',
-          capacityKg: 1750,
-          modelName: 'Mahindra Bolero Maxi Truck Plus',
-          fuelType: 'diesel',
-          permitType: 'all_northeast',
-          currentLocation: {
-            lat: 26.1445,
-            lng: 91.7362,
-            address: 'Beltola Wholesale Transport Yard, Guwahati',
-            city: 'Guwahati'
-          },
-          isOnline: true,
-          isAvailable: true,
-          verificationStatus: 'verified',
-          driverName: 'Gaurov Baruah',
-          driverPhone: '+91 96789 44132',
-          driverRating: 4.9,
-          completedTrips: 14,
-          photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-        },
-        updatedAt: new Date().toISOString()
-      };
-      modified = true;
-    }
-
-    // 2. Shipper (+91 9999911111)
-    if (!registry['9999911111']) {
-      registry['9999911111'] = {
-        user: {
-          id: 'test_shipper_9911',
-          name: 'Brahmaputra Valley Agro Commodities',
-          phone: '+91 99999 11111',
-          email: '9999911111@test.vahansetu.in',
-          role: 'customer',
-          businessName: 'Assam Tea Exports & FMCG Ltd',
-          city: 'Guwahati',
-          state: 'Assam',
-          isVerified: true,
-          isTestAccount: true,
-          createdAt: '2026-01-01T00:00:00Z'
-        },
-        updatedAt: new Date().toISOString()
-      };
-      modified = true;
-    }
-
-    // 3. Driver Bikash (+91 9999922222)
-    if (!registry['9999922222']) {
-      registry['9999922222'] = {
-        user: {
-          id: 'test_driver_9922',
-          name: 'Bikash Highway Transport',
-          phone: '+91 99999 22222',
-          email: '9999922222@test.vahansetu.in',
-          role: 'driver',
-          businessName: 'Bikash Logistics Assam',
-          city: 'Nagaon',
-          state: 'Assam',
-          isVerified: true,
-          isTestAccount: true,
-          createdAt: '2026-01-01T00:00:00Z'
-        },
-        vehicle: {
-          id: 'veh_test_driver_9922',
-          ownerId: 'test_driver_9922',
-          transporterName: 'Bikash Logistics Assam',
-          registrationNumber: 'AS-02-TC-9911',
-          category: 'bolero_pickup',
-          bodyType: 'tarpaulin',
-          capacityKg: 1500,
-          modelName: 'Mahindra Bolero Maxi Truck',
-          fuelType: 'diesel',
-          permitType: 'all_northeast',
-          currentLocation: {
-            lat: 26.3421,
-            lng: 92.6841,
-            address: 'Nagaon Bypass Commercial Yard',
-            city: 'Nagaon'
-          },
-          isOnline: true,
-          isAvailable: true,
-          verificationStatus: 'verified',
-          driverName: 'Bikash Highway Transport',
-          driverPhone: '+91 99999 22222',
-          driverRating: 4.9,
-          completedTrips: 18,
-          photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-        },
-        updatedAt: new Date().toISOString()
-      };
-      modified = true;
-    }
-
-    // 4. Fleet Owner Pragati (+91 9999933333)
-    if (!registry['9999933333']) {
-      registry['9999933333'] = {
-        user: {
-          id: 'test_driver_9933',
-          name: 'Pragati Multi-Axle Fleet',
-          phone: '+91 99999 33333',
-          email: '9999933333@test.vahansetu.in',
-          role: 'driver',
-          businessName: 'Kamrup Heavy Carriers Pvt Ltd',
-          city: 'Jorhat',
-          state: 'Assam',
-          isVerified: true,
-          isTestAccount: true,
-          createdAt: '2026-01-01T00:00:00Z'
-        },
-        vehicle: {
-          id: 'veh_test_driver_9933',
-          ownerId: 'test_driver_9933',
-          transporterName: 'Kamrup Heavy Carriers Pvt Ltd',
-          registrationNumber: 'AS-03-CC-8822',
-          category: 'eicher_14ft',
-          bodyType: 'tarpaulin',
-          capacityKg: 4500,
-          modelName: 'Eicher Pro 2049',
-          fuelType: 'diesel',
-          permitType: 'all_northeast',
-          currentLocation: {
-            lat: 26.7509,
-            lng: 94.2037,
-            address: 'Jorhat Gar-Ali Transport Hub',
-            city: 'Jorhat'
-          },
-          isOnline: true,
-          isAvailable: true,
-          verificationStatus: 'verified',
-          driverName: 'Pragati Multi-Axle Fleet',
-          driverPhone: '+91 99999 33333',
-          driverRating: 5.0,
-          completedTrips: 32,
-          photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-        },
-        updatedAt: new Date().toISOString()
-      };
-      modified = true;
-    }
-
-    if (modified) {
-      localStorage.setItem(STORAGE_KEYS.USER_REGISTRY, JSON.stringify(registry));
-    }
-
-    // Ensure seeded registry accounts also appear in USERS list for Admin Console monitoring
-    const currentUsers = this.getUsers();
-    let usersModified = false;
-    Object.values(registry).forEach((entry: any) => {
-      if (entry?.user?.id && !currentUsers.some((u) => u.id === entry.user.id)) {
-        currentUsers.push(entry.user);
-        usersModified = true;
-      }
-    });
-    if (usersModified) {
-      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(currentUsers));
-    }
+    // Intentionally empty: only real registered customers, drivers, owners, and admin accounts are stored.
   }
 
   public getRegisteredProfile(phone: string): {
@@ -960,18 +1000,9 @@ class LogisticsStore {
 
   // --- Vehicles ---
   public getVehicles(): CommercialVehicle[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.VEHICLES);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(SEED_VEHICLES));
-      return SEED_VEHICLES;
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      return SEED_VEHICLES;
-    } catch {
-      return SEED_VEHICLES;
-    }
+    return this.safeJsonParse<CommercialVehicle[]>(STORAGE_KEYS.VEHICLES, []).filter(
+      (v) => !isBotVehicleRecord(v)
+    );
   }
 
   public getVehicleById(id: string): CommercialVehicle | undefined {
@@ -1051,20 +1082,9 @@ class LogisticsStore {
 
   // --- Loads ---
   public getLoads(): LoadItem[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.LOADS);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.LOADS, JSON.stringify(SEED_LOADS));
-      return SEED_LOADS;
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-      return SEED_LOADS;
-    } catch {
-      return SEED_LOADS;
-    }
+    return this.safeJsonParse<LoadItem[]>(STORAGE_KEYS.LOADS, []).filter(
+      (l) => !isBotLoadRecord(l)
+    );
   }
 
   public getLoadById(id: string): LoadItem | undefined {
@@ -1173,19 +1193,9 @@ class LogisticsStore {
 
   // --- Quotations & Bidding ---
   public getQuotations(loadId?: string): Quotation[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.QUOTATIONS);
-    let quotes: Quotation[] = [];
-    if (!raw) {
-      quotes = SEED_QUOTATIONS;
-      localStorage.setItem(STORAGE_KEYS.QUOTATIONS, JSON.stringify(quotes));
-    } else {
-      try {
-        quotes = JSON.parse(raw);
-        if (!Array.isArray(quotes)) quotes = SEED_QUOTATIONS;
-      } catch {
-        quotes = SEED_QUOTATIONS;
-      }
-    }
+    const quotes = this.safeJsonParse<Quotation[]>(STORAGE_KEYS.QUOTATIONS, []).filter(
+      (q) => !isBotQuotationRecord(q)
+    );
     if (loadId) {
       return quotes.filter((q) => q.loadId === loadId);
     }
@@ -1204,12 +1214,11 @@ class LogisticsStore {
     }
 
     const id = `quote_${Date.now()}`;
-    const currentUser = this.getCurrentUser();
-    const isTestBid = !!(currentUser?.isTestAccount || (currentUser?.phone && currentUser.phone.includes('99999')));
+    const isTestBid = false;
     
     // Strict Booking Permission: Enforce approved partner status & verified vehicle
     const eligibility = this.checkPartnerBookingEligibility(quoteData.transporterId);
-    if (!eligibility.isEligible && !isTestBid) {
+    if (!eligibility.isEligible) {
       throw new Error(`Bidding restricted: ${eligibility.reason}`);
     }
     if (!isTestBid) {
@@ -1666,13 +1675,9 @@ class LogisticsStore {
       };
     }
 
-    const isSandboxPartner = Boolean(
-      partnerUser.isTestAccount || (partnerUser.phone && partnerUser.phone.includes('99999'))
-    );
-
     const vehicles = this.getVehicles();
-    let assignedVehicle =
-      (preferredVehicleId ? vehicles.find((v) => v.id === preferredVehicleId && (v.ownerId === partnerUser.id || v.assignedDriverId === partnerUser.id || isSandboxPartner)) : undefined) ||
+    const assignedVehicle =
+      (preferredVehicleId ? vehicles.find((v) => v.id === preferredVehicleId && (v.ownerId === partnerUser.id || v.assignedDriverId === partnerUser.id)) : undefined) ||
       vehicles.find((v) => v.ownerId === partnerUser.id && v.isAvailable && !v.isBlocked && v.verificationStatus === 'verified') ||
       vehicles.find((v) => v.ownerId === partnerUser.id && !v.isBlocked && v.verificationStatus === 'verified') ||
       vehicles.find((v) => v.assignedDriverId === partnerUser.id && !v.isBlocked && v.verificationStatus === 'verified');
@@ -1684,7 +1689,7 @@ class LogisticsStore {
       };
     }
 
-    if (assignedVehicle && !isSandboxPartner && assignedVehicle.verificationStatus !== 'verified') {
+    if (assignedVehicle && assignedVehicle.verificationStatus !== 'verified') {
       return {
         success: false,
         message: `Vehicle ${assignedVehicle.registrationNumber} is still pending Admin RC verification. Load acceptance unlocks after approval.`
@@ -1692,46 +1697,14 @@ class LogisticsStore {
     }
 
     if (!assignedVehicle) {
-      if (!isSandboxPartner) {
-        return {
-          success: false,
-          message: 'No Admin-verified commercial vehicle found on your account. Please register your truck & RC documents and wait for backend Admin approval.'
-        };
-      }
-      const cleanPhone = (partnerUser.phone || '9999').replace(/\D/g, '').slice(-4);
-      assignedVehicle = {
-        id: `veh_${partnerUser.id}_${Date.now().toString().slice(-4)}`,
-        ownerId: partnerUser.id,
-        transporterName: partnerUser.businessName || `${partnerUser.name} Transport`,
-        registrationNumber: `AS-01-VS-${cleanPhone || '1001'}`,
-        category: load.requiredVehicleCategory,
-        bodyType: load.requiredBodyType || 'tarpaulin',
-        capacityKg: Math.max(1500, load.weightKg),
-        modelName: 'Commercial Freight Carrier',
-        fuelType: 'diesel',
-        permitType: 'all_northeast',
-        currentLocation: {
-          lat: load.pickup.lat,
-          lng: load.pickup.lng,
-          address: `${partnerUser.city || load.pickup.city} Hub`,
-          city: partnerUser.city || load.pickup.city
-        },
-        isOnline: true,
-        isAvailable: false,
-        verificationStatus: 'verified',
-        documents: [],
-        assignedDriverId: partnerUser.id,
-        driverName: partnerUser.name,
-        driverPhone: partnerUser.phone,
-        driverRating: 4.9,
-        completedTrips: 1,
-        photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
+      return {
+        success: false,
+        message: 'No Admin-verified commercial vehicle found on your account. Please register your truck & RC documents and wait for backend Admin approval.'
       };
-      vehicles.unshift(assignedVehicle);
-    } else {
-      assignedVehicle.isAvailable = false;
-      assignedVehicle.isOnline = true;
     }
+
+    assignedVehicle.isAvailable = false;
+    assignedVehicle.isOnline = true;
     localStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(vehicles));
 
     const fareEstimate = this.calculateEstimatedFreight(
@@ -2197,20 +2170,9 @@ class LogisticsStore {
 
   // --- Bookings & Trips ---
   public getBookings(): Booking[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(SEED_BOOKINGS));
-      return SEED_BOOKINGS;
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
-      return SEED_BOOKINGS;
-    } catch {
-      return SEED_BOOKINGS;
-    }
+    return this.safeJsonParse<Booking[]>(STORAGE_KEYS.BOOKINGS, []).filter(
+      (b) => !isBotBookingRecord(b)
+    );
   }
 
   public getBookingById(id: string): Booking | undefined {
@@ -2771,18 +2733,9 @@ class LogisticsStore {
   }
 
   public getSettlements(): Settlement[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.SETTLEMENTS);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.SETTLEMENTS, JSON.stringify(SEED_SETTLEMENTS));
-      return SEED_SETTLEMENTS;
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      return SEED_SETTLEMENTS;
-    } catch {
-      return SEED_SETTLEMENTS;
-    }
+    return this.safeJsonParse<Settlement[]>(STORAGE_KEYS.SETTLEMENTS, []).filter(
+      (s) => !isBotSettlementRecord(s)
+    );
   }
 
   // --- CASHFREE EASY SPLIT MARKETPLACE SETTLEMENTS & ESCROW ENGINE ---
@@ -3680,21 +3633,9 @@ class LogisticsStore {
   // ==========================================
 
   public getPartnerApplications(): PartnerApplication[] {
-    const raw = localStorage.getItem(STORAGE_KEYS.PARTNER_APPLICATIONS);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(SEED_PARTNER_APPLICATIONS));
-      return SEED_PARTNER_APPLICATIONS;
-    }
-    try {
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(SEED_PARTNER_APPLICATIONS));
-        return SEED_PARTNER_APPLICATIONS;
-      }
-      return parsed;
-    } catch {
-      return SEED_PARTNER_APPLICATIONS;
-    }
+    return this.safeJsonParse<PartnerApplication[]>(STORAGE_KEYS.PARTNER_APPLICATIONS, []).filter(
+      (a) => !isBotApplicationRecord(a)
+    );
   }
 
   public getPartnerApplicationByUserId(userId: string): PartnerApplication | undefined {
@@ -4131,18 +4072,6 @@ class LogisticsStore {
         isEligible: false,
         status: 'SUSPENDED',
         reason: `Account suspended by Super Admin: ${user.blockedReason || 'Compliance review hold'}.`,
-        application: app
-      };
-    }
-
-    // Explicit sandbox test accounts (99999...) remain active for demo testing
-    const isSandboxTest = Boolean(user && (user.isTestAccount || user.phone?.includes('99999')));
-    if (isSandboxTest) {
-      if (!app) app = apps.find((a) => a.userId === 'user_driver_01');
-      return {
-        isEligible: true,
-        status: 'APPROVED',
-        reason: 'Sandbox demo partner account active for testing.',
         application: app
       };
     }

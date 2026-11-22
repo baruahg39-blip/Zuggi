@@ -106,6 +106,11 @@ export const TripFeedbackModal: React.FC<TripFeedbackModalProps> = ({
 
     const finalTip = showCustomTip ? Number(customTip) || 0 : tipAmount;
 
+    const assignedVehicle = booking.vehicleId ? logisticsStore.getVehicleById(booking.vehicleId) : undefined;
+    const assignedDriver = booking.driverId ? logisticsStore.getUserById(booking.driverId) : undefined;
+    const resolvedDriverName = assignedVehicle?.driverName || assignedDriver?.name || 'Assigned Driver';
+    const resolvedVehicleReg = assignedVehicle?.registrationNumber || 'Registered Vehicle';
+
     const saved = logisticsStore.submitTripFeedback({
       bookingId: booking.id,
       loadId: load.id,
@@ -113,9 +118,9 @@ export const TripFeedbackModal: React.FC<TripFeedbackModalProps> = ({
       customerName: currentUser.name,
       customerCompany: currentUser.businessName,
       driverId: booking.driverId,
-      driverName: booking.transporterId === 'user_trans_01' ? 'Bikramjit Sharma' : 'Manoj Das',
+      driverName: resolvedDriverName,
       vehicleId: booking.vehicleId,
-      vehicleRegNumber: load.id === 'load_active_01' ? 'AS-01-QC-4910' : 'AS-01-MC-7822',
+      vehicleRegNumber: resolvedVehicleReg,
       punctualityRating,
       vehicleConditionRating,
       communicationRating,
@@ -171,8 +176,10 @@ export const TripFeedbackModal: React.FC<TripFeedbackModalProps> = ({
     }
   };
 
-  const driverDisplayName = booking.transporterId === 'user_trans_01' ? 'Bikramjit Sharma' : 'Manoj Das';
-  const vehicleRegNumber = load.id === 'load_active_01' ? 'AS-01-QC-4910' : 'AS-01-MC-7822';
+  const assignedVehicleInfo = booking.vehicleId ? logisticsStore.getVehicleById(booking.vehicleId) : undefined;
+  const assignedDriverInfo = booking.driverId ? logisticsStore.getUserById(booking.driverId) : undefined;
+  const driverDisplayName = assignedVehicleInfo?.driverName || assignedDriverInfo?.name || 'Assigned Driver';
+  const vehicleRegNumber = assignedVehicleInfo?.registrationNumber || 'Registered Vehicle';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md overflow-y-auto animate-fadeIn">

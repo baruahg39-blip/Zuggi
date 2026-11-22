@@ -69,30 +69,12 @@ export const DriverTripHistory: React.FC<DriverTripHistoryProps> = ({
     return unsub;
   }, []);
 
-  // Filter completed and delivered trips for driver
+  // Filter completed and delivered trips for the logged-in driver/transporter
   const completedTrips = useMemo(() => {
-    const isTestDriver = currentUser.role === 'driver' && (
-      currentUser.isTestAccount ||
-      currentUser.phone?.includes('99999') ||
-      currentUser.phone?.includes('9678944132') ||
-      currentUser.id === 'user_driver_01'
-    );
-
     return allBookings.filter((b) => {
-      // Must be completed or delivered
       const isFinished = b.status === 'completed' || b.status === 'delivered';
       if (!isFinished) return false;
-
-      // Ownership match: driver ID or transporter ID
-      const isOwner = b.driverId === currentUser.id || b.transporterId === currentUser.id;
-      if (isOwner) return true;
-
-      // Fallback for test sandbox drivers so history is populated and verifiable
-      if (isTestDriver && (b.driverId.startsWith('user_driver') || b.driverId.startsWith('test_driver'))) {
-        return true;
-      }
-
-      return false;
+      return b.driverId === currentUser.id || b.transporterId === currentUser.id;
     });
   }, [allBookings, currentUser]);
 

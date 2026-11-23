@@ -6,6 +6,7 @@ import {
   getDoc,
   setDoc,
   updateDoc,
+  deleteDoc,
   fbSignOut,
   onAuthStateChanged,
   GoogleAuthProvider,
@@ -41,10 +42,7 @@ export interface DevTestAccount {
   vehicleCategory?: VehicleCategoryType;
 }
 
-export const DEMO_PHONE_NUMBER = '9678944132';
-export const DEMO_OTP_CODE = '000000';
-
-// Bot / sandbox test accounts have been permanently removed for live production operations.
+// Bot / sandbox test accounts are permanently disabled in production.
 export const DEV_TEST_ACCOUNTS: DevTestAccount[] = [];
 
 class AuthService {
@@ -53,8 +51,6 @@ class AuthService {
   private maxAttempts = 3;
   private lastOtpSentTime = 0;
   private cooldownMs = 60000;
-  private isDemoOtpSession = false;
-  private demoSessionPhone = '';
 
   constructor() {
     // Restore cooldown from sessionStorage if available
@@ -168,12 +164,10 @@ class AuthService {
       cleanPhone = cleanPhone.slice(-10);
     }
     if (!cleanPhone || cleanPhone.length < 10) {
-      cleanPhone = '9678944132';
+      throw new Error('A valid 10-digit mobile number is required.');
     }
 
-    const isBaruah = cleanPhone === '9678944132';
-
-    // 1. Check permanent user profile registry first!
+    // 1. Check in-memory user profile registry first
     const registered = logisticsStore.getRegisteredProfile(cleanPhone);
     const existingStoreUser = logisticsStore.getUsers().find(
       (u) => u.phone.replace(/\D/g, '').endsWith(cleanPhone)
@@ -244,25 +238,8 @@ class AuthService {
 
     const role: UserRole = preferredRole || 'customer';
 
-    if (role === 'admin' || (isBaruah && preferredRole === 'admin')) {
-      const adminUser: User = {
-        id: 'owner_baruahg39',
-        name: 'G. Baruah (Platform Owner)',
-        phone: '+91 96789 44132',
-        email: SUPER_ADMIN_EMAIL,
-        role: 'admin',
-        businessName: 'Zuggi Technologies India',
-        city: 'Guwahati',
-        state: 'Assam',
-        isVerified: true,
-        createdAt: '2026-01-01T00:00:00Z'
-      };
-      if (typeof window !== 'undefined') {
-        sessionStorage.removeItem('vs_logged_out');
-      }
-      logisticsStore.saveUser(adminUser);
-      logisticsStore.setCurrentUser(adminUser);
-      return adminUser;
+    if (role === 'admin') {
+      throw new Error('Admin access requires server-verified Super Admin credentials.');
     }
 
     // 3. For new users: return a provisional user WITHOUT setting active session!
@@ -283,110 +260,26 @@ class AuthService {
   }
 
   /**
-   * Switch the active logged-in user's portal role directly
+   * Switch the active logged-in user's non-admin portal role (customer <-> driver)
    */
   public switchRole(newRole: UserRole): User {
-    const current = logisticsStore.getCurrentUser();
     if (newRole === 'admin') {
-      const adminUser: User = {
-        id: 'owner_baruahg39',
-        name: 'G. Baruah (Platform Owner)',
-        phone: '+91 94350 88219',
-        email: SUPER_ADMIN_EMAIL,
-        role: 'admin',
-        businessName: 'Zuggi Technologies India',
-        city: 'Guwahati',
-        state: 'Assam',
-        isVerified: true,
-        createdAt: '2026-01-01T00:00:00Z'
-      };
-      logisticsStore.saveUser(adminUser);
-      logisticsStore.setCurrentUser(adminUser);
-      return adminUser;
+      throw new Error('Admin access requires server-verified Super Admin credentials.');
     }
-
-    const rawPhone = current?.phone || '9678944132';
-    return this.loginInstantWithPhone(rawPhone, newRole);
+    const current = logisticsStore.getCurrentUser();
+    if (!current?.phone) {
+      throw new Error('Please sign in first before switching portals.');
+    }
+    return this.loginInstantWithPhone(current.phone, newRole);
   }
 
   /**
-   * Request SMS OTP (Self-contained, reliable, instant verification for development & production)
-   * Eliminates unconfigured Firebase carrier SMS costs and reCAPTCHA errors
-   * @param rawPhone 10-digit Indian mobile number
+   * Verify Firebase Phone Auth confirmation code when Firebase Phone Auth is active
    */
-  public async sendSmsOtp(rawPhone: string, _recaptchaContainerId = 'recaptcha-container'): Promise<{ success: boolean; message: string; isTestAccount?: boolean }> {
-    let cleanPhone = rawPhone.replace(/\D/g, '');
-    if (cleanPhone.length > 10 && cleanPhone.startsWith('91')) {
-      cleanPhone = cleanPhone.slice(2);
-    } else if (cleanPhone.length > 10) {
-      cleanPhone = cleanPhone.slice(-10);
-    }
-
-    if (cleanPhone.length < 10) {
-      throw new Error('Please enter a valid 10-digit Indian mobile number.');
-    }
-
-    const formattedE164 = `+91${cleanPhone}`;
-    const isTestNumber = formattedE164.includes('99999');
-    const isDemo = cleanPhone === DEMO_PHONE_NUMBER || cleanPhone.includes(DEMO_PHONE_NUMBER) || rawPhone.includes('9678944132');
-
-    this.isDemoOtpSession = true;
-    this.demoSessionPhone = formattedE164;
-    this.attemptCount = 0;
-    this.lastOtpSentTime = Date.now();
-
-    if (isDemo) {
-      return {
-        success: true,
-        isTestAccount: false,
-        message: 'Security verification code ready for +91 96789 44132. Enter code 000000.'
-      };
-    }
-
-    if (isTestNumber) {
-      return {
-        success: true,
-        isTestAccount: false,
-        message: `Security verification code active for ${formattedE164}. Enter code 123456.`
-      };
-    }
-
-    return {
-      success: true,
-      isTestAccount: false,
-      message: `Security verification code active for ${formattedE164}. Enter code 000000.`
-    };
-  }
-
-  /**
-   * Verify the 6-digit SMS OTP received or the demo code (000000)
-   */
-  public async verifySmsOtp(otpCode: string, preferredRole: UserRole = 'customer'): Promise<User> {
+  public async verifySmsOtp(otpCode: string, _preferredRole: UserRole = 'customer'): Promise<User> {
     const cleanOtp = otpCode.replace(/\D/g, '');
     if (cleanOtp.length !== 6) {
       throw new Error('OTP must be exactly 6 digits.');
-    }
-
-    // Handle Demo OTP verification strictly matching 000000 or 123456 (or 123456 for 99999 test numbers)
-    const isTestSession = this.demoSessionPhone.includes('99999');
-    const isValidDemoCode = isTestSession ? (cleanOtp === '123456' || cleanOtp === '000000') : (cleanOtp === '000000' || cleanOtp === '123456');
-
-    if (this.isDemoOtpSession) {
-      if (!isValidDemoCode) {
-        throw new Error('Incorrect OTP code. Please enter the 6-digit verification code sent to your number.');
-      }
-      this.isDemoOtpSession = false;
-
-      if (preferredRole === 'admin') {
-        throw new Error('Security Error: Super Admin access requires Platform Owner Passcode verification.');
-      }
-
-      const cleanSessionPhone = this.demoSessionPhone.replace(/\D/g, '').slice(-10);
-      if (cleanSessionPhone) {
-        return this.loginInstantWithPhone(cleanSessionPhone, preferredRole);
-      }
-
-      throw new Error('Please enter your 10-digit mobile number to sign in.');
     }
 
     if (!this.confirmationResult) {
@@ -404,9 +297,6 @@ class AuthService {
       const userCredential = await this.confirmationResult.confirm(cleanOtp);
       const fbUser = userCredential.user;
 
-      const isTestNumber = !!(fbUser.phoneNumber && fbUser.phoneNumber.includes('99999'));
-      const testMatch = isTestNumber ? DEV_TEST_ACCOUNTS.find((t) => t.formattedE164 === fbUser.phoneNumber) : undefined;
-
       // Check if user already exists in Firestore
       const userDocRef = doc(db, 'users', fbUser.uid);
       const snap = await getDoc(userDocRef);
@@ -418,130 +308,39 @@ class AuthService {
         const data = snap.data();
         appUser = {
           id: fbUser.uid,
-          name: data.name || (testMatch ? testMatch.name : 'Commercial Freight User'),
+          name: data.name || 'Commercial Freight User',
           phone: fbUser.phoneNumber || '',
-          email: data.email || (testMatch ? `${testMatch.phone}@test.vahansetu.in` : ''),
-          role: isOwner ? 'admin' : (data.role as UserRole) || (testMatch ? testMatch.role : 'customer'),
-          businessName: data.businessName || (testMatch ? testMatch.company : undefined),
+          email: data.email || '',
+          role: isOwner ? 'admin' : (data.role as UserRole) || 'customer',
+          businessName: data.businessName,
           gstin: data.gstin,
           pan: data.pan,
-          city: data.city || (testMatch ? testMatch.city : 'Guwahati'),
+          city: data.city || 'Guwahati',
           state: data.state || 'Assam',
-          isVerified: isOwner ? true : (data.isVerified ?? (isTestNumber ? true : false)),
-          isTestAccount: isTestNumber,
+          isVerified: isOwner ? true : Boolean(data.isVerified),
+          isTestAccount: false,
           createdAt: data.createdAt || new Date().toISOString()
         };
       } else {
-        // Initial setup for user
-        if (testMatch) {
-          // Pre-provision test account in Firestore
-          appUser = {
-            id: fbUser.uid,
-            name: testMatch.name,
-            phone: fbUser.phoneNumber || testMatch.displayPhone,
-            email: `${testMatch.phone}@test.vahansetu.in`,
-            role: testMatch.role,
-            businessName: testMatch.company,
-            city: testMatch.city,
-            state: 'Assam',
-            isVerified: true,
-            isTestAccount: true,
-            createdAt: new Date().toISOString()
-          };
-
-          // Save test user to Firestore
-          await setDoc(userDocRef, appUser);
-
-          if (testMatch.role === 'customer') {
-            await setDoc(doc(db, 'shippers', fbUser.uid), {
-              userId: fbUser.uid,
-              companyName: testMatch.company,
-              billingAddress: `${testMatch.city}, Assam`,
-              totalLoadsPosted: 0,
-              totalSpent: 0,
-              rating: 5.0,
-              isTestAccount: true
-            });
-          } else {
-            // Driver test account
-            await setDoc(doc(db, 'drivers', fbUser.uid), {
-              userId: fbUser.uid,
-              name: testMatch.name,
-              dlNumber: `AS-DL-${testMatch.phone.slice(-4)}`,
-              isFleetOwner: testMatch.phone === '9999933333',
-              fleetSize: testMatch.phone === '9999933333' ? 5 : 1,
-              verificationStatus: 'verified',
-              rating: 5.0,
-              completedTrips: 0,
-              totalEarnings: 0,
-              activeVehicleReg: testMatch.vehicleReg || 'AS-02-TC-9911',
-              isTestAccount: true
-            });
-
-            // Register default test vehicle so driver can place bids and execute trips immediately
-            if (testMatch.vehicleReg) {
-              const vehId = `veh_test_${fbUser.uid.slice(-6)}`;
-              const testVeh: CommercialVehicle = {
-                id: vehId,
-                ownerId: fbUser.uid,
-                transporterName: testMatch.company,
-                registrationNumber: testMatch.vehicleReg,
-                category: testMatch.vehicleCategory || 'bolero_pickup',
-                bodyType: 'tarpaulin',
-                capacityKg: testMatch.vehicleCategory === 'eicher_14ft' ? 4500 : 1500,
-                modelName: testMatch.vehicleCategory === 'eicher_14ft' ? 'Eicher Pro 2049' : 'Mahindra Bolero Maxi Truck',
-                fuelType: 'diesel',
-                permitType: 'all_northeast',
-                currentLocation: {
-                  lat: 26.1445,
-                  lng: 91.7362,
-                  address: `${testMatch.city} Transport Yard`,
-                  city: testMatch.city
-                },
-                isOnline: true,
-                isAvailable: true,
-                verificationStatus: 'verified',
-                documents: [
-                  {
-                    id: `doc_rc_${vehId}`,
-                    type: 'rc',
-                    documentNumber: testMatch.vehicleReg,
-                    documentUrl: '',
-                    expiryDate: '2032-12-31',
-                    verificationStatus: 'verified'
-                  }
-                ],
-                driverName: testMatch.name,
-                driverPhone: testMatch.displayPhone,
-                driverRating: 5.0,
-                completedTrips: 0,
-                photoUrl: 'https://images.unsplash.com/photo-1559297434-fae8a1916a79?auto=format&fit=crop&w=600&q=80'
-              };
-              await setDoc(doc(db, 'vehicles', vehId), testVeh);
-              logisticsStore.saveVehicle(testVeh);
-            }
-          }
-        } else {
-          // Standard real phone onboarding needed
-          appUser = {
-            id: fbUser.uid,
-            name: '',
-            phone: fbUser.phoneNumber || '',
-            email: '',
-            role: 'customer',
-            city: 'Guwahati',
-            state: 'Assam',
-            isVerified: false,
-            isTestAccount: false,
-            createdAt: new Date().toISOString()
-          };
-        }
+        // Standard real phone onboarding needed
+        appUser = {
+          id: fbUser.uid,
+          name: '',
+          phone: fbUser.phoneNumber || '',
+          email: '',
+          role: 'customer',
+          city: 'Guwahati',
+          state: 'Assam',
+          isVerified: false,
+          isTestAccount: false,
+          createdAt: new Date().toISOString()
+        };
       }
 
       logisticsStore.setCurrentUser(appUser);
       return appUser;
     } catch (err: any) {
-      console.error('OTP confirmation error:', err);
+      console.error('OTP confirmation error:', err?.code || 'verification_failed');
       if (err.code === 'auth/invalid-verification-code') {
         const remaining = this.maxAttempts - this.attemptCount;
         throw new Error(`Incorrect OTP code. ${remaining > 0 ? `${remaining} attempts remaining.` : 'Session expired.'}`);
@@ -590,7 +389,7 @@ class AuthService {
     const nowIso = new Date().toISOString();
 
     const isNewPartner = profile.role === 'driver';
-    const isTestPhone = cleanPhone.startsWith('99999');
+    const isTestPhone = false;
 
     const updatedUser: User = {
       id: profile.userId,
@@ -723,11 +522,7 @@ class AuthService {
       }
     }
 
-    const localDigest = hasPasscode
-      ? await logisticsStore.computeLocalPasscodeDigest(cleanPhone, profile.passcode!.trim())
-      : undefined;
-
-    // Save to permanent profile registry (preserved across logout and restores on passcode or OTP sign-in)
+    // Save to in-memory profile registry (never stores passcode digests in browser storage)
     logisticsStore.saveRegisteredProfile(
       cleanPhone,
       updatedUser,
@@ -736,8 +531,7 @@ class AuthService {
         dlNumber: profile.dlNumber,
         isFleetOwner: profile.isFleetOwner,
         fleetSize: profile.fleetSize,
-        hasPasscode,
-        passcodeDigest: localDigest
+        hasPasscode
       }
     );
 
@@ -815,22 +609,22 @@ class AuthService {
         if (data?.exists) {
           return {
             exists: true,
-            hasPasscode: Boolean(data.hasPasscode || localProfile?.hasPasscode || localProfile?.passcodeDigest),
-            name: data.name || localProfile?.user?.name,
+            hasPasscode: Boolean(data.hasPasscode || localProfile?.hasPasscode),
+            name: localProfile?.user?.name,
             role: (data.role as UserRole) || localProfile?.user?.role,
             isBlocked: Boolean(data.isBlocked || localProfile?.user?.isBlocked),
-            blockedReason: data.blockedReason || localProfile?.user?.blockedReason
+            blockedReason: localProfile?.user?.blockedReason
           };
         }
       }
     } catch {
-      // Fall back to local registry if network is unreachable
+      // Fall back to in-memory registry if network is unreachable
     }
 
     if (localProfile?.user?.name) {
       return {
         exists: true,
-        hasPasscode: Boolean(localProfile.hasPasscode || localProfile.passcodeDigest || localProfile.user.hasPasscode),
+        hasPasscode: Boolean(localProfile.hasPasscode || localProfile.user.hasPasscode),
         name: localProfile.user.name,
         role: localProfile.user.role,
         isBlocked: localProfile.user.isBlocked,
@@ -875,7 +669,9 @@ class AuthService {
       throw new Error(data?.message || 'Unable to save passcode. Please verify via OTP and try again.');
     }
 
-    await logisticsStore.setLocalPasscode(clean, cleanPasscode);
+    if (data?.sessionToken) {
+      logisticsStore.setUserSessionToken(String(data.sessionToken));
+    }
     logisticsStore.saveUser(updatedUser);
     logisticsStore.setCurrentUser(updatedUser);
     return updatedUser;
@@ -907,7 +703,6 @@ class AuthService {
 
     let authenticatedUser: User | null = null;
     let serverError: string | null = null;
-    let serverStatus = 0;
 
     try {
       const res = await fetch('/api/auth/login-passcode', {
@@ -915,39 +710,27 @@ class AuthService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: clean, passcode: cleanPasscode })
       });
-      serverStatus = res.status;
       const data = await res.json().catch(() => ({}));
       if (res.ok && data?.success && data?.user) {
         authenticatedUser = data.user as User;
+        if (data.sessionToken) {
+          logisticsStore.setUserSessionToken(String(data.sessionToken));
+        }
       } else {
         serverError = data?.message || 'Invalid mobile number or passcode.';
       }
     } catch {
-      // Offline / network fallback checked below against local registry digest
-    }
-
-    // If server returned 401 (wrong passcode) or 429 (locked) or 403 (blocked), do NOT bypass
-    if (!authenticatedUser && (serverStatus === 401 || serverStatus === 429 || serverStatus === 403)) {
-      throw new Error(serverError || 'Incorrect passcode.');
-    }
-
-    // Local registry fallback when server restarted without Supabase or offline
-    const localProfile = logisticsStore.getRegisteredProfile(clean);
-    if (!authenticatedUser && localProfile?.user && localProfile?.passcodeDigest) {
-      const localMatch = await logisticsStore.verifyLocalPasscode(clean, cleanPasscode);
-      if (!localMatch) {
-        throw new Error('Incorrect passcode. Please try again or reset via OTP.');
-      }
-      authenticatedUser = localProfile.user;
+      throw new Error('Unable to reach authentication server. Please check your connection and try again.');
     }
 
     if (!authenticatedUser) {
       throw new Error(
         serverError ||
-          'No passcode found for this mobile number. Please register once with OTP and documents first.'
+          'Invalid mobile number or passcode. Please try again or reset via OTP.'
       );
     }
 
+    const localProfile = logisticsStore.getRegisteredProfile(clean);
     const existingStoreUser = logisticsStore
       .getUsers()
       .find((u) => u.phone.replace(/\D/g, '').endsWith(clean));
@@ -993,13 +776,11 @@ class AuthService {
       logisticsStore.saveVehicle(localProfile.vehicle);
     }
 
-    const localDigest = await logisticsStore.computeLocalPasscodeDigest(clean, cleanPasscode);
     logisticsStore.saveRegisteredProfile(clean, restoredUser, localProfile?.vehicle, {
       dlNumber: localProfile?.dlNumber,
       isFleetOwner: localProfile?.isFleetOwner,
       fleetSize: localProfile?.fleetSize,
-      hasPasscode: true,
-      passcodeDigest: localDigest
+      hasPasscode: true
     });
     logisticsStore.saveUser(restoredUser);
     logisticsStore.setCurrentUser(restoredUser);
@@ -1048,16 +829,15 @@ class AuthService {
       if (!res.ok || !data.success) {
         throw new Error(data.message || 'Unable to reset passcode. Please verify OTP again.');
       }
+      if (data.sessionToken) {
+        logisticsStore.setUserSessionToken(String(data.sessionToken));
+      }
       serverUser = data.user || null;
     } catch (err: any) {
-      // Only propagate real API errors; allow local fallback if backend is unreachable
       if (err instanceof TypeError) {
-        if (!fallbackUser) {
-          throw new Error('Unable to reach server to reset passcode. Please try again.');
-        }
-      } else {
-        throw err;
+        throw new Error('Unable to reach server to reset passcode. Please try again.');
       }
+      throw err;
     }
 
     const baseUser = serverUser || fallbackUser;
@@ -1093,13 +873,11 @@ class AuthService {
       logisticsStore.saveVehicle(localProfile.vehicle);
     }
 
-    const localDigest = await logisticsStore.computeLocalPasscodeDigest(clean, cleanPasscode);
     logisticsStore.saveRegisteredProfile(clean, updatedUser, localProfile?.vehicle, {
       dlNumber: localProfile?.dlNumber,
       isFleetOwner: localProfile?.isFleetOwner,
       fleetSize: localProfile?.fleetSize,
-      hasPasscode: true,
-      passcodeDigest: localDigest
+      hasPasscode: true
     });
     logisticsStore.saveUser(updatedUser);
     logisticsStore.setCurrentUser(updatedUser);
@@ -1107,16 +885,26 @@ class AuthService {
   }
 
   /**
-   * Platform Owner Authentication Portal
-   * Strictly verifies the owner identity (baruahg39@gmail.com)
+   * Check whether Super Admin passcode is configured via env var or claimed during first-run setup.
    */
-  public async loginOwner(secretPasscode: string): Promise<User> {
-    // Owner validation
-    // In production, owner signs in with verified Google Auth or owner passphrase
-    if (secretPasscode.trim() !== 'Admin@VahanSetu2026' && secretPasscode.trim() !== 'baruahg39@gmail.com') {
-      throw new Error('Access Denied: Invalid Super Admin verification credential.');
+  public async getAdminSetupStatus(): Promise<{
+    configured: boolean;
+    claimed: boolean;
+    requiresSetup: boolean;
+  }> {
+    const res = await fetch('/api/auth/admin-status');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.message || 'Unable to verify Super Admin setup status.');
     }
+    return {
+      configured: Boolean(data?.configured),
+      claimed: Boolean(data?.claimed),
+      requiresSetup: Boolean(data?.requiresSetup)
+    };
+  }
 
+  private async completeOwnerSignIn(sessionToken: string): Promise<User> {
     const adminUser: User = {
       id: 'owner_baruahg39',
       name: 'G. Baruah (Platform Owner)',
@@ -1137,28 +925,60 @@ class AuthService {
         verifiedAt: new Date().toISOString()
       });
     } catch {
-      // Local fallback
+      // Firestore sync optional when not authenticated with Firebase Auth
     }
 
-    try {
-      const sessionRes = await fetch('/api/auth/admin-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: secretPasscode.trim() })
-      });
-      if (sessionRes.ok) {
-        const sessionData = await sessionRes.json();
-        if (sessionData?.token) {
-          logisticsStore.setAdminSessionToken(sessionData.token);
-        }
-      }
-    } catch {
-      // Offline preview fallback
-    }
-
+    logisticsStore.setAdminSessionToken(sessionToken);
     logisticsStore.saveUser(adminUser);
     logisticsStore.setCurrentUser(adminUser);
     return adminUser;
+  }
+
+  /**
+   * One-time first-run Super Admin passcode setup (only active when ZUGGI_ADMIN_PASSCODE is unset).
+   */
+  public async claimInitialAdminPasscode(newPasscode: string): Promise<User> {
+    const cleanPasscode = newPasscode.trim();
+    if (cleanPasscode.length < 8) {
+      throw new Error('Super Admin passcode must be at least 8 characters long.');
+    }
+
+    const res = await fetch('/api/auth/admin-claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: cleanPasscode })
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.token) {
+      throw new Error(data?.message || 'Unable to initialize Super Admin passcode.');
+    }
+
+    return this.completeOwnerSignIn(data.token);
+  }
+
+  /**
+   * Platform Owner Authentication Portal
+   * Strictly verifies the owner credential against the backend /api/auth/admin-session endpoint.
+   */
+  public async loginOwner(secretPasscode: string): Promise<User> {
+    const cleanPasscode = secretPasscode.trim();
+    if (!cleanPasscode) {
+      throw new Error('Please enter your Super Admin passcode.');
+    }
+
+    const sessionRes = await fetch('/api/auth/admin-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: cleanPasscode })
+    });
+
+    const sessionData = await sessionRes.json().catch(() => ({}));
+    if (!sessionRes.ok || !sessionData?.token) {
+      throw new Error(sessionData?.message || 'Access Denied: Invalid Super Admin verification credential.');
+    }
+
+    return this.completeOwnerSignIn(sessionData.token);
   }
 
   /**
@@ -1172,27 +992,122 @@ class AuthService {
   }
 
   /**
+   * Permanently delete and anonymize the signed-in user's account and personal data across
+   * the Express backend, Supabase, Firestore, and browser storage.
+   */
+  public async deleteMyAccount(
+    reason = 'User requested account deletion',
+    source = 'in_app'
+  ): Promise<{ referenceId?: string; message: string }> {
+    const current = logisticsStore.getCurrentUser();
+    const userToken = logisticsStore.getUserSessionToken();
+    const cleanPhone = (current?.phone || '').replace(/\D/g, '').slice(-10);
+
+    let referenceId: string | undefined;
+    let message = 'Your account and personal data have been erased and anonymized.';
+
+    // 1. Trigger authoritative server-side & Supabase erasure/anonymization
+    if (cleanPhone.length === 10 || userToken) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (userToken) {
+        headers['Authorization'] = `Bearer ${userToken}`;
+      }
+      const res = await fetch('/api/auth/request-account-deletion', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          phone: cleanPhone || undefined,
+          reason,
+          source
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(
+          data?.message ||
+            'Please verify your mobile number via OTP at /delete-account to permanently erase your account.'
+        );
+      }
+      referenceId = data.referenceId;
+      if (data.message) message = data.message;
+    }
+
+    // 2. Anonymize & delete Firestore user/role documents when signed in via Firebase Auth
+    if (auth.currentUser?.uid) {
+      const uid = auth.currentUser.uid;
+      try {
+        await setDoc(
+          doc(db, 'users', uid),
+          {
+            id: uid,
+            name: 'Deleted User',
+            phone: '',
+            email: '',
+            businessName: '',
+            gstin: '',
+            pan: '',
+            address: '',
+            bankDetails: null,
+            isVerified: false,
+            deletedAt: new Date().toISOString()
+          },
+          { merge: true }
+        );
+      } catch {
+        // Non-blocking if Firestore user doc doesn't exist
+      }
+      try {
+        await deleteDoc(doc(db, 'shippers', uid));
+      } catch {
+        // Non-blocking
+      }
+      try {
+        await deleteDoc(doc(db, 'drivers', uid));
+      } catch {
+        // Non-blocking
+      }
+    }
+
+    // 3. Erase all in-memory PII & sign out cleanly
+    if (current?.id || cleanPhone) {
+      logisticsStore.eraseAccountFromMemory(current?.id || '', cleanPhone);
+    }
+    await this.logout();
+    return { referenceId, message };
+  }
+
+  /**
    * Log out of current session:
    * Completely wipes all session storage, clears local user state,
    * signs out of Firebase Auth, and ensures currentUser is null.
    */
   public async logout(): Promise<void> {
+    // Blacklist active user/admin JWT session token server-side before clearing locally
+    try {
+      const headers = logisticsStore.buildAuthHeaders(true);
+      if (headers['Authorization']) {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers
+        });
+      }
+    } catch {
+      // Non-blocking if offline
+    }
     try {
       await fbSignOut(auth);
     } catch {
       // Ignored
     }
     this.confirmationResult = null;
-    this.isDemoOtpSession = false;
-    this.demoSessionPhone = '';
     this.attemptCount = 0;
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('vs_current_user');
-      localStorage.removeItem('vs_auth_token');
       sessionStorage.setItem('vs_logged_out', 'true');
       sessionStorage.removeItem('vs_otp_cooldown_expiry');
     }
+    logisticsStore.setUserSessionToken(null);
     logisticsStore.setAdminSessionToken(null);
+    logisticsStore.purgeAllUserPiiFromBrowserStorage();
     logisticsStore.setCurrentUser(null);
   }
 }

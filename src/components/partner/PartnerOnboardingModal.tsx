@@ -1246,8 +1246,16 @@ export const PartnerOnboardingModal: React.FC<PartnerOnboardingModalProps> = ({
                           <span>Re-upload</span>
                           <input
                             type="file"
+                            accept="image/jpeg,image/png,image/webp,application/pdf"
                             className="hidden"
-                            onChange={() => {
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              const allowedTypes = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf']);
+                              if (!allowedTypes.has((file.type || '').toLowerCase()) || file.size > 5 * 1024 * 1024) {
+                                e.target.value = '';
+                                return;
+                              }
                               const updated = [...documents];
                               updated[idx].status = 'pending';
                               updated[idx].rejectionReason = undefined;

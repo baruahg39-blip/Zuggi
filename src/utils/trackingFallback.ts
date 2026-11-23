@@ -279,7 +279,7 @@ export async function syncLocalTripToServer(
   try {
     const res = await fetch(`/trips/${encodeURIComponent(fallback.trip_id)}/sync`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: logisticsStore.buildAuthHeaders(true),
       body: JSON.stringify({
         load_id: fallback.load_id,
         vehicle_id: fallback.vehicle.id,

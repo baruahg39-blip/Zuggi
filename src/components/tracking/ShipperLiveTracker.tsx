@@ -321,7 +321,7 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
           if (fallbackRes.ok) {
             const fallbackData: TripLiveTrackingResponse = await fallbackRes.json();
             setTelemetry(fallbackData);
-            trackingTokenRef.current = fallbackData.tracking_token || 'trk_sec_993821739182371928371923';
+            trackingTokenRef.current = fallbackData.tracking_token || '';
             setTrackingToken(trackingTokenRef.current);
             setLastSyncTime(new Date());
             setErrorMsg(null);
@@ -485,7 +485,7 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
           {/* Test / Driver Simulator Trigger */}
           {onOpenDriverSimulator && (
             <button
-              onClick={() => onOpenDriverSimulator(effectiveTripId, trackingToken || 'trk_sec_993821739182371928371923')}
+              onClick={() => onOpenDriverSimulator(effectiveTripId, trackingToken || '')}
               className="px-3 py-1.5 bg-[#FFF0F6] border border-[#F4A7C5] text-[#E83E83] hover:bg-[#FFE3EE] rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
             >
               <Sparkles className="w-3.5 h-3.5" />
@@ -727,8 +727,8 @@ export const ShipperLiveTracker: React.FC<ShipperLiveTrackerProps> = ({
             try {
               const res = await fetch(`/trips/${encodeURIComponent(targetId)}/geofence`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch)
+                headers: logisticsStore.buildAuthHeaders(true),
+                body: JSON.stringify({ ...patch, tracking_token: telemetry.tracking_token })
               });
               if (res.ok) {
                 logisticsStore.updateGeofenceConfig(targetId, patch);

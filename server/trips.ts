@@ -3,8 +3,25 @@ import crypto from 'crypto';
 import {
   persistTripToSupabase,
   persistLocationPingsToSupabase,
-  loadTripFromSupabase
+  loadTripFromSupabase,
+  verifyAdminTokenFromReq,
+  verifyUserTokenFromReq
 } from './supabase.js';
+
+// Runtime HMAC secret for trip tracking tokens: uses env var when configured,
+// otherwise generates a fresh cryptographically random key per server instance.
+const TRACKING_TOKEN_HMAC_SECRET =
+  (process.env.TRACKING_TOKEN_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
+
+function generateTripTrackingToken(tripId: string, context: string): string {
+  const entropy = crypto.randomBytes(20).toString('hex');
+  const digest = crypto
+    .createHmac('sha256', TRACKING_TOKEN_HMAC_SECRET)
+    .update(`${tripId}_${context}_${Date.now()}_${entropy}`)
+    .digest('hex')
+    .slice(0, 32);
+  return `trk_${digest}`;
+}
 
 export type GpsTrackingType = 'MOBILE_APP' | 'WEB_LINK' | 'HARDWARE_GPS';
 export type TripStatus = 'ASSIGNED' | 'AT_PICKUP' | 'IN_TRANSIT' | 'DELIVERED';
@@ -206,7 +223,7 @@ const defaultTrip1: TripRecord = {
   assigned_vehicle_id: 'veh_01',
   assigned_driver_id: 'drv_01',
   status: 'IN_TRANSIT',
-  tracking_token: 'trk_sec_993821739182371928371923',
+  tracking_token: generateTripTrackingToken('trip_demo_01', 'seed_veh_01_drv_01'),
   tracking_source: 'MOBILE_APP',
   created_at: new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
   updated_at: new Date().toISOString(),
@@ -538,14 +555,35 @@ function evaluateTripGeofenceTransitions(
   return triggered;
 }
 
-// Helper: Dispatch SMS alert to driver
-async function dispatchDriverTripSms(driverPhone: string, driverName: string, tripId: string, trackingUrl: string, vehicleNumber: string) {
-  const apiKey = process.env.HTTPSMS_API_KEY || 'uk_p5IuoZb7MPaQ201UiklbXuZ16fIjVMBfwEdqUi-G_PTi6O0V-Z4HNJTsUtIu4mu7';
-  const fromPhone = process.env.MY_JIO_PHONE_NUMBER || '+919678944132';
+// Helper: Anonymize/remove personal phone/name data when a user deletes their account
+export function anonymizeDriverDataByPhone(cleanTenDigits: string): void {
+  if (!cleanTenDigits || cleanTenDigits.length !== 10) return;
+  for (const [id, driver] of driversDb.entries()) {
+    const d10 = String(driver.phone_number || '').replace(/\D/g, '').slice(-10);
+    if (d10 === cleanTenDigits) {
+      driversDb.delete(id);
+    }
+  }
+  for (const trip of tripsDb.values()) {
+    const p10 = String(trip.pickup?.contact_phone || '').replace(/\D/g, '').slice(-10);
+    const d10 = String(trip.drop?.contact_phone || '').replace(/\D/g, '').slice(-10);
+    if (p10 === cleanTenDigits && trip.pickup) {
+      trip.pickup.contact_name = 'Deleted User';
+      trip.pickup.contact_phone = '';
+    }
+    if (d10 === cleanTenDigits && trip.drop) {
+      trip.drop.contact_name = 'Deleted User';
+      trip.drop.contact_phone = '';
+    }
+  }
+}
 
-  const message = `Zuggi Freight Alert: Hello ${driverName}, you have been assigned vehicle ${vehicleNumber} for Trip #${tripId.slice(-6).toUpperCase()}. Tap here to start trip & transmit GPS: ${trackingUrl}`;
+// Helper: Dispatch SMS alert to driver (data-minimized: sends only vehicle number & trip link)
+async function dispatchDriverTripSms(driverPhone: string, _driverName: string, tripId: string, trackingUrl: string, vehicleNumber: string) {
+  const apiKey = (process.env.HTTPSMS_API_KEY || '').trim();
+  const fromPhone = (process.env.MY_JIO_PHONE_NUMBER || '').trim();
 
-  console.log(`[Driver Dispatch SMS] To: ${driverPhone} | Msg: ${message}`);
+  const message = `Zuggi Freight Alert: Vehicle ${vehicleNumber} assigned for Trip #${tripId.slice(-6).toUpperCase()}. Tap to start trip & transmit GPS: ${trackingUrl}`;
 
   if (apiKey && fromPhone && driverPhone.startsWith('+91')) {
     try {
@@ -562,11 +600,13 @@ async function dispatchDriverTripSms(driverPhone: string, driverName: string, tr
           to: driverPhone
         })
       });
-      const data = await response.json();
-      console.log('[Driver SMS Gateway Result]', data);
-      return { success: true, gateway: 'httpSMS', data };
-    } catch (err: any) {
-      console.warn('[Driver SMS Warning] Gateway dispatch failed, fallback active:', err.message);
+      await response.json().catch(() => null);
+      if (!response.ok) {
+        console.warn(`[Driver SMS Gateway Notice] status=${response.status}`);
+      }
+      return { success: response.ok, gateway: 'httpSMS' };
+    } catch {
+      console.warn('[Driver SMS Warning] Gateway dispatch failed, fallback active.');
     }
   }
 
@@ -575,11 +615,53 @@ async function dispatchDriverTripSms(driverPhone: string, driverName: string, tr
 
 export const tripsRouter = express.Router();
 
+function constantTimeTokenMatch(provided: string | null | undefined, expected: string | null | undefined): boolean {
+  const a = String(provided || '').trim();
+  const b = String(expected || '').trim();
+  if (!a || !b) return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function extractTrackingTokenFromReq(req: express.Request): string {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader;
+  const headerToken = String(req.headers['x-tracking-token'] || '').trim();
+  const bodyToken = String(req.body?.token || req.body?.tracking_token || '').trim();
+  const queryToken = String(req.query?.token || req.query?.tracking_token || '').trim();
+  return headerToken || bodyToken || queryToken || bearerToken;
+}
+
+function isAuthorizedForTrip(req: express.Request, trip: TripRecord): boolean {
+  if (verifyAdminTokenFromReq(req)) return true;
+  if (verifyUserTokenFromReq(req)) return true;
+  const provided = extractTrackingTokenFromReq(req);
+  return constantTimeTokenMatch(provided, trip.tracking_token);
+}
+
+function isValidTripId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,80}$/.test(String(id || '').trim());
+}
+
 // --- 1. POST /trips/:id/assign ---
 // Fleet owner assigns vehicle + driver. Generates an encrypted tracking token and triggers SMS alert.
 tripsRouter.post('/:id/assign', async (req, res) => {
   try {
-    const tripId = req.params.id;
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to assign a trip.'
+      });
+    }
+
+    const tripId = String(req.params.id || '').trim();
+    if (!isValidTripId(tripId)) {
+      return res.status(400).json({ success: false, message: 'Invalid trip identifier.' });
+    }
     const {
       vehicle_id,
       driver_id,
@@ -601,12 +683,13 @@ tripsRouter.post('/:id/assign', async (req, res) => {
         message: 'Both vehicle_id and driver_id are required for trip assignment.'
       });
     }
+    const authoritativeOwnerId = isAdmin ? (owner_id || driver_id) : callerSession!.userId;
 
     let vehicle = vehiclesDb.get(vehicle_id);
     if (!vehicle) {
       vehicle = {
         id: vehicle_id,
-        owner_id: owner_id || driver_id,
+        owner_id: authoritativeOwnerId,
         vehicle_number: vehicle_number || `AS-01-${vehicle_id.slice(-4).toUpperCase()}`,
         vehicle_type: vehicle_type || 'bolero_pickup',
         gps_type: tracking_source || 'MOBILE_APP',
@@ -615,7 +698,7 @@ tripsRouter.post('/:id/assign', async (req, res) => {
     } else {
       if (vehicle_number) vehicle.vehicle_number = vehicle_number;
       if (vehicle_type) vehicle.vehicle_type = vehicle_type;
-      if (owner_id) vehicle.owner_id = owner_id;
+      if (isAdmin && owner_id) vehicle.owner_id = owner_id;
       if (tracking_source) vehicle.gps_type = tracking_source;
     }
     vehiclesDb.set(vehicle_id, vehicle);
@@ -624,7 +707,7 @@ tripsRouter.post('/:id/assign', async (req, res) => {
     if (!driver) {
       driver = {
         id: driver_id,
-        owner_id: owner_id || driver_id,
+        owner_id: authoritativeOwnerId,
         name: driver_name || 'Assigned Partner Driver',
         phone_number: driver_phone || '+919864012345',
         is_active: true
@@ -632,13 +715,12 @@ tripsRouter.post('/:id/assign', async (req, res) => {
     } else {
       if (driver_name) driver.name = driver_name;
       if (driver_phone) driver.phone_number = driver_phone;
-      if (owner_id) driver.owner_id = owner_id;
+      if (isAdmin && owner_id) driver.owner_id = owner_id;
     }
     driversDb.set(driver_id, driver);
 
-    // Generate high-entropy encrypted tracking token
-    const tokenRandomBytes = crypto.randomBytes(20).toString('hex');
-    const tracking_token = `trk_${crypto.createHmac('sha256', 'vahansetu_fleet_salt').update(`${tripId}_${vehicle_id}_${driver_id}_${Date.now()}_${tokenRandomBytes}`).digest('hex').slice(0, 32)}`;
+    // Generate high-entropy signed tracking token
+    const tracking_token = generateTripTrackingToken(tripId, `${vehicle_id}_${driver_id}`);
 
     // Build or update trip record
     let trip = tripsDb.get(tripId);
@@ -778,8 +860,8 @@ tripsRouter.post('/:id/assign', async (req, res) => {
       sms: smsResult
     });
   } catch (error: any) {
-    console.error('[Assign Trip Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Internal server error during assignment.' });
+    console.error('[Assign Trip Error]', error?.code || 'assign_error');
+    res.status(500).json({ success: false, message: 'Internal server error during assignment.' });
   }
 });
 
@@ -787,7 +869,16 @@ tripsRouter.post('/:id/assign', async (req, res) => {
 // Silently hydrates a client-booked trip into server memory (e.g., after cold starts) without re-sending SMS.
 tripsRouter.post('/:id/sync', async (req, res) => {
   try {
-    const tripId = req.params.id;
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({ success: false, message: 'Authentication required to sync trip state.' });
+    }
+
+    const tripId = String(req.params.id || '').trim();
+    if (!isValidTripId(tripId)) {
+      return res.status(400).json({ success: false, message: 'Invalid trip identifier.' });
+    }
     const existing = tripsDb.get(tripId);
     if (existing) {
       return res.status(200).json({ success: true, trip_id: existing.id, already_exists: true });
@@ -893,7 +984,7 @@ tripsRouter.post('/:id/sync', async (req, res) => {
       status: resolvedStatus,
       tracking_token:
         tracking_token ||
-        `trk_${crypto.createHmac('sha256', 'vahansetu_fleet_salt').update(`${tripId}_${now}`).digest('hex').slice(0, 32)}`,
+        generateTripTrackingToken(tripId, 'sync'),
       tracking_source,
       created_at: now,
       updated_at: now,
@@ -935,8 +1026,8 @@ tripsRouter.post('/:id/sync', async (req, res) => {
       drop: hydratedTrip.drop
     });
   } catch (error: any) {
-    console.error('[Sync Trip Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to sync trip.' });
+    console.error('[Sync Trip Error]', error?.code || 'sync_error');
+    res.status(500).json({ success: false, message: 'Failed to sync trip.' });
   }
 });
 
@@ -978,7 +1069,7 @@ tripsRouter.post('/:id/location-ping', async (req, res) => {
       });
     }
 
-    if (providedToken !== trip.tracking_token) {
+    if (!constantTimeTokenMatch(providedToken, trip.tracking_token)) {
       return res.status(401).json({
         success: false,
         message: 'Unauthorized: Invalid tracking token for this trip.'
@@ -1111,8 +1202,8 @@ tripsRouter.post('/:id/location-ping', async (req, res) => {
           : `Live GPS ping ingested successfully.`
     });
   } catch (error: any) {
-    console.error('[Location Ping Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Internal server error ingesting ping.' });
+    console.error('[Location Ping Error]', error?.code || 'ping_error');
+    res.status(500).json({ success: false, message: 'Internal server error ingesting ping.' });
   }
 });
 
@@ -1184,21 +1275,43 @@ tripsRouter.get('/:id/live-tracking', async (req, res) => {
     // Live if updated within last 90 seconds
     const isLive = ageSeconds <= 90;
 
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const isSignedInUser = Boolean(verifyUserTokenFromReq(req));
+    const suppliedToken = String(req.query?.token || req.headers['x-tracking-token'] || '').trim();
+    const hasValidToken = constantTimeTokenMatch(suppliedToken, trip.tracking_token);
+    const canSeeContactDetails = isAdmin || isSignedInUser || hasValidToken;
+
     return res.status(200).json({
       success: true,
       trip_id: trip.id,
       load_id: trip.load_id,
       status: trip.status,
-      tracking_token: trip.tracking_token,
-      pickup: trip.pickup,
-      drop: trip.drop,
+      ...(canSeeContactDetails ? { tracking_token: trip.tracking_token } : {}),
+      pickup: {
+        lat: trip.pickup.lat,
+        lng: trip.pickup.lng,
+        address: trip.pickup.address,
+        city: trip.pickup.city,
+        ...(canSeeContactDetails
+          ? { contact_name: trip.pickup.contact_name, contact_phone: trip.pickup.contact_phone }
+          : {})
+      },
+      drop: {
+        lat: trip.drop.lat,
+        lng: trip.drop.lng,
+        address: trip.drop.address,
+        city: trip.drop.city,
+        ...(canSeeContactDetails
+          ? { contact_name: trip.drop.contact_name, contact_phone: trip.drop.contact_phone }
+          : {})
+      },
       route_polyline: trip.route_polyline || '',
       latest_location: latest,
       location_history: trip.history.slice(-60), // return last 60 breadcrumbs
       driver: {
         id: driver.id,
         name: driver.name,
-        phone_number: driver.phone_number,
+        phone_number: canSeeContactDetails ? driver.phone_number : '',
         is_active: driver.is_active
       },
       vehicle: {
@@ -1242,8 +1355,8 @@ tripsRouter.get('/:id/live-tracking', async (req, res) => {
       geofence_events: trip.geofence_events || []
     });
   } catch (error: any) {
-    console.error('[Live Tracking Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Internal error retrieving tracking data.' });
+    console.error('[Live Tracking Error]', error?.code || 'live_tracking_error');
+    res.status(500).json({ success: false, message: 'Internal error retrieving tracking data.' });
   }
 });
 
@@ -1251,7 +1364,10 @@ tripsRouter.get('/:id/live-tracking', async (req, res) => {
 // Receives driver-calculated live traffic-aware ETA (Google Routes API Route Matrix) and exposes it in live-tracking for the shipper.
 tripsRouter.post('/:id/live-eta', async (req, res) => {
   try {
-    const tripId = req.params.id;
+    const tripId = String(req.params.id || '').trim();
+    if (!isValidTripId(tripId)) {
+      return res.status(400).json({ success: false, message: 'Invalid trip identifier.' });
+    }
     let trip = tripsDb.get(tripId);
     if (!trip) {
       const recoveredTrip = await loadTripFromSupabase(tripId);
@@ -1263,6 +1379,9 @@ tripsRouter.post('/:id/live-eta', async (req, res) => {
     }
     if (!trip) {
       return res.status(404).json({ success: false, message: `Trip '${tripId}' not found.` });
+    }
+    if (!isAuthorizedForTrip(req, trip)) {
+      return res.status(401).json({ success: false, message: 'Unauthorized: Valid session or trip tracking token required.' });
     }
 
     const body = req.body || {};
@@ -1293,8 +1412,8 @@ tripsRouter.post('/:id/live-eta', async (req, res) => {
 
     return res.status(200).json({ success: true, live_eta: trip.live_eta });
   } catch (error: any) {
-    console.error('[Live ETA Sync Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Failed to sync live ETA.' });
+    console.error('[Live ETA Sync Error]', error?.code || 'live_eta_error');
+    res.status(500).json({ success: false, message: 'Failed to sync live ETA.' });
   }
 });
 
@@ -1332,14 +1451,12 @@ tripsRouter.post('/:id/status', async (req, res) => {
       return res.status(404).json({ success: false, message: `Trip '${tripId}' not found.` });
     }
 
-    // If a tracking token is supplied (e.g. from no-login Driver Web Link), validate it strictly
-    const authHeader = req.headers.authorization;
-    const bearerToken = authHeader
-      ? authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : authHeader.trim()
-      : null;
-    const providedToken = bearerToken || (req.body?.token || req.body?.tracking_token)?.toString().trim();
-    if (providedToken && providedToken !== trip.tracking_token) {
-      return res.status(401).json({ success: false, message: 'Unauthorized: Invalid tracking token for status update.' });
+    // Strictly require valid user/admin session OR matching trip tracking token on EVERY status update
+    if (!isAuthorizedForTrip(req, trip)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized: Valid session or trip tracking token required to update trip status.'
+      });
     }
 
     const normalizedStatus = STATUS_NORMALIZATION_MAP[rawStatus] || STATUS_NORMALIZATION_MAP[rawStatus.toUpperCase()];
@@ -1357,7 +1474,8 @@ tripsRouter.post('/:id/status', async (req, res) => {
     void persistTripToSupabase(trip);
     return res.json({ success: true, trip_id: trip.id, status: trip.status, updated_at: trip.updated_at });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message || 'Failed to update trip status.' });
+    console.error('[Trip Status Update Error]', error?.code || 'status_error');
+    res.status(500).json({ success: false, message: 'Failed to update trip status.' });
   }
 });
 
@@ -1378,6 +1496,9 @@ tripsRouter.get('/:id/geofence', async (req, res) => {
     if (!trip) {
       return res.status(404).json({ success: false, message: `Trip '${tripId}' not found.` });
     }
+    if (!isAuthorizedForTrip(req, trip)) {
+      return res.status(401).json({ success: false, message: 'Unauthorized: Authentication or valid tracking token required.' });
+    }
     return res.json({
       success: true,
       trip_id: trip.id,
@@ -1387,13 +1508,17 @@ tripsRouter.get('/:id/geofence', async (req, res) => {
       geofence_events: trip.geofence_events || []
     });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message || 'Failed to read geofence configuration.' });
+    console.error('[Geofence Read Error]', error?.code || 'geofence_read_error');
+    res.status(500).json({ success: false, message: 'Failed to read geofence configuration.' });
   }
 });
 
 tripsRouter.post('/:id/geofence', async (req, res) => {
   try {
-    const tripId = req.params.id;
+    const tripId = String(req.params.id || '').trim();
+    if (!isValidTripId(tripId)) {
+      return res.status(400).json({ success: false, message: 'Invalid trip identifier.' });
+    }
     let trip = tripsDb.get(tripId);
     if (!trip) {
       const recoveredTrip = await loadTripFromSupabase(tripId);
@@ -1405,6 +1530,9 @@ tripsRouter.post('/:id/geofence', async (req, res) => {
     }
     if (!trip) {
       return res.status(404).json({ success: false, message: `Trip '${tripId}' not found.` });
+    }
+    if (!isAuthorizedForTrip(req, trip)) {
+      return res.status(401).json({ success: false, message: 'Unauthorized: Authentication or valid tracking token required.' });
     }
 
     const prevConfig = trip.geofence_config || { ...DEFAULT_TRIP_GEOFENCE_CONFIG };
@@ -1443,7 +1571,8 @@ tripsRouter.post('/:id/geofence', async (req, res) => {
       geofence_events_triggered: triggeredEvents
     });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message || 'Failed to update geofence configuration.' });
+    console.error('[Geofence Update Error]', error?.code || 'geofence_update_error');
+    res.status(500).json({ success: false, message: 'Failed to update geofence configuration.' });
   }
 });
 
@@ -1452,23 +1581,36 @@ tripsRouter.get('/fleet/vehicles', (_req, res) => {
   res.json({ success: true, vehicles: Array.from(vehiclesDb.values()) });
 });
 
-tripsRouter.get('/fleet/drivers', (_req, res) => {
-  res.json({ success: true, drivers: Array.from(driversDb.values()) });
+tripsRouter.get('/fleet/drivers', (req, res) => {
+  const canSeePhones = verifyAdminTokenFromReq(req) || Boolean(verifyUserTokenFromReq(req));
+  const drivers = Array.from(driversDb.values()).map((d) => ({
+    id: d.id,
+    owner_id: d.owner_id,
+    name: d.name,
+    phone_number: canSeePhones ? d.phone_number : '',
+    is_active: d.is_active
+  }));
+  res.json({ success: true, drivers });
 });
 
 tripsRouter.post('/fleet/vehicles', (req, res) => {
-  const { vehicle_number, vehicle_type, gps_type = 'MOBILE_APP', gps_device_id } = req.body;
+  const isAdmin = verifyAdminTokenFromReq(req);
+  const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+  if (!isAdmin && !callerSession) {
+    return res.status(401).json({ success: false, message: 'Authentication required to register a fleet vehicle.' });
+  }
+  const { vehicle_number, vehicle_type, gps_type = 'MOBILE_APP', gps_device_id } = req.body || {};
   if (!vehicle_number || !vehicle_type) {
     return res.status(400).json({ success: false, message: 'vehicle_number and vehicle_type are required.' });
   }
   const id = `veh_${Date.now()}`;
   const record: VehicleRecord = {
     id,
-    owner_id: req.body.owner_id || 'fleet_owner_01',
-    vehicle_number,
-    vehicle_type,
+    owner_id: isAdmin ? (req.body.owner_id || 'fleet_owner_01') : callerSession!.userId,
+    vehicle_number: String(vehicle_number).trim().slice(0, 32),
+    vehicle_type: String(vehicle_type).trim().slice(0, 40),
     gps_type,
-    gps_device_id,
+    gps_device_id: gps_device_id ? String(gps_device_id).trim().slice(0, 64) : undefined,
     is_available: true
   };
   vehiclesDb.set(id, record);
@@ -1476,23 +1618,44 @@ tripsRouter.post('/fleet/vehicles', (req, res) => {
 });
 
 tripsRouter.post('/fleet/drivers', (req, res) => {
-  const { name, phone_number } = req.body;
+  const isAdmin = verifyAdminTokenFromReq(req);
+  const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+  if (!isAdmin && !callerSession) {
+    return res.status(401).json({ success: false, message: 'Authentication required to register a fleet driver.' });
+  }
+  const { name, phone_number } = req.body || {};
   if (!name || !phone_number) {
     return res.status(400).json({ success: false, message: 'name and phone_number are required.' });
   }
   const id = `drv_${Date.now()}`;
   const record: DriverRecord = {
     id,
-    owner_id: req.body.owner_id || 'fleet_owner_01',
-    name,
-    phone_number,
+    owner_id: isAdmin ? (req.body.owner_id || 'fleet_owner_01') : callerSession!.userId,
+    name: String(name).trim().slice(0, 100),
+    phone_number: String(phone_number).trim().slice(0, 20),
     is_active: true
   };
   driversDb.set(id, record);
   res.status(201).json({ success: true, driver: record });
 });
 
-// List all trips
-tripsRouter.get('/', (_req, res) => {
-  res.json({ success: true, trips: Array.from(tripsDb.values()) });
+// List trip summaries (field-filtered: omits tracking_token, contact phone numbers, and raw GPS history)
+tripsRouter.get('/', (req, res) => {
+  if (!verifyAdminTokenFromReq(req) && !verifyUserTokenFromReq(req)) {
+    return res.status(401).json({ success: false, message: 'Authentication required to list trips.' });
+  }
+  const uniqueTrips = new Map<string, TripRecord>();
+  for (const t of tripsDb.values()) {
+    if (!uniqueTrips.has(t.id)) uniqueTrips.set(t.id, t);
+  }
+  const summaries = Array.from(uniqueTrips.values()).map((t) => ({
+    id: t.id,
+    load_id: t.load_id,
+    status: t.status,
+    tracking_source: t.tracking_source,
+    pickup_city: t.pickup?.city,
+    drop_city: t.drop?.city,
+    updated_at: t.updated_at
+  }));
+  return res.json({ success: true, trips: summaries });
 });

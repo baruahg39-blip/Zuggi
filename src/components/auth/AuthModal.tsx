@@ -107,9 +107,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   // Owner Portal States
   const [ownerPasscode, setOwnerPasscode] = useState('');
+  const [ownerConfirmPasscode, setOwnerConfirmPasscode] = useState('');
   const [ownerError, setOwnerError] = useState('');
   const [isCompletingProfile, setIsCompletingProfile] = useState(false);
   const [isLoggingInOwner, setIsLoggingInOwner] = useState(false);
+  const [adminRequiresSetup, setAdminRequiresSetup] = useState(false);
+  const [adminStatusLoading, setAdminStatusLoading] = useState(false);
 
   // Synchronize targetPortal when modal opens or initialRole/portalMode changes
   useEffect(() => {
@@ -373,6 +376,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         throw new Error(data.message || 'Incorrect or expired OTP code.');
       }
 
+      if (data.sessionToken) {
+        logisticsStore.setUserSessionToken(String(data.sessionToken));
+      }
+
       // Prevent arbitrary-phone OTP elevation into Admin console
       if (targetPortal === 'admin') {
         setAuthView('owner_portal');
@@ -427,7 +434,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         // If user is resetting passcode OR hasn't set up a passcode yet, take them to quick Passcode Setup
         const alreadyHasPasscode = Boolean(
           registered?.hasPasscode ||
-            registered?.passcodeDigest ||
             restoredUser.hasPasscode ||
             serverExistingUser?.hasPasscode ||
             accountStatus.hasPasscode
@@ -563,6 +569,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.message || 'Incorrect or expired OTP code.');
+      }
+      if (data.sessionToken) {
+        logisticsStore.setUserSessionToken(String(data.sessionToken));
       }
 
       const clean = phone.replace(/\D/g, '').slice(-10);
@@ -728,16 +737,64 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Handle Owner Portal Login
+  // Check whether Super Admin passcode needs first-run initialization when opening owner portal
+  useEffect(() => {
+    if (!isOpen || authView !== 'owner_portal') return;
+    let active = true;
+    setAdminStatusLoading(true);
+    setOwnerError('');
+    authService
+      .getAdminSetupStatus()
+      .then((status) => {
+        if (active) {
+          setAdminRequiresSetup(status.requiresSetup);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setAdminRequiresSetup(false);
+        }
+      })
+      .finally(() => {
+        if (active) setAdminStatusLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, authView]);
+
+  // Handle Owner Portal Login or First-Run Setup
   const handleOwnerLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isLoggingInOwner) return;
     setOwnerError('');
+
+    if (adminRequiresSetup) {
+      if (ownerPasscode.trim().length < 8) {
+        setOwnerError('Choose a Super Admin passcode of at least 8 characters.');
+        return;
+      }
+      if (ownerPasscode.trim() !== ownerConfirmPasscode.trim()) {
+        setOwnerError('Passcodes do not match. Please re-enter to confirm.');
+        return;
+      }
+    }
+
     setIsLoggingInOwner(true);
 
     try {
-      const adminUser = await authService.loginOwner(ownerPasscode);
-      showToast('Authenticated as Platform Owner', 'success');
+      const adminUser = adminRequiresSetup
+        ? await authService.claimInitialAdminPasscode(ownerPasscode)
+        : await authService.loginOwner(ownerPasscode);
+      setAdminRequiresSetup(false);
+      setOwnerPasscode('');
+      setOwnerConfirmPasscode('');
+      showToast(
+        adminRequiresSetup
+          ? 'Super Admin passcode configured and signed in'
+          : 'Authenticated as Platform Owner',
+        'success'
+      );
       onLoginSuccess(adminUser);
       handleCloseModal();
     } catch (err: any) {
@@ -745,17 +802,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       showToast(err.message || 'Access Denied', 'error');
     } finally {
       setIsLoggingInOwner(false);
-    }
-  };
-
-  // 1-tap Super Admin sign-in
-  const handleQuickAdminLogin = async () => {
-    try {
-      const adminUser = await authService.loginOwner('Admin@VahanSetu2026');
-      onLoginSuccess(adminUser);
-      handleCloseModal();
-    } catch (err: any) {
-      setOwnerError(err.message || 'Access Denied.');
     }
   };
 
@@ -1191,22 +1237,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                         <Lock className="w-3.5 h-3.5 text-purple-600" />
                         <span>Sign In to Super Admin Console (Passcode)</span>
                       </button>
-                      {typeof window !== 'undefined' &&
-                        (window.location.hostname === 'localhost' ||
-                          window.location.hostname === '127.0.0.1' ||
-                          window.location.search.includes('demo=1')) && (
-                          <button
-                            type="button"
-                            onClick={handleQuickAdminLogin}
-                            className="w-full py-2 px-3 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-[#171318] text-xs font-semibold flex items-center justify-between transition cursor-pointer"
-                          >
-                            <span className="flex items-center gap-1.5">
-                              <ShieldAlert className="w-3.5 h-3.5 text-purple-600" />
-                              <span>1-Tap Dev Admin ({SUPER_ADMIN_EMAIL})</span>
-                            </span>
-                            <span className="font-mono text-[10px] text-purple-700 bg-purple-100 px-2 py-0.5 rounded-full">Dev</span>
-                          </button>
-                        )}
                     </div>
                   )}
                 </div>
@@ -2029,10 +2059,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="p-3 bg-[#FFF0F6] border border-[#E83E83]/30 rounded-2xl text-xs space-y-1">
                 <div className="flex items-center gap-1.5 text-[#E83E83] font-black">
                   <ShieldAlert className="w-4 h-4" />
-                  <span>Restricted Access: Platform Owner</span>
+                  <span>
+                    {adminRequiresSetup
+                      ? 'First-Run Setup: Set Super Admin Passcode'
+                      : 'Restricted Access: Platform Owner'}
+                  </span>
                 </div>
                 <p className="text-[#77717A]">
-                  This console is strictly reserved for the authorized platform owner ({SUPER_ADMIN_EMAIL}).
+                  {adminRequiresSetup
+                    ? `No ZUGGI_ADMIN_PASSCODE env variable is set yet. Create a one-time passcode (8+ characters) for ${SUPER_ADMIN_EMAIL} to secure this console.`
+                    : `This console is strictly reserved for the authorized platform owner (${SUPER_ADMIN_EMAIL}).`}
                 </p>
               </div>
 
@@ -2051,17 +2087,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                 <div>
                   <label className="text-xs font-bold text-[#171318] block mb-1.5">
-                    Super Admin Security Key / Passcode
+                    {adminRequiresSetup
+                      ? 'Create Super Admin Passcode (min 8 chars)'
+                      : 'Super Admin Security Key / Passcode'}
                   </label>
                   <input
                     type="password"
                     value={ownerPasscode}
                     onChange={(e) => setOwnerPasscode(e.target.value)}
-                    placeholder="Enter owner authorization passcode"
+                    placeholder={
+                      adminRequiresSetup
+                        ? 'Choose a strong passcode (8+ characters)'
+                        : 'Enter owner authorization passcode'
+                    }
+                    minLength={adminRequiresSetup ? 8 : 1}
                     className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 focus:border-[#E83E83] rounded-xl text-[#171318] text-xs focus:outline-none"
                     required
                   />
                 </div>
+
+                {adminRequiresSetup && (
+                  <div>
+                    <label className="text-xs font-bold text-[#171318] block mb-1.5">
+                      Confirm Super Admin Passcode
+                    </label>
+                    <input
+                      type="password"
+                      value={ownerConfirmPasscode}
+                      onChange={(e) => setOwnerConfirmPasscode(e.target.value)}
+                      placeholder="Re-enter your new passcode"
+                      minLength={8}
+                      className="w-full px-3.5 py-2.5 bg-gray-50 border border-gray-200 focus:border-[#E83E83] rounded-xl text-[#171318] text-xs focus:outline-none"
+                      required
+                    />
+                  </div>
+                )}
 
                 {ownerError && (
                   <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
@@ -2072,18 +2132,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                 <button
                   type="submit"
-                  disabled={isLoggingInOwner}
+                  disabled={isLoggingInOwner || adminStatusLoading}
                   className="w-full py-3.5 bg-[#171318] hover:bg-black disabled:bg-[#171318]/60 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-md cursor-pointer"
                 >
-                  {isLoggingInOwner ? (
+                  {isLoggingInOwner || adminStatusLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin text-white" />
-                      <span>Authenticating...</span>
+                      <span>
+                        {adminStatusLoading
+                          ? 'Checking Admin Security...'
+                          : adminRequiresSetup
+                          ? 'Securing Admin Console...'
+                          : 'Authenticating...'}
+                      </span>
                     </>
                   ) : (
                     <>
                       <Lock className="w-4 h-4 text-[#E83E83]" />
-                      <span>Authenticate Admin Console</span>
+                      <span>
+                        {adminRequiresSetup
+                          ? 'Set Passcode & Open Admin Console'
+                          : 'Authenticate Admin Console'}
+                      </span>
                     </>
                   )}
                 </button>
@@ -2092,17 +2162,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <button
                     type="button"
                     onClick={handleCloseModal}
-                    className="py-2.5 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 text-[#171318] text-xs font-bold transition cursor-pointer"
+                    className="w-full py-2.5 px-3 rounded-xl bg-gray-100 hover:bg-gray-200 text-[#171318] text-xs font-bold transition cursor-pointer"
                   >
                     Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleQuickAdminLogin}
-                    className="flex-1 py-2.5 px-3 rounded-xl bg-[#FFF0F6] hover:bg-[#ffe2ee] border border-[#E83E83]/30 text-[#E83E83] text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
-                  >
-                    <ShieldAlert className="w-4 h-4 text-[#E83E83]" />
-                    <span>⚡ Quick Sign-In ({SUPER_ADMIN_EMAIL})</span>
                   </button>
                 </div>
 

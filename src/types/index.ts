@@ -23,7 +23,6 @@ export interface User {
   blockedAt?: string;
   isTestAccount?: boolean;
   hasPasscode?: boolean;
-  passcodeHash?: string;
   passcodeUpdatedAt?: string;
   bankDetails?: {
     accountHolderName?: string;

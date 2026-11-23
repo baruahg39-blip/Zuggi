@@ -84,26 +84,39 @@ export class CashfreeServerService {
    * Create Cashfree Order with Easy Split Support
    */
   public async createOrder(params: CreateOrderParams) {
+    const safeOrderId = String(params.orderId || '').trim();
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(safeOrderId)) {
+      throw new Error('Invalid orderId format.');
+    }
+    if (!Number.isFinite(params.orderAmount) || params.orderAmount <= 0) {
+      throw new Error('Order amount must be a positive number.');
+    }
+
+    const isProd = process.env.NODE_ENV === 'production';
+
     if (!this.isConfigured()) {
-      // High-fidelity sandbox fallback when credentials aren't populated or placeholder
+      if (isProd) {
+        throw new Error('Payment gateway credentials are not configured for production.');
+      }
+      // Sandbox preview fallback in non-production environments only
       return {
         isSimulated: true,
-        order_id: params.orderId,
+        order_id: safeOrderId,
         order_amount: params.orderAmount,
         order_currency: params.orderCurrency || 'INR',
-        payment_session_id: `session_sim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        payment_session_id: `session_sim_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
         order_status: 'ACTIVE',
         order_splits: params.orderSplits || []
       };
     }
 
     const payload: any = {
-      order_id: params.orderId,
+      order_id: safeOrderId,
       order_amount: params.orderAmount,
       order_currency: params.orderCurrency || 'INR',
       customer_details: params.customerDetails,
       order_meta: {
-        return_url: `${process.env.APP_URL || 'http://localhost:3000'}/payment-return?order_id=${params.orderId}`
+        return_url: `${process.env.APP_URL || 'http://localhost:3000'}/payment-return?order_id=${encodeURIComponent(safeOrderId)}`
       },
       order_note: params.orderNote || 'Zuggi Freight Escrow Payment'
     };
@@ -121,24 +134,30 @@ export class CashfreeServerService {
 
       const data = await response.json();
       if (!response.ok || data?.code === 'request_failed' || data?.type === 'authentication_error') {
+        if (isProd) {
+          throw new Error('Payment gateway rejected order initialization.');
+        }
         return {
           isSimulated: true,
-          order_id: params.orderId,
+          order_id: safeOrderId,
           order_amount: params.orderAmount,
           order_currency: params.orderCurrency || 'INR',
-          payment_session_id: `session_sim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          payment_session_id: `session_sim_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
           order_status: 'ACTIVE',
           order_splits: params.orderSplits || []
         };
       }
       return data;
-    } catch (_err: any) {
+    } catch (err: any) {
+      if (isProd) {
+        throw err instanceof Error ? err : new Error('Payment gateway unreachable.');
+      }
       return {
         isSimulated: true,
-        order_id: params.orderId,
+        order_id: safeOrderId,
         order_amount: params.orderAmount,
         order_currency: params.orderCurrency || 'INR',
-        payment_session_id: `session_sim_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        payment_session_id: `session_sim_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
         order_status: 'ACTIVE',
         order_splits: params.orderSplits || []
       };
@@ -146,33 +165,64 @@ export class CashfreeServerService {
   }
 
   /**
-   * Verify Cashfree Order Status Directly from Gateway
+   * Verify Cashfree Order Status Directly from Gateway.
+   * Never fabricates a PAID status on error or in production.
    */
   public async getOrder(orderId: string) {
-    if (!this.isConfigured()) {
+    const safeOrderId = String(orderId || '').trim();
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(safeOrderId)) {
       return {
-        order_id: orderId,
-        order_status: 'PAID',
+        order_id: safeOrderId,
+        order_status: 'FAILED',
+        verified: false,
+        message: 'Invalid order identifier.'
+      };
+    }
+
+    const isProd = process.env.NODE_ENV === 'production';
+
+    if (!this.isConfigured()) {
+      if (isProd) {
+        return {
+          order_id: safeOrderId,
+          order_status: 'FAILED',
+          verified: false,
+          message: 'Payment gateway is not configured in production.'
+        };
+      }
+      return {
+        order_id: safeOrderId,
+        order_status: 'ACTIVE',
+        verified: false,
         isSimulated: true
       };
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/orders/${orderId}`, {
+      const response = await fetch(`${this.baseUrl}/orders/${encodeURIComponent(safeOrderId)}`, {
         method: 'GET',
         headers: this.getHeaders()
       });
       const data = await response.json();
       if (!response.ok || data?.code === 'request_failed' || data?.type === 'authentication_error') {
         return {
-          order_id: orderId,
-          order_status: 'PAID',
-          isSimulated: true
+          order_id: safeOrderId,
+          order_status: 'FAILED',
+          verified: false,
+          message: 'Unable to verify order with payment gateway.'
         };
       }
-      return data;
-    } catch (_err: any) {
-      return { order_id: orderId, order_status: 'PAID', isSimulated: true };
+      return {
+        ...data,
+        verified: data?.order_status === 'PAID'
+      };
+    } catch {
+      return {
+        order_id: safeOrderId,
+        order_status: 'FAILED',
+        verified: false,
+        message: 'Payment verification request failed.'
+      };
     }
   }
 
@@ -180,9 +230,19 @@ export class CashfreeServerService {
    * Register or Update Vendor in Cashfree Easy Split
    */
   public async registerVendor(params: RegisterVendorParams) {
+    const safeVendorId = String(params.vendor_id || '').trim();
+    if (!/^[a-zA-Z0-9_-]{3,50}$/.test(safeVendorId)) {
+      throw new Error('Invalid vendor_id format.');
+    }
+
+    const isProd = process.env.NODE_ENV === 'production';
+
     if (!this.isConfigured()) {
+      if (isProd) {
+        throw new Error('Payment gateway credentials are not configured for vendor onboarding.');
+      }
       return {
-        vendor_id: params.vendor_id,
+        vendor_id: safeVendorId,
         status: 'ACTIVE',
         name: params.name,
         email: params.email,
@@ -193,7 +253,7 @@ export class CashfreeServerService {
     }
 
     const payload: any = {
-      vendor_id: params.vendor_id,
+      vendor_id: safeVendorId,
       name: params.name,
       email: params.email,
       phone: params.phone,
@@ -225,8 +285,11 @@ export class CashfreeServerService {
       });
       const data = await response.json();
       if (!response.ok || data?.code === 'request_failed' || data?.type === 'authentication_error') {
+        if (isProd) {
+          throw new Error('Vendor payout registration failed at payment gateway.');
+        }
         return {
-          vendor_id: params.vendor_id,
+          vendor_id: safeVendorId,
           status: 'ACTIVE',
           name: params.name,
           email: params.email,
@@ -236,9 +299,12 @@ export class CashfreeServerService {
         };
       }
       return data;
-    } catch (_err: any) {
+    } catch (err: any) {
+      if (isProd) {
+        throw err instanceof Error ? err : new Error('Vendor registration request failed.');
+      }
       return {
-        vendor_id: params.vendor_id,
+        vendor_id: safeVendorId,
         status: 'ACTIVE',
         name: params.name,
         isSimulated: true
@@ -247,29 +313,47 @@ export class CashfreeServerService {
   }
 
   /**
-   * Verify Cashfree Webhook Signature (HMAC-SHA256)
+   * Verify Cashfree Webhook Signature (HMAC-SHA256) with timestamp freshness replay protection (±5 min).
    */
   public verifyWebhook(signature: string, timestamp: string, rawBody: string): boolean {
-    if (!this.secretKey) {
-      return true; // Pass in simulation mode
+    const cleanSig = String(signature || '').trim();
+    const cleanTs = String(timestamp || '').trim();
+
+    if (!cleanSig || !cleanTs || !rawBody) {
+      return false;
+    }
+
+    // Timestamp freshness check (±5 minutes) to prevent webhook replay attacks
+    const parsedNum = Number(cleanTs);
+    if (!Number.isFinite(parsedNum) || parsedNum <= 0) {
+      return false;
+    }
+    const tsMs = parsedNum < 1e12 ? parsedNum * 1000 : parsedNum;
+    const MAX_SKEW_MS = 5 * 60 * 1000;
+    if (Math.abs(Date.now() - tsMs) > MAX_SKEW_MS) {
+      return false;
+    }
+
+    if (!this.isConfigured()) {
+      return false;
     }
 
     try {
-      const signedPayload = timestamp + rawBody;
+      const signedPayload = cleanTs + rawBody;
       const expectedSignature = crypto
         .createHmac('sha256', this.secretKey)
         .update(signedPayload)
         .digest('base64');
 
-      const sigBuffer = Buffer.from(signature);
+      const sigBuffer = Buffer.from(cleanSig);
       const expectedBuffer = Buffer.from(expectedSignature);
 
       if (sigBuffer.length !== expectedBuffer.length) {
         return false;
       }
       return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
-    } catch (e) {
-      console.error('Webhook signature verification exception:', e);
+    } catch {
+      console.error('Webhook signature verification exception');
       return false;
     }
   }

@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 export type SupabaseSyncTable =
@@ -27,15 +28,468 @@ export function isPartnerRole(role: unknown): boolean {
   return PARTNER_ROLES.has(String(role || '').toLowerCase());
 }
 
-// Server-side in-memory admin session tokens (issued by /api/auth/admin-session)
+// Strong HMAC-SHA256 signing secret for stateless-verified + revocable JWT sessions
+const SESSION_TOKEN_SECRET =
+  (process.env.SESSION_TOKEN_SECRET || process.env.TRACKING_TOKEN_SECRET || '').trim() ||
+  crypto.randomBytes(32).toString('hex');
+
+const USER_SESSION_TTL_SEC = 24 * 60 * 60; // 24 hours
+const ADMIN_SESSION_TTL_SEC = 12 * 60 * 60; // 12 hours
+
+// Server-side token revocation blacklist (jti -> expEpochMs) + per-subject revocation watermark
+const revokedTokenJtis = new Map<string, number>();
+const subjectRevokedBeforeSec = new Map<string, number>();
+
+export interface UserSessionInfo {
+  userId: string;
+  phone10: string;
+  role: string;
+  issuedAt: number;
+  expiresAt: number;
+  jti: string;
+}
+
+interface SignedTokenClaims {
+  sub: string;
+  uid: string;
+  phone10: string;
+  role: string;
+  email?: string;
+  iat: number;
+  exp: number;
+  jti: string;
+}
+
+function pruneRevokedTokens(): void {
+  const nowMs = Date.now();
+  if (revokedTokenJtis.size < 200) return;
+  for (const [jti, expMs] of revokedTokenJtis.entries()) {
+    if (expMs <= nowMs) revokedTokenJtis.delete(jti);
+  }
+}
+
+function base64UrlEncode(input: string | Buffer): string {
+  return Buffer.from(input).toString('base64url');
+}
+
+function signSessionJwt(claims: SignedTokenClaims): string {
+  const header = base64UrlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const payload = base64UrlEncode(JSON.stringify(claims));
+  const signingInput = `${header}.${payload}`;
+  const sig = crypto.createHmac('sha256', SESSION_TOKEN_SECRET).update(signingInput).digest('base64url');
+  return `${signingInput}.${sig}`;
+}
+
+function verifySessionJwt(token: string): SignedTokenClaims | null {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [headerB64, payloadB64, sigB64] = parts;
+  if (!headerB64 || !payloadB64 || !sigB64) return null;
+
+  try {
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8'));
+    if (header?.alg !== 'HS256' || header?.typ !== 'JWT') return null;
+
+    const signingInput = `${headerB64}.${payloadB64}`;
+    const expectedSig = crypto
+      .createHmac('sha256', SESSION_TOKEN_SECRET)
+      .update(signingInput)
+      .digest('base64url');
+
+    const providedBuf = Buffer.from(sigB64);
+    const expectedBuf = Buffer.from(expectedSig);
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+      return null;
+    }
+
+    const claims = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as SignedTokenClaims;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!claims || typeof claims.exp !== 'number' || typeof claims.iat !== 'number' || !claims.jti) {
+      return null;
+    }
+    if (claims.exp <= nowSec) {
+      return null;
+    }
+
+    // Check explicit logout blacklist
+    if (revokedTokenJtis.has(claims.jti)) {
+      return null;
+    }
+
+    // Check per-user revocation watermark (triggered on password reset or account deletion)
+    const uidWatermark = claims.uid ? subjectRevokedBeforeSec.get(`uid:${claims.uid}`) || 0 : 0;
+    const phoneWatermark = claims.phone10 ? subjectRevokedBeforeSec.get(`phone:${claims.phone10}`) || 0 : 0;
+    if (claims.iat < uidWatermark || claims.iat < phoneWatermark) {
+      return null;
+    }
+
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
+function extractTenDigits(raw: unknown): string {
+  let digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length > 10 && digits.startsWith('91')) digits = digits.slice(2);
+  if (digits.length > 10) digits = digits.slice(-10);
+  return digits.length === 10 ? digits : '';
+}
+
+function extractRawTokensFromReq(req: express.Request): string[] {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const adminHdr = String(req.headers['x-zuggi-admin-token'] || '').trim();
+  const userHdr = String(req.headers['x-zuggi-user-token'] || '').trim();
+  return [adminHdr, userHdr, bearer].filter(Boolean);
+}
+
+// Legacy Set kept exported for backwards compatibility; all new tokens are signed expiring JWTs
 export const adminSessionTokens = new Set<string>();
+
+export function issueAdminSessionToken(email: string): string {
+  const nowSec = Math.floor(Date.now() / 1000);
+  return signSessionJwt({
+    sub: 'owner_baruahg39',
+    uid: 'owner_baruahg39',
+    phone10: '',
+    role: 'admin',
+    email: String(email || '').trim().toLowerCase(),
+    iat: nowSec,
+    exp: nowSec + ADMIN_SESSION_TTL_SEC,
+    jti: crypto.randomUUID()
+  });
+}
 
 export function verifyAdminTokenFromReq(req: express.Request): boolean {
   const authHeader = String(req.headers.authorization || '').trim();
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const custom = String(req.headers['x-zuggi-admin-token'] || '').trim();
-  const token = bearer || custom;
-  return Boolean(token && adminSessionTokens.has(token));
+  const candidates = [custom, bearer].filter(Boolean);
+  for (const token of candidates) {
+    if (adminSessionTokens.has(token)) return true;
+    const claims = verifySessionJwt(token);
+    if (claims && claims.role === 'admin') return true;
+  }
+  return false;
+}
+
+export function issueUserSessionToken(user: { id?: string; phone?: string; role?: string }): string {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const uid = String(user.id || '');
+  const phone10 = extractTenDigits(user.phone || '');
+  const safeRole = String(user.role || 'customer').toLowerCase() === 'admin' ? 'customer' : String(user.role || 'customer');
+  return signSessionJwt({
+    sub: uid || phone10 || 'user',
+    uid,
+    phone10,
+    role: safeRole,
+    iat: nowSec,
+    exp: nowSec + USER_SESSION_TTL_SEC,
+    jti: crypto.randomUUID()
+  });
+}
+
+export function verifyUserTokenFromReq(req: express.Request): UserSessionInfo | null {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const custom = String(req.headers['x-zuggi-user-token'] || '').trim();
+  const candidates = [custom, bearer].filter(Boolean);
+  for (const token of candidates) {
+    const claims = verifySessionJwt(token);
+    if (claims && claims.role !== 'admin') {
+      return {
+        userId: claims.uid,
+        phone10: claims.phone10,
+        role: claims.role,
+        issuedAt: claims.iat * 1000,
+        expiresAt: claims.exp * 1000,
+        jti: claims.jti
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Blacklists the caller's active JWT session token(s) immediately upon logout.
+ */
+export function revokeTokenFromReq(req: express.Request): boolean {
+  pruneRevokedTokens();
+  let revokedAny = false;
+  for (const token of extractRawTokensFromReq(req)) {
+    if (adminSessionTokens.delete(token)) {
+      revokedAny = true;
+    }
+    const claims = verifySessionJwt(token);
+    if (claims?.jti) {
+      revokedTokenJtis.set(claims.jti, claims.exp * 1000);
+      revokedAny = true;
+    }
+  }
+  return revokedAny;
+}
+
+/**
+ * Invalidates all tokens issued before now for a given user ID / phone number
+ * (called on password reset or account deletion).
+ */
+export function revokeUserSessions(userId?: string, phone10?: string): void {
+  const cutoffSec = Math.floor(Date.now() / 1000) + 1;
+  if (userId) {
+    subjectRevokedBeforeSec.set(`uid:${userId}`, cutoffSec);
+  }
+  const targetPhone = extractTenDigits(phone10 || '');
+  if (targetPhone) {
+    subjectRevokedBeforeSec.set(`phone:${targetPhone}`, cutoffSec);
+  }
+}
+
+// Strict server-side upload MIME & size validator (prevents SVG/HTML XSS & oversized payloads)
+const ALLOWED_UPLOAD_MIME_PREFIXES = [
+  'data:image/jpeg;base64,',
+  'data:image/jpg;base64,',
+  'data:image/png;base64,',
+  'data:image/webp;base64,',
+  'data:application/pdf;base64,'
+];
+const MAX_UPLOAD_DATA_URI_LENGTH = 7 * 1024 * 1024; // ~5 MB binary file encoded in base64
+
+export function validateSafeUploadDataUris(value: unknown, depth = 0): { ok: boolean; reason?: string } {
+  if (depth > 8 || value === null || value === undefined) return { ok: true };
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^data:/i.test(trimmed)) {
+      const lower = trimmed.toLowerCase();
+      const allowed = ALLOWED_UPLOAD_MIME_PREFIXES.some((prefix) => lower.startsWith(prefix));
+      if (!allowed) {
+        return {
+          ok: false,
+          reason: 'Unsupported file upload format. Only JPEG, PNG, WebP images and PDF documents are allowed.'
+        };
+      }
+      if (trimmed.length > MAX_UPLOAD_DATA_URI_LENGTH) {
+        return {
+          ok: false,
+          reason: 'Uploaded file exceeds the 5 MB maximum size limit.'
+        };
+      }
+    }
+    return { ok: true };
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const check = validateSafeUploadDataUris(item, depth + 1);
+      if (!check.ok) return check;
+    }
+    return { ok: true };
+  }
+  if (typeof value === 'object') {
+    for (const v of Object.values(value as Record<string, unknown>)) {
+      const check = validateSafeUploadDataUris(v, depth + 1);
+      if (!check.ok) return check;
+    }
+  }
+  return { ok: true };
+}
+
+function maskAccountNumber(acct?: string): string | undefined {
+  const clean = String(acct || '').replace(/\s+/g, '');
+  if (!clean) return undefined;
+  return clean.length <= 4 ? '****' : `${'*'.repeat(Math.max(4, clean.length - 4))}${clean.slice(-4)}`;
+}
+
+// Strict field-level allowlist for the signed-in user's own profile (zero password hashes or internal fields)
+export function filterSelfUserFields(user: any) {
+  if (!user || typeof user !== 'object') return null;
+  return {
+    id: user.id,
+    name: user.name || '',
+    phone: user.phone || '',
+    email: user.email || '',
+    role: user.role || 'customer',
+    avatarUrl: user.avatarUrl,
+    businessName: user.businessName,
+    gstin: user.gstin,
+    pan: user.pan,
+    address: user.address,
+    state: user.state || 'Assam',
+    city: user.city || 'Guwahati',
+    isVerified: Boolean(user.isVerified),
+    isBlocked: Boolean(user.isBlocked),
+    blockedReason: user.blockedReason,
+    hasPasscode: Boolean(user.passcodeHash || user.hasPasscode),
+    passcodeUpdatedAt: user.passcodeUpdatedAt,
+    bankDetails: user.bankDetails
+      ? {
+          accountHolderName: user.bankDetails.accountHolderName,
+          bankName: user.bankDetails.bankName,
+          accountNumber: maskAccountNumber(user.bankDetails.accountNumber),
+          ifscCode: user.bankDetails.ifscCode,
+          upiId: user.bankDetails.upiId,
+          isVerified: Boolean(user.bankDetails.isVerified),
+          updatedAt: user.bankDetails.updatedAt
+        }
+      : undefined,
+    createdAt: user.createdAt
+  };
+}
+
+// Strict field-level allowlist for Admin console (masks bank account numbers, strips hashes)
+function filterAdminUserFields(user: any) {
+  return filterSelfUserFields(user);
+}
+
+// Minimal non-PII public display stub for other users referenced in marketplace items
+function filterPublicPeerUserFields(user: any) {
+  if (!user || typeof user !== 'object') return null;
+  return {
+    id: user.id,
+    name: user.name || 'Zuggi Member',
+    phone: '',
+    email: '',
+    role: user.role || 'customer',
+    businessName: user.businessName,
+    state: user.state || 'Assam',
+    city: user.city || 'Guwahati',
+    isVerified: Boolean(user.isVerified),
+    createdAt: user.createdAt
+  };
+}
+
+function filterLoadForViewer(load: any, canSeeContacts: boolean) {
+  if (!load || typeof load !== 'object') return load;
+  if (canSeeContacts) return load;
+  return {
+    ...load,
+    deliveryOtp: undefined,
+    pickup: load.pickup
+      ? {
+          ...load.pickup,
+          contactName: undefined,
+          contactPhone: undefined
+        }
+      : load.pickup,
+    delivery: load.delivery
+      ? {
+          ...load.delivery,
+          contactName: undefined,
+          contactPhone: undefined
+        }
+      : load.delivery
+  };
+}
+
+function filterVehicleForViewer(vehicle: any, canSeePrivateDetails: boolean) {
+  if (!vehicle || typeof vehicle !== 'object') return vehicle;
+  if (canSeePrivateDetails) return vehicle;
+  return {
+    ...vehicle,
+    driverPhone: undefined
+  };
+}
+
+/**
+ * Permanently delete user profile & vehicles and anonymize personal contact fields
+ * in Supabase tables while retaining statutory invoice/booking totals required by law.
+ */
+export async function deleteAndAnonymizeUserDataInSupabase(
+  cleanTenDigits: string,
+  userId?: string
+): Promise<{ deletedUsers: number; deletedVehicles: number; anonymizedRecords: number }> {
+  const result = { deletedUsers: 0, deletedVehicles: 0, anonymizedRecords: 0 };
+  const client = getSupabaseClient();
+  if (!client) return result;
+
+  try {
+    const matchedUserIds = new Set<string>();
+    if (userId) matchedUserIds.add(userId);
+
+    if (cleanTenDigits && /^\d{10}$/.test(cleanTenDigits)) {
+      const { data: phoneUsers } = await client
+        .from('vs_users')
+        .select('id')
+        .ilike('phone', `%${cleanTenDigits}%`)
+        .limit(20);
+      (phoneUsers || []).forEach((row: any) => {
+        if (row?.id && row.id !== 'owner_baruahg39') matchedUserIds.add(String(row.id));
+      });
+    }
+
+    const ids = Array.from(matchedUserIds).filter((id) => id && id !== 'owner_baruahg39');
+    if (ids.length === 0) return result;
+
+    // 1. Permanently delete user profile rows (removes name, phone, email, PAN, GSTIN, address, bankDetails, passcodeHash)
+    const { data: delUsers } = await client.from('vs_users').delete().in('id', ids).select('id');
+    result.deletedUsers = Array.isArray(delUsers) ? delUsers.length : 0;
+
+    // 2. Permanently delete owned vehicles (removes vehicle RC & driver phone)
+    const { data: delVehs } = await client.from('vs_vehicles').delete().in('owner_id', ids).select('id');
+    result.deletedVehicles = Array.isArray(delVehs) ? delVehs.length : 0;
+
+    // 3. Anonymize support tickets authored by this user
+    const { data: userTickets } = await client.from('vs_support_tickets').select('id, data').in('user_id', ids).limit(200);
+    if (Array.isArray(userTickets) && userTickets.length > 0) {
+      const anonymizedTickets = userTickets.map((row: any) => ({
+        id: row.id,
+        user_id: 'deleted_user',
+        status: row.data?.status || 'closed',
+        data: {
+          ...(row.data || {}),
+          userId: 'deleted_user',
+          userName: 'Deleted User',
+          userPhone: '',
+          userEmail: ''
+        },
+        updated_at: new Date().toISOString()
+      }));
+      await client.from('vs_support_tickets').upsert(anonymizedTickets, { onConflict: 'id' });
+      result.anonymizedRecords += anonymizedTickets.length;
+    }
+
+    // 4. Anonymize contact details on historical loads (preserving freight metrics)
+    const { data: userLoads } = await client.from('vs_loads').select('id, data').in('customer_id', ids).limit(200);
+    if (Array.isArray(userLoads) && userLoads.length > 0) {
+      const anonymizedLoads = userLoads.map((row: any) => {
+        const d = row.data || {};
+        return {
+          ...buildRowForTable('vs_loads', {
+            ...d,
+            customerName: 'Deleted User',
+            pickup: d.pickup ? { ...d.pickup, contactName: 'Deleted User', contactPhone: '' } : d.pickup,
+            delivery: d.delivery ? { ...d.delivery, contactName: 'Deleted User', contactPhone: '' } : d.delivery
+          })
+        };
+      });
+      await client.from('vs_loads').upsert(anonymizedLoads, { onConflict: 'id' });
+      result.anonymizedRecords += anonymizedLoads.length;
+    }
+
+    // 5. Anonymize personal contact info on bookings (preserving statutory GST/invoice records)
+    const { data: custBookings } = await client.from('vs_bookings').select('id, data').in('customer_id', ids).limit(200);
+    const { data: drvBookings } = await client.from('vs_bookings').select('id, data').in('driver_id', ids).limit(200);
+    const bookingMap = new Map<string, any>();
+    [...(custBookings || []), ...(drvBookings || [])].forEach((row: any) => {
+      if (row?.id) bookingMap.set(row.id, row.data || {});
+    });
+    if (bookingMap.size > 0) {
+      const anonymizedBookings = Array.from(bookingMap.values()).map((d: any) =>
+        buildRowForTable('vs_bookings', {
+          ...d,
+          customerName: ids.includes(String(d.customerId)) ? 'Deleted User' : d.customerName,
+          driverName: ids.includes(String(d.driverId)) ? 'Deleted Driver' : d.driverName,
+          driverPhone: ids.includes(String(d.driverId)) ? '' : d.driverPhone
+        })
+      );
+      await client.from('vs_bookings').upsert(anonymizedBookings, { onConflict: 'id' });
+      result.anonymizedRecords += anonymizedBookings.length;
+    }
+  } catch {
+    console.warn('[Supabase Account Erasure Notice] Partial cleanup error.');
+  }
+
+  return result;
 }
 
 const BOT_RECORD_IDS = new Set([
@@ -111,12 +565,26 @@ function normalizeSupabaseUrl(rawUrl: string): string {
 export function isSupabaseConfigured(): boolean {
   const url = normalizeSupabaseUrl(process.env.SUPABASE_URL || '');
   const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '').trim();
-  return Boolean(
-    url &&
-      key &&
-      url.startsWith('https://') &&
-      !url.includes('your-project-id') &&
-      !key.includes('your_supabase')
+  if (!url || !key) return false;
+  try {
+    const parsed = new URL(url);
+    // Enforce TLS/HTTPS exclusively; reject embedded credentials and localhost in production
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.username || parsed.password) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (process.env.NODE_ENV === 'production' && (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0')) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  const lowerUrl = url.toLowerCase();
+  const lowerKey = key.toLowerCase();
+  return !(
+    lowerUrl.includes('your-project-id') ||
+    lowerKey.includes('your_supabase') ||
+    lowerKey.includes('postgres:postgres') ||
+    lowerKey.includes('changeme')
   );
 }
 
@@ -235,11 +703,15 @@ export async function upsertSupabaseRecords(
         const prev = existingMap.get(String(rec.id)) || {};
         const next: Record<string, any> = { ...rec };
 
-        // Preserve server-side passcodeHash if omitted by client sync
+        // Preserve server-side passcodeHash and adminPasscodeHash if omitted by client sync
         if (!next.passcodeHash && prev.passcodeHash) {
           next.hasPasscode = true;
           next.passcodeHash = prev.passcodeHash;
           next.passcodeUpdatedAt = next.passcodeUpdatedAt || prev.passcodeUpdatedAt;
+        }
+        if (!next.adminPasscodeHash && prev.adminPasscodeHash) {
+          next.adminPasscodeHash = prev.adminPasscodeHash;
+          next.adminPasscodeUpdatedAt = next.adminPasscodeUpdatedAt || prev.adminPasscodeUpdatedAt;
         }
 
         if (!isAdmin) {
@@ -330,12 +802,12 @@ export async function findSupabaseVehiclesByOwner(ownerId: string): Promise<any[
 
 export async function findSupabaseUserByPhone(cleanTenDigits: string): Promise<any | null> {
   const client = getSupabaseClient();
-  if (!client || !cleanTenDigits || cleanTenDigits.length !== 10) return null;
+  if (!client || !cleanTenDigits || !/^\d{10}$/.test(cleanTenDigits)) return null;
   try {
     const { data, error } = await client
       .from('vs_users')
       .select('data')
-      .or(`phone.ilike.%${cleanTenDigits}%`)
+      .ilike('phone', `%${cleanTenDigits}%`)
       .order('updated_at', { ascending: false })
       .limit(5);
 
@@ -343,6 +815,23 @@ export async function findSupabaseUserByPhone(cleanTenDigits: string): Promise<a
     // Prefer the record that already has a passcodeHash configured
     const withPasscode = data.find((r: any) => r?.data?.passcodeHash);
     return (withPasscode || data[0])?.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function findSupabaseBookingById(bookingId: string): Promise<any | null> {
+  const client = getSupabaseClient();
+  const safeId = String(bookingId || '').trim();
+  if (!client || !safeId || !/^[a-zA-Z0-9_-]{1,80}$/.test(safeId)) return null;
+  try {
+    const { data, error } = await client
+      .from('vs_bookings')
+      .select('data')
+      .eq('id', safeId)
+      .limit(1);
+    if (error || !Array.isArray(data) || data.length === 0) return null;
+    return data[0]?.data || null;
   } catch {
     return null;
   }
@@ -446,13 +935,25 @@ export async function persistLocationPingsToSupabase(
 
 export async function loadTripFromSupabase(tripIdOrLoadId: string): Promise<any | null> {
   const client = getSupabaseClient();
-  if (!client) return null;
+  const safeId = String(tripIdOrLoadId || '').trim();
+  if (!client || !safeId || !/^[a-zA-Z0-9_-]{1,80}$/.test(safeId)) return null;
   try {
-    const { data: tripRows, error } = await client
+    // Parameterized equality lookups (avoids PostgREST .or() string interpolation)
+    let { data: tripRows, error } = await client
       .from('vs_trips')
       .select('data')
-      .or(`id.eq.${tripIdOrLoadId},load_id.eq.${tripIdOrLoadId}`)
+      .eq('id', safeId)
       .limit(1);
+
+    if (!error && (!tripRows || tripRows.length === 0)) {
+      const byLoadRes = await client
+        .from('vs_trips')
+        .select('data')
+        .eq('load_id', safeId)
+        .limit(1);
+      tripRows = byLoadRes.data;
+      error = byLoadRes.error;
+    }
 
     if (error || !tripRows || tripRows.length === 0 || !tripRows[0]?.data) {
       return null;
@@ -488,31 +989,38 @@ supabaseRouter.get('/status', async (_req, res) => {
   try {
     const { error } = await client.from('vs_loads').select('id').limit(1);
     if (error) {
+      console.warn('[Supabase Status Notice] Schema check failed:', error.code || 'schema_not_ready');
       return res.json({
         success: true,
         configured: true,
         connected: true,
         tablesReady: false,
-        message: error.message
+        message: 'Database tables are not initialized yet.'
       });
     }
     return res.json({ success: true, configured: true, connected: true, tablesReady: true });
-  } catch (err: any) {
+  } catch {
+    console.warn('[Supabase Status Notice] Database connection check failed.');
     return res.json({
       success: true,
       configured: true,
       connected: false,
       tablesReady: false,
-      message: err?.message
+      message: 'Database connection unavailable.'
     });
   }
 });
 
-supabaseRouter.get('/bootstrap', async (_req, res) => {
+supabaseRouter.get('/bootstrap', async (req, res) => {
   const client = getSupabaseClient();
   if (!client) {
     return res.json({ success: true, configured: false, tablesReady: false, data: null });
   }
+
+  const isAdmin = verifyAdminTokenFromReq(req);
+  const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+  const callerId = callerSession?.userId || '';
+  const callerPhone10 = callerSession?.phone10 || '';
 
   try {
     const [usersRes, vehRes, loadsRes, quotesRes, bookingsRes, ticketsRes] = await Promise.all([
@@ -526,45 +1034,202 @@ supabaseRouter.get('/bootstrap', async (_req, res) => {
 
     const firstError = [usersRes, vehRes, loadsRes, quotesRes, bookingsRes, ticketsRes].find((r) => r.error)?.error;
     if (firstError) {
+      console.warn('[Supabase Bootstrap Notice] Query error:', firstError.code || 'query_failed');
       return res.json({
         success: true,
         configured: true,
         tablesReady: false,
-        message: firstError.message,
+        message: 'Database tables are not ready yet.',
         data: null
       });
     }
+
+    const rawUsers = (usersRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawVehicles = (vehRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawLoads = (loadsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawQuotes = (quotesRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawBookings = (bookingsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawTickets = (ticketsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+
+    const isSelfUser = (u: any) =>
+      Boolean(
+        callerSession &&
+          ((callerId && u.id === callerId) ||
+            (callerPhone10 && extractTenDigits(u.phone) === callerPhone10))
+      );
+
+    // Field-level & ownership-level filtering:
+    // - Admin gets full filtered view (no password hashes, masked bank account numbers)
+    // - Signed-in user gets ONLY their own profile + non-PII public display stubs + their own bookings/tickets/quotes
+    // - Unauthenticated visitor gets ONLY public marketplace loads/vehicles with personal contact fields stripped
+    const filteredUsers = isAdmin
+      ? rawUsers.map(filterAdminUserFields)
+      : callerSession
+      ? rawUsers.map((u: any) => (isSelfUser(u) ? filterSelfUserFields(u) : filterPublicPeerUserFields(u)))
+      : [];
+
+    const filteredVehicles = rawVehicles.map((v: any) =>
+      filterVehicleForViewer(v, isAdmin || Boolean(callerId && (v.ownerId === callerId || v.assignedDriverId === callerId)))
+    );
+
+    const callerLoadIds = new Set(
+      rawLoads.filter((l: any) => callerId && l.customerId === callerId).map((l: any) => l.id)
+    );
+
+    const filteredBookings = isAdmin
+      ? rawBookings
+      : callerSession
+      ? rawBookings.filter(
+          (b: any) => b.customerId === callerId || b.transporterId === callerId || b.driverId === callerId
+        )
+      : [];
+
+    const callerBookingLoadIds = new Set(filteredBookings.map((b: any) => b.loadId));
+
+    const filteredLoads = rawLoads.map((l: any) =>
+      filterLoadForViewer(l, isAdmin || callerLoadIds.has(l.id) || callerBookingLoadIds.has(l.id))
+    );
+
+    const filteredQuotations = isAdmin
+      ? rawQuotes
+      : callerSession
+      ? rawQuotes.filter(
+          (q: any) =>
+            q.transporterId === callerId ||
+            q.driverId === callerId ||
+            callerLoadIds.has(q.loadId)
+        )
+      : [];
+
+    const filteredTickets = isAdmin
+      ? rawTickets
+      : callerSession
+      ? rawTickets.filter((t: any) => t.userId === callerId)
+      : [];
 
     return res.json({
       success: true,
       configured: true,
       tablesReady: true,
       data: {
-        users: (usersRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
-        vehicles: (vehRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
-        loads: (loadsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
-        quotations: (quotesRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
-        bookings: (bookingsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r)),
-        tickets: (ticketsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r))
+        users: filteredUsers,
+        vehicles: filteredVehicles,
+        loads: filteredLoads,
+        quotations: filteredQuotations,
+        bookings: filteredBookings,
+        tickets: filteredTickets
       }
     });
-  } catch (err: any) {
+  } catch {
+    console.warn('[Supabase Bootstrap Notice] Unexpected bootstrap failure.');
     return res.json({
       success: false,
       configured: true,
       tablesReady: false,
-      message: err?.message || 'Bootstrap query failed'
+      message: 'Database bootstrap query failed.'
     });
   }
 });
 
 supabaseRouter.post('/sync', async (req, res) => {
+  const isAdmin = verifyAdminTokenFromReq(req);
+  const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+
+  if (!isAdmin && !callerSession) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required to sync records.'
+    });
+  }
+
   const { table, record, records } = req.body || {};
   if (!table || !ALLOWED_SYNC_TABLES.has(table)) {
     return res.status(400).json({ success: false, message: 'Invalid or unsupported table name.' });
   }
   const list = Array.isArray(records) ? records : record ? [record] : [];
-  const isAdmin = verifyAdminTokenFromReq(req);
+  if (list.length > 200) {
+    return res.status(400).json({ success: false, message: 'Batch size exceeds maximum limit of 200 records.' });
+  }
+
+  // Server-side validation for any embedded file uploads (blocks SVG/HTML XSS & oversized payloads)
+  const uploadCheck = validateSafeUploadDataUris(list);
+  if (!uploadCheck.ok) {
+    return res.status(400).json({
+      success: false,
+      message: uploadCheck.reason || 'Invalid file upload content.'
+    });
+  }
+
+  // Strict ownership & anti-IDOR authorization for non-admin callers
+  if (!isAdmin && callerSession) {
+    const callerId = callerSession.userId;
+    const callerPhone10 = callerSession.phone10;
+
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue;
+      if (table === 'vs_users') {
+        const sameId = Boolean(callerId && String(item.id || '') === callerId);
+        const samePhone = Boolean(callerPhone10 && extractTenDigits(item.phone) === callerPhone10);
+        if (!sameId && !samePhone) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You can only update your own user profile.'
+          });
+        }
+      } else if (table === 'vs_vehicles') {
+        if (!callerId || String(item.ownerId || '') !== callerId) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You can only manage vehicles owned by your account.'
+          });
+        }
+      } else if (table === 'vs_loads') {
+        if (!callerId || String(item.customerId || '') !== callerId) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You can only modify loads created by your account.'
+          });
+        }
+      } else if (table === 'vs_quotations') {
+        const isPartnerOwner = callerId && (String(item.transporterId || '') === callerId || String(item.driverId || '') === callerId);
+        // Allow shipper who owns the target load to update quotation acceptance status
+        let isLoadShipper = false;
+        if (!isPartnerOwner && item.loadId) {
+          const loadRow = await findSupabaseLoadById(String(item.loadId));
+          if (loadRow?.data?.customerId === callerId) {
+            isLoadShipper = true;
+          }
+        }
+        if (!isPartnerOwner && !isLoadShipper) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You do not have permission to modify this quotation.'
+          });
+        }
+      } else if (table === 'vs_bookings') {
+        const isParticipant =
+          Boolean(
+            callerId &&
+              (String(item.customerId || '') === callerId ||
+                String(item.transporterId || '') === callerId ||
+                String(item.driverId || '') === callerId)
+          );
+        if (!isParticipant) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You can only update bookings you participate in.'
+          });
+        }
+      } else if (table === 'vs_support_tickets') {
+        if (!callerId || String(item.userId || '') !== callerId) {
+          return res.status(403).json({
+            success: false,
+            message: 'Forbidden: You can only create or modify your own support tickets.'
+          });
+        }
+      }
+    }
+  }
 
   // Backend enforcement: block unverified drivers/owners from submitting quotes or accepting loads
   if (!isAdmin && (table === 'vs_quotations' || table === 'vs_bookings')) {
@@ -592,7 +1257,8 @@ supabaseRouter.post('/sync', async (req, res) => {
 
   const result = await upsertSupabaseRecords(table, list, { isAdmin });
   if (!result.ok) {
-    return res.status(202).json({ success: false, deferred: true, message: result.error });
+    console.warn(`[Supabase Sync Notice] Deferred sync for ${table}.`);
+    return res.status(202).json({ success: false, deferred: true, message: 'Sync deferred; data saved locally.' });
   }
   return res.json({ success: true, syncedCount: list.length });
 });

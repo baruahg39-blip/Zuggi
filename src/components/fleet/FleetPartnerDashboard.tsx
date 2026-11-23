@@ -79,7 +79,7 @@ export const FleetPartnerDashboard: React.FC<FleetPartnerDashboardProps> = ({
   const [selectedLoadForAssign, setSelectedLoadForAssign] = useState<LoadItem | null>(null);
   const [showDriverSimulator, setShowDriverSimulator] = useState<boolean>(false);
   const [simulatorTripId, setSimulatorTripId] = useState<string>('trip_demo_01');
-  const [simulatorToken, setSimulatorToken] = useState<string>('trk_sec_993821739182371928371923');
+  const [simulatorToken, setSimulatorToken] = useState<string>('');
   const [showLiveTrackingModal, setShowLiveTrackingModal] = useState<boolean>(false);
   const [liveTrackingTripId, setLiveTrackingTripId] = useState<string>('trip_demo_01');
 

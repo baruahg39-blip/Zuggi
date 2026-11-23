@@ -67,7 +67,7 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
   const [showDisputeModal, setShowDisputeModal] = useState<boolean>(false);
   const [showDriverSimulator, setShowDriverSimulator] = useState<boolean>(false);
   const [simulatorTripId, setSimulatorTripId] = useState<string>('');
-  const [simulatorToken, setSimulatorToken] = useState<string>('trk_sec_993821739182371928371923');
+  const [simulatorToken, setSimulatorToken] = useState<string>('');
   const [confirmCancel, setConfirmCancel] = useState<boolean>(false);
   const currentUser = logisticsStore.getCurrentUser();
 
@@ -406,7 +406,7 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
             initialTrackingToken={booking?.trackingToken}
             onOpenDriverSimulator={(tId, tok) => {
               setSimulatorTripId(tId);
-              setSimulatorToken(tok || booking?.trackingToken || 'trk_sec_993821739182371928371923');
+              setSimulatorToken(tok || booking?.trackingToken || '');
               setShowDriverSimulator(true);
             }}
           />

@@ -59,22 +59,21 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
 
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const handleConfirmDeleteAccount = async () => {
     setIsDeletingAccount(true);
+    setDeleteError(null);
     try {
-      await fetch('/api/auth/request-account-deletion', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          phone: currentUser.phone,
-          reason: 'Requested in-app via Profile settings',
-          source: portalMode === 'partner' ? 'partner_app_profile' : 'web_profile'
-        })
-      }).catch(() => {});
-    } finally {
+      await authService.deleteMyAccount(
+        'Requested in-app via Profile settings',
+        portalMode === 'partner' ? 'partner_app_profile' : 'web_profile'
+      );
       setIsDeletingAccount(false);
       onClose();
-      await authService.logout();
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Could not complete account deletion. Please verify via /delete-account.');
+      setIsDeletingAccount(false);
     }
   };
 
@@ -513,8 +512,13 @@ export const CustomerProfileModal: React.FC<CustomerProfileModalProps> = ({
                 ) : (
                   <div className="space-y-2">
                     <p className="text-[11px] font-semibold text-rose-900">
-                      Confirm permanent deletion for <span className="font-mono">{currentUser.phone}</span>? You will be signed out immediately and your profile/KYC data will be erased within 7 working days.
+                      Confirm permanent deletion for <span className="font-mono">{currentUser.phone}</span>? You will be signed out immediately and your profile, login passcode, and personal details will be erased and anonymized.
                     </p>
+                    {deleteError && (
+                      <p className="text-[11px] font-bold text-rose-700 bg-white border border-rose-200 rounded-xl px-2.5 py-1.5">
+                        {deleteError}
+                      </p>
+                    )}
                     <div className="flex items-center gap-2">
                       <button
                         type="button"

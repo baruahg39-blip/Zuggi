@@ -1480,7 +1480,12 @@ export function injectSeoIntoHtml(rawHtml: string, seo: ResolvedRouteSeo): strin
 
   // Route-Specific Schema.org JSON-LD
   if (seo.jsonLd) {
-    const safeJson = JSON.stringify(seo.jsonLd).replace(/</g, '\\u003c');
+    const safeJson = JSON.stringify(seo.jsonLd)
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e')
+      .replace(/&/g, '\\u0026')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
     const jsonLdScript = `<script id="zuggi-route-jsonld" type="application/ld+json">${safeJson}</script>`;
     if (html.includes('<!-- ZUGGI_ROUTE_JSONLD -->')) {
       html = html.replace('<!-- ZUGGI_ROUTE_JSONLD -->', jsonLdScript);

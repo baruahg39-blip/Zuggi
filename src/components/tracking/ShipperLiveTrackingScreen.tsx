@@ -437,8 +437,8 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
 
       fetch(`/trips/${encodeURIComponent(targetId)}/live-eta`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(nextEta)
+        headers: logisticsStore.buildAuthHeaders(true),
+        body: JSON.stringify({ ...nextEta, tracking_token: trackingData.tracking_token })
       }).catch(() => {});
 
       showToast(`Live ETA refreshed: arriving ${computed.formattedArrivalTime} (${computed.formattedDuration})`, 'success');
@@ -535,7 +535,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
               onClick={() =>
                 onOpenDriverSimulator(
                   trackingData?.trip_id || tripId,
-                  trackingData?.tracking_token || initialTrackingToken || 'trk_sec_993821739182371928371923'
+                  trackingData?.tracking_token || initialTrackingToken || ''
                 )
               }
               className="px-3 py-1.5 bg-[#FFF0F6] border border-[#F4A7C5] text-[#E83E83] rounded-xl text-xs font-bold hover:bg-[#FFE3EE] transition flex items-center gap-1.5 cursor-pointer shadow-sm"
@@ -901,8 +901,8 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
             try {
               const res = await fetch(`/trips/${encodeURIComponent(targetId)}/geofence`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(patch)
+                headers: logisticsStore.buildAuthHeaders(true),
+                body: JSON.stringify({ ...patch, tracking_token: trackingData.tracking_token })
               });
               if (res.ok) {
                 logisticsStore.updateGeofenceConfig(targetId, patch);

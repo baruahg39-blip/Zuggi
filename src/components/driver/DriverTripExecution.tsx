@@ -54,8 +54,17 @@ interface DriverTripExecutionProps {
   onFindLoads?: () => void;
 }
 
+const ALLOWED_POD_IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+const MAX_POD_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+
 /** Compress a captured phone camera / gallery image to a lightweight JPEG Data URL */
 async function compressImageFileToDataUrl(file: File, maxDim = 960, quality = 0.78): Promise<string> {
+  if (!ALLOWED_POD_IMAGE_TYPES.has((file.type || '').toLowerCase())) {
+    throw new Error('Only JPEG, PNG, and WebP photos are allowed.');
+  }
+  if (file.size > MAX_POD_IMAGE_BYTES) {
+    throw new Error('Image exceeds the 5 MB file size limit.');
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error('Could not read image file.'));
@@ -274,7 +283,9 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
   // Ensure backend /trips record exists & obtain tracking token if missing
   const ensureBackendTripToken = useCallback(async (b: Booking, l: LoadItem): Promise<string | null> => {
     try {
-      const liveRes = await fetch(`/trips/${b.id}/live-tracking`);
+      const liveRes = await fetch(`/trips/${b.id}/live-tracking`, {
+        headers: logisticsStore.buildAuthHeaders(false)
+      });
       if (liveRes.ok) {
         const liveData = await liveRes.json();
         if (liveData?.tracking_token) {
@@ -286,7 +297,7 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
       const drv = logisticsStore.getUserById(b.driverId);
       const assignRes = await fetch(`/trips/${b.id}/assign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: logisticsStore.buildAuthHeaders(true),
         body: JSON.stringify({
           load_id: l.id,
           vehicle_id: b.vehicleId,
@@ -329,8 +340,8 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     try {
       await fetch(`/trips/${b.id}/status`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: backendStatus })
+        headers: logisticsStore.buildAuthHeaders(true),
+        body: JSON.stringify({ status: backendStatus, tracking_token: b.trackingToken })
       });
     } catch {
       // Ignore offline
@@ -384,8 +395,9 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
         // Relay live ETA to backend trip record so cross-device shipper views receive it in /live-tracking
         fetch(`/trips/${encodeURIComponent(b.id)}/live-eta`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: logisticsStore.buildAuthHeaders(true),
           body: JSON.stringify({
+            tracking_token: b.trackingToken,
             minutes: Math.max(0, Math.round(computed.durationSeconds / 60)),
             formatted: computed.formattedDuration,
             distance_remaining_km: computed.distanceKm,

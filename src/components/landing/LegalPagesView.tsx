@@ -13,6 +13,8 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { applyClientSeo, navigateSpa } from '../../utils/seo';
+import { authService } from '../../services/authService';
+import { logisticsStore } from '../../services/store';
 
 export type LegalPageSlug = 'privacy' | 'terms' | 'refund-policy' | 'delete-account';
 
@@ -33,12 +35,15 @@ function resolveSlug(pathname: string): LegalPageSlug {
 
 export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSignedIn }) => {
   const activeTab = resolveSlug(pathname);
+  const currentUser = logisticsStore.getCurrentUser();
   const [delPhone, setDelPhone] = useState('');
+  const [delOtp, setDelOtp] = useState('');
+  const [delOtpSent, setDelOtpSent] = useState(false);
   const [delReason, setDelReason] = useState('');
   const [delSubmitting, setDelSubmitting] = useState(false);
   const [delResult, setDelResult] = useState<{ ok: boolean; refId?: string; message: string } | null>(null);
 
-  const handleSubmitDeletion = async (e: React.FormEvent) => {
+  const handleRequestDeletionOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     const digits = delPhone.replace(/\D/g, '');
     if (digits.length < 10) {
@@ -48,29 +53,108 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
     setDelSubmitting(true);
     setDelResult(null);
     try {
-      const res = await fetch('/api/auth/request-account-deletion', {
+      const res = await fetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: digits.slice(-10), purpose: 'account_deletion' })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        setDelOtpSent(true);
+        setDelResult({
+          ok: true,
+          message: data.message || 'Verification OTP sent to your mobile number. Enter the 6-digit code to confirm deletion.'
+        });
+      } else {
+        setDelResult({ ok: false, message: data.message || 'Could not send verification OTP. Please try again.' });
+      }
+    } catch {
+      setDelResult({ ok: false, message: 'Network error. Please email support@zuggi.in with your mobile number.' });
+    } finally {
+      setDelSubmitting(false);
+    }
+  };
+
+  const handleSubmitDeletion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setDelSubmitting(true);
+    setDelResult(null);
+
+    try {
+      // Path A: Already signed in -> use active authenticated session directly
+      if (isSignedIn && currentUser && currentUser.role !== 'admin') {
+        const result = await authService.deleteMyAccount(
+          delReason.trim() || 'Requested via zuggi.in/delete-account',
+          'web_delete_account'
+        );
+        setDelResult({
+          ok: true,
+          refId: result.referenceId,
+          message: result.message
+        });
+        setDelPhone('');
+        setDelOtp('');
+        setDelOtpSent(false);
+        setDelReason('');
+        return;
+      }
+
+      // Path B: Signed-out user -> verify OTP first to prove account ownership
+      const digits = delPhone.replace(/\D/g, '');
+      if (digits.length < 10) {
+        setDelResult({ ok: false, message: 'Please enter your valid 10-digit registered mobile number.' });
+        return;
+      }
+      const cleanOtp = delOtp.replace(/\D/g, '');
+      if (cleanOtp.length !== 6) {
+        setDelResult({ ok: false, message: 'Please enter the 6-digit OTP sent to your mobile number.' });
+        return;
+      }
+
+      const verifyRes = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: digits.slice(-10), otp: cleanOtp })
+      });
+      const verifyData = await verifyRes.json().catch(() => ({}));
+      if (!verifyRes.ok || !verifyData.success) {
+        setDelResult({ ok: false, message: verifyData.message || 'Invalid or expired OTP code.' });
+        return;
+      }
+
+      const res = await fetch('/api/auth/request-account-deletion', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(verifyData.sessionToken ? { Authorization: `Bearer ${verifyData.sessionToken}` } : {})
+        },
         body: JSON.stringify({
           phone: digits.slice(-10),
+          resetToken: verifyData.resetToken,
           reason: delReason.trim() || 'Requested via zuggi.in/delete-account',
           source: 'web_delete_account'
         })
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
+        logisticsStore.eraseAccountFromMemory(verifyData.existingUser?.id || '', digits.slice(-10));
         setDelResult({
           ok: true,
           refId: data.referenceId,
-          message: data.message || 'Account deletion request submitted successfully.'
+          message: data.message || 'Your personal data has been erased and anonymized.'
         });
         setDelPhone('');
+        setDelOtp('');
+        setDelOtpSent(false);
         setDelReason('');
       } else {
-        setDelResult({ ok: false, message: data.message || 'Could not submit request. Please try again.' });
+        setDelResult({ ok: false, message: data.message || 'Could not complete deletion. Please try again.' });
       }
-    } catch {
-      setDelResult({ ok: false, message: 'Network error. Please email support@zuggi.in with your mobile number.' });
+    } catch (err: any) {
+      setDelResult({
+        ok: false,
+        message: err?.message || 'Network error. Please email support@zuggi.in with your mobile number.'
+      });
     } finally {
       setDelSubmitting(false);
     }
@@ -550,10 +634,17 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
                 </div>
               </section>
 
-              <form onSubmit={handleSubmitDeletion} className="p-5 rounded-2xl bg-[#F8F6F8] border border-gray-200 space-y-4">
+              <form
+                onSubmit={isSignedIn && currentUser && currentUser.role !== 'admin' ? handleSubmitDeletion : delOtpSent ? handleSubmitDeletion : handleRequestDeletionOtp}
+                className="p-5 rounded-2xl bg-[#F8F6F8] border border-gray-200 space-y-4"
+              >
                 <div className="flex items-center gap-2 text-xs font-extrabold text-[#171318]">
                   <AlertTriangle className="w-4 h-4 text-rose-600" />
-                  <span>Submit Permanent Account Deletion Request</span>
+                  <span>
+                    {isSignedIn && currentUser && currentUser.role !== 'admin'
+                      ? 'Confirm Immediate Account & Personal Data Erasure'
+                      : 'Verify Ownership via OTP & Permanently Delete Account'}
+                  </span>
                 </div>
 
                 {delResult && (
@@ -571,44 +662,108 @@ export const LegalPagesView: React.FC<LegalPagesViewProps> = ({ pathname, isSign
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-bold text-[#171318] mb-1">
-                      Registered 10-Digit Mobile Number *
-                    </label>
-                    <input
-                      type="tel"
-                      inputMode="numeric"
-                      maxLength={10}
-                      required
-                      value={delPhone}
-                      onChange={(e) => setDelPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                      placeholder="e.g. 9876543210"
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm font-mono text-[#171318] focus:outline-none focus:border-[#E83E83]"
-                    />
+                {isSignedIn && currentUser && currentUser.role !== 'admin' ? (
+                  <div className="space-y-3">
+                    <div className="p-3 rounded-xl bg-white border border-gray-200 text-xs text-[#4b454e]">
+                      Signed in as <span className="font-bold text-[#171318]">{currentUser.name}</span>{' '}
+                      (<span className="font-mono">{currentUser.phone || 'Verified Account'}</span>). Clicking below will
+                      immediately erase your profile, revoke all active sessions, and anonymize linked trip records.
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-[#171318] mb-1">
+                        Reason (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={delReason}
+                        onChange={(e) => setDelReason(e.target.value)}
+                        placeholder="e.g. No longer operating commercial vehicle"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm text-[#171318] focus:outline-none focus:border-[#E83E83]"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-bold text-[#171318] mb-1">
-                      Reason (Optional)
-                    </label>
-                    <input
-                      type="text"
-                      value={delReason}
-                      onChange={(e) => setDelReason(e.target.value)}
-                      placeholder="e.g. No longer operating commercial vehicle"
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm text-[#171318] focus:outline-none focus:border-[#E83E83]"
-                    />
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-[#171318] mb-1">
+                        Registered 10-Digit Mobile Number *
+                      </label>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={10}
+                        required
+                        disabled={delOtpSent}
+                        value={delPhone}
+                        onChange={(e) => setDelPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                        placeholder="e.g. 9876543210"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm font-mono text-[#171318] focus:outline-none focus:border-[#E83E83] disabled:bg-gray-100"
+                      />
+                    </div>
+                    {delOtpSent ? (
+                      <div>
+                        <label className="block text-xs font-bold text-[#171318] mb-1">
+                          6-Digit Verification OTP *
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          required
+                          value={delOtp}
+                          onChange={(e) => setDelOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="Enter 6-digit OTP"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm font-mono text-[#171318] focus:outline-none focus:border-[#E83E83]"
+                        />
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-xs font-bold text-[#171318] mb-1">
+                          Reason (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={delReason}
+                          onChange={(e) => setDelReason(e.target.value)}
+                          placeholder="e.g. No longer operating commercial vehicle"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-gray-300 text-sm text-[#171318] focus:outline-none focus:border-[#E83E83]"
+                        />
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
 
-                <button
-                  type="submit"
-                  disabled={delSubmitting}
-                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold transition cursor-pointer inline-flex items-center gap-2"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span>{delSubmitting ? 'Submitting Request...' : 'Request Permanent Account Deletion'}</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="submit"
+                    disabled={delSubmitting}
+                    className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white text-xs font-bold transition cursor-pointer inline-flex items-center gap-2"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>
+                      {delSubmitting
+                        ? 'Processing...'
+                        : isSignedIn && currentUser && currentUser.role !== 'admin'
+                        ? 'Permanently Delete My Account & Data'
+                        : delOtpSent
+                        ? 'Verify OTP & Permanently Delete Account'
+                        : 'Send Verification OTP'}
+                    </span>
+                  </button>
+                  {delOtpSent && !(isSignedIn && currentUser) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDelOtpSent(false);
+                        setDelOtp('');
+                        setDelResult(null);
+                      }}
+                      className="px-4 py-2.5 rounded-xl bg-white border border-gray-300 text-xs font-bold text-[#171318] hover:bg-gray-50 cursor-pointer"
+                    >
+                      Change Number
+                    </button>
+                  )}
+                </div>
               </form>
             </div>
           </>

@@ -292,6 +292,13 @@ class LogisticsStore {
   private unsubscribers: Array<() => void> = [];
   private supabaseBootstrapped = false;
   private adminSessionToken: string | null = null;
+  private userSessionToken: string | null = null;
+  // In-memory PII stores (never persisted to localStorage to protect against XSS exposure)
+  private currentUserMemory: User | null = null;
+  private usersMemory: User[] = [];
+  private userRegistryMemory: Record<string, any> = {};
+  private cashfreeVendorsMemory: CashfreeVendor[] = [];
+  private partnerApplicationsMemory: PartnerApplication[] = [];
 
   public setAdminSessionToken(token: string | null) {
     this.adminSessionToken = token;
@@ -299,6 +306,64 @@ class LogisticsStore {
 
   public getAdminSessionToken(): string | null {
     return this.adminSessionToken;
+  }
+
+  public setUserSessionToken(token: string | null) {
+    this.userSessionToken = token;
+  }
+
+  public getUserSessionToken(): string | null {
+    return this.userSessionToken;
+  }
+
+  public purgeAllUserPiiFromBrowserStorage() {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+      localStorage.removeItem(STORAGE_KEYS.USERS);
+      localStorage.removeItem(STORAGE_KEYS.USER_REGISTRY);
+      localStorage.removeItem(STORAGE_KEYS.CASHFREE_VENDORS);
+      localStorage.removeItem(STORAGE_KEYS.PARTNER_APPLICATIONS);
+      localStorage.removeItem('vs_auth_token');
+      sessionStorage.removeItem('vs_session_stub');
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  public eraseAccountFromMemory(userId: string, phone10?: string) {
+    const clean10 = normalizeLast10(phone10);
+    if (this.currentUserMemory) {
+      const cur10 = normalizeLast10(this.currentUserMemory.phone);
+      if ((userId && this.currentUserMemory.id === userId) || (clean10 && cur10 === clean10)) {
+        this.currentUserMemory = null;
+      }
+    }
+    this.usersMemory = this.usersMemory.filter((u) => {
+      if (userId && u.id === userId) return false;
+      if (clean10 && normalizeLast10(u.phone) === clean10) return false;
+      return true;
+    });
+    if (clean10 && this.userRegistryMemory[clean10]) {
+      delete this.userRegistryMemory[clean10];
+    }
+    this.cashfreeVendorsMemory = this.cashfreeVendorsMemory.filter((v) => v.userId !== userId);
+    this.partnerApplicationsMemory = this.partnerApplicationsMemory.filter((a) => {
+      if (userId && a.userId === userId) return false;
+      if (clean10 && normalizeLast10(a.phone) === clean10) return false;
+      return true;
+    });
+    // Also remove user's vehicles from local cache
+    if (typeof window !== 'undefined' && userId) {
+      try {
+        const remainingVehicles = this.getVehicles().filter((v) => v.ownerId !== userId);
+        localStorage.setItem(STORAGE_KEYS.VEHICLES, JSON.stringify(remainingVehicles));
+      } catch {
+        // ignore
+      }
+    }
+    this.purgeAllUserPiiFromBrowserStorage();
+    this.triggerChange();
   }
 
   private supabaseSyncInFlight = false;
@@ -378,7 +443,7 @@ class LogisticsStore {
 
     this.saveUser(updated);
     if (current && current.id === userId) {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updated));
+      this.currentUserMemory = updated;
     }
     this.triggerChange();
     return updated;
@@ -387,43 +452,19 @@ class LogisticsStore {
   private purgeLegacyDemoData() {
     if (typeof window === 'undefined') return;
 
-    // 1. Log out if the stored active session belongs to a bot / seeded / test account
+    // 1. Security migration: wipe any legacy PII keys from localStorage so sensitive user data never persists in localStorage
     try {
-      const userRaw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-      if (userRaw) {
-        const parsed = JSON.parse(userRaw);
-        if (isBotUserRecord(parsed)) {
-          localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-        }
-      }
-    } catch {
       localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    }
-
-    // 2. Strip bot / seeded / test accounts from local registry while keeping real users intact
-    try {
-      const regRaw = localStorage.getItem(STORAGE_KEYS.USER_REGISTRY);
-      if (regRaw) {
-        const registry = JSON.parse(regRaw);
-        if (registry && typeof registry === 'object') {
-          let regChanged = false;
-          Object.keys(registry).forEach((phoneKey) => {
-            const entry = registry[phoneKey];
-            if (BOT_PHONES_10.has(phoneKey) || isBotUserRecord(entry?.user)) {
-              delete registry[phoneKey];
-              regChanged = true;
-            }
-          });
-          if (regChanged) {
-            localStorage.setItem(STORAGE_KEYS.USER_REGISTRY, JSON.stringify(registry));
-          }
-        }
-      }
+      localStorage.removeItem(STORAGE_KEYS.USERS);
+      localStorage.removeItem(STORAGE_KEYS.USER_REGISTRY);
+      localStorage.removeItem(STORAGE_KEYS.CASHFREE_VENDORS);
+      localStorage.removeItem(STORAGE_KEYS.PARTNER_APPLICATIONS);
+      localStorage.removeItem('vs_auth_token');
     } catch {
-      // ignore corrupted registry
+      // ignore storage access errors
     }
 
-    // 3. Surgically filter bot / seeded records out of every collection without touching real data
+    // 2. Surgically filter bot / seeded records out of non-PII operational caches
     const filterList = <T,>(key: string, isBot: (item: T) => boolean) => {
       try {
         const raw = localStorage.getItem(key);
@@ -439,13 +480,11 @@ class LogisticsStore {
       }
     };
 
-    filterList<User>(STORAGE_KEYS.USERS, isBotUserRecord);
     filterList<CommercialVehicle>(STORAGE_KEYS.VEHICLES, isBotVehicleRecord);
     filterList<LoadItem>(STORAGE_KEYS.LOADS, isBotLoadRecord);
     filterList<Quotation>(STORAGE_KEYS.QUOTATIONS, isBotQuotationRecord);
     filterList<Booking>(STORAGE_KEYS.BOOKINGS, isBotBookingRecord);
     filterList<Settlement>(STORAGE_KEYS.SETTLEMENTS, isBotSettlementRecord);
-    filterList<PartnerApplication>(STORAGE_KEYS.PARTNER_APPLICATIONS, isBotApplicationRecord);
     filterList<SupportTicket>(STORAGE_KEYS.TICKETS, isBotTicketRecord);
     filterList<TripFeedback>(
       STORAGE_KEYS.FEEDBACKS,
@@ -493,17 +532,32 @@ class LogisticsStore {
     }
   }
 
-  // --- Users & Roles ---
+  // --- Users & Roles (Kept in memory; only minimal non-PII session stub in sessionStorage) ---
   public getCurrentUser(): User | null {
-    if (typeof window === 'undefined') return null;
-    const raw = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (!raw) {
-      return null;
+    if (this.currentUserMemory) {
+      return this.currentUserMemory;
     }
+    if (typeof window === 'undefined') return null;
     try {
-      const u = JSON.parse(raw);
-      if (u && u.id && u.role && u.name) {
-        return u;
+      const stubRaw = sessionStorage.getItem('vs_session_stub');
+      if (!stubRaw) return null;
+      const stub = JSON.parse(stubRaw);
+      if (stub && stub.id && stub.role && stub.name) {
+        this.currentUserMemory = {
+          id: stub.id,
+          name: stub.name,
+          phone: '',
+          email: '',
+          role: stub.role,
+          businessName: stub.businessName,
+          state: stub.state || 'Assam',
+          city: stub.city || 'Guwahati',
+          isVerified: Boolean(stub.isVerified),
+          isBlocked: Boolean(stub.isBlocked),
+          hasPasscode: Boolean(stub.hasPasscode),
+          createdAt: stub.createdAt || new Date().toISOString()
+        };
+        return this.currentUserMemory;
       }
       return null;
     } catch {
@@ -512,10 +566,31 @@ class LogisticsStore {
   }
 
   public setCurrentUser(user: User | null) {
-    if (!user) {
-      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
-    } else {
-      localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(user));
+    this.currentUserMemory = user;
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+        if (!user) {
+          sessionStorage.removeItem('vs_session_stub');
+        } else {
+          // Persist ONLY non-PII display/routing metadata in sessionStorage (no phone, email, PAN, GSTIN, address, or bank details)
+          const nonPiiStub = {
+            id: user.id,
+            name: user.name,
+            role: user.role,
+            businessName: user.businessName,
+            city: user.city,
+            state: user.state,
+            isVerified: Boolean(user.isVerified),
+            isBlocked: Boolean(user.isBlocked),
+            hasPasscode: Boolean(user.hasPasscode),
+            createdAt: user.createdAt
+          };
+          sessionStorage.setItem('vs_session_stub', JSON.stringify(nonPiiStub));
+        }
+      } catch {
+        // ignore storage errors
+      }
     }
     this.initFirestoreSync(user);
     void this.initSupabaseSync(true);
@@ -550,19 +625,29 @@ class LogisticsStore {
     return true;
   }
 
+  public buildAuthHeaders(includeJsonContentType = false): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (includeJsonContentType) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (this.adminSessionToken) {
+      headers['Authorization'] = `Bearer ${this.adminSessionToken}`;
+    } else if (this.userSessionToken) {
+      headers['Authorization'] = `Bearer ${this.userSessionToken}`;
+      headers['x-zuggi-user-token'] = this.userSessionToken;
+    }
+    return headers;
+  }
+
   private syncToSupabase(
     table: 'vs_users' | 'vs_vehicles' | 'vs_loads' | 'vs_quotations' | 'vs_bookings' | 'vs_support_tickets',
     payload: any | any[]
   ) {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     const body = Array.isArray(payload) ? { table, records: payload } : { table, record: payload };
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.adminSessionToken) {
-      headers['Authorization'] = `Bearer ${this.adminSessionToken}`;
-    }
     fetch('/api/db/sync', {
       method: 'POST',
-      headers,
+      headers: this.buildAuthHeaders(true),
       body: JSON.stringify(body)
     }).catch(() => {});
   }
@@ -575,7 +660,10 @@ class LogisticsStore {
     this.supabaseSyncInFlight = true;
 
     try {
-      const res = await fetch('/api/db/bootstrap', { cache: 'no-store' });
+      const res = await fetch('/api/db/bootstrap', {
+        cache: 'no-store',
+        headers: this.buildAuthHeaders(false)
+      });
       if (!res.ok) return;
       const json = await res.json();
       if (!json?.configured || !json?.tablesReady || !json?.data) return;
@@ -588,24 +676,43 @@ class LogisticsStore {
         const cleanRemoteVehicles = Array.isArray(remote.vehicles)
           ? remote.vehicles.filter((v: CommercialVehicle) => !isBotVehicleRecord(v))
           : [];
-        changed = this.mergeCollectionById<User>(STORAGE_KEYS.USERS, this.getUsers(), cleanRemoteUsers) || changed;
+        const remoteMap = new Map<string, User>(
+          cleanRemoteUsers.filter((u: User) => u && u.id).map((u: User) => [u.id, u])
+        );
+        const mergedUsers: User[] = [...remoteMap.values()];
+        this.usersMemory.forEach((u) => {
+          if (u && u.id && !remoteMap.has(u.id)) {
+            mergedUsers.push(u);
+          }
+        });
+        this.usersMemory = mergedUsers;
+        changed = true;
+
         const currentUser = this.getCurrentUser();
         cleanRemoteUsers.forEach((u: User) => {
           if (u?.phone) {
             const existingVeh = cleanRemoteVehicles.find((v: CommercialVehicle) => v.ownerId === u.id);
             this.saveRegisteredProfile(u.phone, u, existingVeh);
           }
-          // Keep logged-in session synced with backend verification, block status & saved bank details
-          if (currentUser && u && (u.id === currentUser.id || (u.phone && currentUser.phone && u.phone.replace(/\D/g, '').slice(-10) === currentUser.phone.replace(/\D/g, '').slice(-10)))) {
-            const syncedCurrent: User = {
+          // Keep logged-in session synced in memory with backend verification, block status & saved bank details
+          if (
+            currentUser &&
+            u &&
+            (u.id === currentUser.id ||
+              (u.phone &&
+                currentUser.phone &&
+                u.phone.replace(/\D/g, '').slice(-10) === currentUser.phone.replace(/\D/g, '').slice(-10)))
+          ) {
+            this.currentUserMemory = {
               ...currentUser,
+              phone: u.phone || currentUser.phone,
+              email: u.email || currentUser.email,
               isVerified: u.isVerified === true,
               isBlocked: Boolean(u.isBlocked),
               blockedReason: u.blockedReason,
               bankDetails: u.bankDetails || currentUser.bankDetails,
               pan: u.pan || currentUser.pan
             };
-            localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(syncedCurrent));
           }
         });
       }
@@ -634,7 +741,7 @@ class LogisticsStore {
         this.notifyListeners();
       }
     } catch {
-      // Silent fallback to Firestore + localStorage
+      // Silent fallback to Firestore + in-memory cache
     } finally {
       this.supabaseSyncInFlight = false;
     }
@@ -837,18 +944,16 @@ class LogisticsStore {
   }
 
   public getUsers(): User[] {
-    return this.safeJsonParse<User[]>(STORAGE_KEYS.USERS, []).filter(
-      (u) => !isBotUserRecord(u)
-    );
+    return this.usersMemory.filter((u) => !isBotUserRecord(u));
   }
 
   public getUserById(id: string): User | undefined {
     return this.getUsers().find((u) => u.id === id);
   }
 
-  // --- Permanent User Profile Registry (Real registered users only — no bot/seeded users) ---
+  // --- In-Memory User Profile Registry (Never persisted to localStorage; no passcode digests stored client-side) ---
   public seedRegistryIfEmpty() {
-    // Intentionally empty: only real registered customers, drivers, owners, and admin accounts are stored.
+    // Intentionally empty: only real registered customers, drivers, owners, and admin accounts are loaded from backend.
   }
 
   public getRegisteredProfile(phone: string): {
@@ -858,80 +963,12 @@ class LogisticsStore {
     isFleetOwner?: boolean;
     fleetSize?: number;
     hasPasscode?: boolean;
-    passcodeDigest?: string;
   } | null {
-    if (typeof window === 'undefined') return null;
     let clean = phone.replace(/\D/g, '');
     if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
     if (clean.length > 10) clean = clean.slice(-10);
     if (!clean || clean.length < 10) return null;
-
-    const raw = localStorage.getItem(STORAGE_KEYS.USER_REGISTRY);
-    if (!raw) return null;
-    try {
-      const registry = JSON.parse(raw);
-      return registry[clean] || null;
-    } catch {
-      return null;
-    }
-  }
-
-  public async computeLocalPasscodeDigest(phone: string, passcode: string): Promise<string> {
-    let clean = phone.replace(/\D/g, '');
-    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
-    if (clean.length > 10) clean = clean.slice(-10);
-    const payload = `zuggi_pin_v1:${clean}:${passcode.trim()}`;
-    if (typeof crypto !== 'undefined' && crypto.subtle) {
-      const encoded = new TextEncoder().encode(payload);
-      const buf = await crypto.subtle.digest('SHA-256', encoded);
-      return Array.from(new Uint8Array(buf))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-    }
-    // Lightweight fallback hash when SubtleCrypto is unavailable in insecure context
-    let h = 2166136261;
-    for (let i = 0; i < payload.length; i++) {
-      h ^= payload.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return `fnv:${(h >>> 0).toString(16)}`;
-  }
-
-  public async setLocalPasscode(phone: string, passcode: string): Promise<string | null> {
-    if (typeof window === 'undefined') return null;
-    let clean = phone.replace(/\D/g, '');
-    if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
-    if (clean.length > 10) clean = clean.slice(-10);
-    if (!clean || clean.length < 10) return null;
-
-    const digest = await this.computeLocalPasscodeDigest(clean, passcode);
-    const existing = this.getRegisteredProfile(clean);
-    if (existing?.user) {
-      this.saveRegisteredProfile(
-        clean,
-        {
-          ...existing.user,
-          hasPasscode: true,
-          passcodeUpdatedAt: new Date().toISOString()
-        },
-        existing.vehicle,
-        {
-          dlNumber: existing.dlNumber,
-          isFleetOwner: existing.isFleetOwner,
-          fleetSize: existing.fleetSize,
-          hasPasscode: true,
-          passcodeDigest: digest
-        }
-      );
-    }
-    return digest;
-  }
-
-  public async verifyLocalPasscode(phone: string, passcode: string): Promise<boolean> {
-    const profile = this.getRegisteredProfile(phone);
-    if (!profile?.passcodeDigest) return false;
-    const digest = await this.computeLocalPasscodeDigest(phone, passcode);
-    return digest === profile.passcodeDigest;
+    return this.userRegistryMemory[clean] || null;
   }
 
   public saveRegisteredProfile(
@@ -943,29 +980,19 @@ class LogisticsStore {
       isFleetOwner?: boolean;
       fleetSize?: number;
       hasPasscode?: boolean;
-      passcodeDigest?: string;
     }
   ) {
-    if (typeof window === 'undefined') return;
     let clean = phone.replace(/\D/g, '');
     if (clean.length > 10 && clean.startsWith('91')) clean = clean.slice(2);
     if (clean.length > 10) clean = clean.slice(-10);
     if (!clean || clean.length < 10) return;
 
-    let registry: Record<string, any> = {};
-    const raw = localStorage.getItem(STORAGE_KEYS.USER_REGISTRY);
-    if (raw) {
-      try {
-        registry = JSON.parse(raw);
-      } catch {}
-    }
-
-    const existing = registry[clean];
+    const existing = this.userRegistryMemory[clean];
     const hasPasscode = Boolean(
       extra?.hasPasscode ?? user.hasPasscode ?? existing?.hasPasscode ?? existing?.user?.hasPasscode
     );
 
-    registry[clean] = {
+    this.userRegistryMemory[clean] = {
       user: {
         ...user,
         phone: `+91 ${clean}`,
@@ -976,11 +1003,8 @@ class LogisticsStore {
       isFleetOwner: extra?.isFleetOwner ?? existing?.isFleetOwner,
       fleetSize: extra?.fleetSize ?? existing?.fleetSize,
       hasPasscode,
-      passcodeDigest: extra?.passcodeDigest || existing?.passcodeDigest,
       updatedAt: new Date().toISOString()
     };
-
-    localStorage.setItem(STORAGE_KEYS.USER_REGISTRY, JSON.stringify(registry));
   }
 
   public saveUser(user: User) {
@@ -991,7 +1015,7 @@ class LogisticsStore {
     } else {
       users.push(user);
     }
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    this.usersMemory = users;
 
     if (user.phone) {
       this.saveRegisteredProfile(user.phone, user);
@@ -1107,7 +1131,7 @@ class LogisticsStore {
     ).length;
 
     const currentUser = this.getCurrentUser();
-    const isTestLoad = !!(currentUser?.isTestAccount || (currentUser?.phone && currentUser.phone.includes('99999')));
+    const isTestLoad = Boolean(currentUser?.isTestAccount);
 
     const newLoad: LoadItem = {
       ...newLoadData,
@@ -1574,7 +1598,7 @@ class LogisticsStore {
     if (typeof fetch !== 'undefined') {
       fetch(`/trips/${bookingId}/assign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.buildAuthHeaders(true),
         body: JSON.stringify({
           load_id: load.id,
           vehicle_id: quote.vehicleId,
@@ -1842,7 +1866,7 @@ class LogisticsStore {
     if (typeof fetch !== 'undefined') {
       fetch(`/trips/${bookingId}/assign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.buildAuthHeaders(true),
         body: JSON.stringify({
           load_id: load.id,
           vehicle_id: assignedVehicle.id,
@@ -2055,7 +2079,7 @@ class LogisticsStore {
     target.isBlocked = isBlocked;
     target.blockedReason = isBlocked ? reason : undefined;
     target.blockedAt = isBlocked ? new Date().toISOString() : undefined;
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    this.usersMemory = users;
 
     if (target.phone) {
       this.saveRegisteredProfile(target.phone, target);
@@ -2432,7 +2456,7 @@ class LogisticsStore {
     if (typeof fetch !== 'undefined') {
       fetch(`/trips/${encodeURIComponent(bookingId)}/geofence`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.buildAuthHeaders(true),
         body: JSON.stringify(nextConfig)
       }).catch(() => {});
     }
@@ -2805,7 +2829,7 @@ class LogisticsStore {
   }
 
   public getCashfreeVendors(): CashfreeVendor[] {
-    return this.safeJsonParse<CashfreeVendor[]>(STORAGE_KEYS.CASHFREE_VENDORS, []);
+    return [...this.cashfreeVendorsMemory];
   }
 
   public getVendorByDriverId(driverId: string): CashfreeVendor | undefined {
@@ -2820,7 +2844,7 @@ class LogisticsStore {
     } else {
       vendors.unshift(vendor);
     }
-    localStorage.setItem(STORAGE_KEYS.CASHFREE_VENDORS, JSON.stringify(vendors));
+    this.cashfreeVendorsMemory = vendors;
     this.triggerChange();
   }
 
@@ -4302,9 +4326,7 @@ class LogisticsStore {
   // ==========================================
 
   public getPartnerApplications(): PartnerApplication[] {
-    return this.safeJsonParse<PartnerApplication[]>(STORAGE_KEYS.PARTNER_APPLICATIONS, []).filter(
-      (a) => !isBotApplicationRecord(a)
-    );
+    return this.partnerApplicationsMemory.filter((a) => !isBotApplicationRecord(a));
   }
 
   public getPartnerApplicationByUserId(userId: string): PartnerApplication | undefined {
@@ -4325,7 +4347,7 @@ class LogisticsStore {
     } else {
       apps.unshift(app);
     }
-    localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+    this.partnerApplicationsMemory = apps;
     this.triggerChange();
     return app;
   }
@@ -4352,7 +4374,7 @@ class LogisticsStore {
       apps.unshift(application);
     }
 
-    localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+    this.partnerApplicationsMemory = apps;
 
     // Also register vehicles into vehicle inventory if provided
     if (application.registeredVehicles && application.registeredVehicles.length > 0) {
@@ -4470,7 +4492,7 @@ class LogisticsStore {
       const user = users.find((u) => u.id === app.userId || u.phone === app.phone);
       if (user) {
         user.isVerified = true;
-        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+        this.usersMemory = users;
         this.syncToSupabase('vs_users', user);
       }
 
@@ -4490,12 +4512,12 @@ class LogisticsStore {
       const user = users.find((u) => u.id === app.userId);
       if (user) {
         user.isVerified = false;
-        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+        this.usersMemory = users;
         this.syncToSupabase('vs_users', user);
       }
     }
 
-    localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+    this.partnerApplicationsMemory = apps;
 
     // Notify Partner
     this.addNotification({
@@ -4545,7 +4567,7 @@ class LogisticsStore {
     if (!user) return { success: false, message: 'Partner account not found.' };
 
     user.isVerified = approved;
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    this.usersMemory = users;
     this.syncToSupabase('vs_users', user);
 
     // Sync matching vehicles
@@ -4580,7 +4602,7 @@ class LogisticsStore {
       app.status = approved ? 'APPROVED' : 'UNDER_REVIEW';
       app.updatedAt = new Date().toISOString();
       if (notes) app.adminNotes = notes;
-      localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+      this.partnerApplicationsMemory = apps;
     }
 
     // Persist directly to backend authoritative endpoint
@@ -4640,7 +4662,9 @@ class LogisticsStore {
       const params = new URLSearchParams();
       if (user.id) params.set('userId', user.id);
       if (user.phone) params.set('phone', user.phone);
-      const res = await fetch(`/api/partner/verification-status?${params.toString()}`);
+      const res = await fetch(`/api/partner/verification-status?${params.toString()}`, {
+        headers: this.buildAuthHeaders(false)
+      });
       if (!res.ok) {
         return { isVerified: Boolean(user.isVerified), isBlocked: Boolean(user.isBlocked), status: user.isVerified ? 'APPROVED' : 'PENDING_APPROVAL' };
       }
@@ -4653,7 +4677,7 @@ class LogisticsStore {
       const nextBlocked = Boolean(data.isBlocked);
       let changed = false;
 
-      // Update user record in local store
+      // Update user record in memory store
       const users = this.getUsers();
       const idx = users.findIndex((u) => u.id === user.id || (user.phone && u.phone === user.phone));
       if (idx >= 0) {
@@ -4664,7 +4688,7 @@ class LogisticsStore {
             isBlocked: nextBlocked,
             blockedReason: data.blockedReason
           };
-          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+          this.usersMemory = users;
           changed = true;
         }
       }
@@ -4685,33 +4709,32 @@ class LogisticsStore {
         }
       }
 
-      // Sync matching PartnerApplication status
+      // Sync matching PartnerApplication status in memory
       const apps = this.getPartnerApplications();
       const app = apps.find((a) => a.userId === user.id || (user.phone && a.phone === user.phone));
       if (app) {
         if (nextVerified && app.status !== 'APPROVED') {
           app.status = 'APPROVED';
           app.updatedAt = new Date().toISOString();
-          localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+          this.partnerApplicationsMemory = apps;
           changed = true;
         } else if (!nextVerified && app.status === 'APPROVED') {
           app.status = 'UNDER_REVIEW';
           app.updatedAt = new Date().toISOString();
-          localStorage.setItem(STORAGE_KEYS.PARTNER_APPLICATIONS, JSON.stringify(apps));
+          this.partnerApplicationsMemory = apps;
           changed = true;
         }
       }
 
-      // Update active currentUser session
+      // Update active currentUser session in memory
       const current = this.getCurrentUser();
       if (current && current.id === user.id && (current.isVerified !== nextVerified || Boolean(current.isBlocked) !== nextBlocked)) {
-        const updatedCurrent: User = {
+        this.currentUserMemory = {
           ...current,
           isVerified: nextVerified,
           isBlocked: nextBlocked,
           blockedReason: data.blockedReason
         };
-        localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedCurrent));
         changed = true;
       }
 

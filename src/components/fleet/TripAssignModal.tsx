@@ -159,7 +159,7 @@ export const TripAssignModal: React.FC<TripAssignModalProps> = ({
 
       const res = await fetch(`/trips/${tripId}/assign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: logisticsStore.buildAuthHeaders(true),
         body: JSON.stringify({
           load_id: load.id,
           vehicle_id: selectedVehicleId,

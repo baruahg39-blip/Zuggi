@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { cashfreeServer } from './server/cashfree.js';
-import { tripsRouter } from './server/trips.js';
+import { tripsRouter, anonymizeDriverDataByPhone } from './server/trips.js';
 import {
   supabaseRouter,
   findSupabaseUserByPhone,
@@ -15,9 +15,16 @@ import {
   upsertSupabaseRecords,
   listSupabaseLoads,
   findSupabaseLoadById,
+  findSupabaseBookingById,
   isPartnerRole,
-  adminSessionTokens,
-  verifyAdminTokenFromReq
+  issueAdminSessionToken,
+  verifyAdminTokenFromReq,
+  issueUserSessionToken,
+  verifyUserTokenFromReq,
+  revokeTokenFromReq,
+  revokeUserSessions,
+  filterSelfUserFields,
+  deleteAndAnonymizeUserDataInSupabase
 } from './server/supabase.js';
 import {
   SEO_CORRIDORS,
@@ -30,58 +37,49 @@ import {
   injectSeoIntoHtml,
   type PublicFreightListing
 } from './server/seo.js';
+import {
+  IS_PRODUCTION,
+  validateEnvironmentConfig,
+  correlationIdMiddleware,
+  applySecurityHeaders,
+  strictCorsMiddleware,
+  globalErrorHandler,
+  loginRateLimiter,
+  passwordResetRateLimiter,
+  authActionRateLimiter,
+  conditionalResetOtpRateLimiter
+} from './server/security.js';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config(); // fallback to .env if .env.local doesn't exist
+
+// Refuse to start in production if critical environment variables or DB TLS checks fail
+validateEnvironmentConfig();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = Number(process.env.PORT) || 3000;
+const port = IS_PRODUCTION ? (Number(process.env.PORT) || 3000) : 3000;
+
+// Trust first reverse-proxy hop (Cloud Run / Nginx) for accurate per-IP rate limiting
+app.set('trust proxy', 1);
+
+// 1. Per-request correlation IDs & safe error sanitization
+app.use(correlationIdMiddleware);
+
+// 2. Security headers via Helmet (nosniff, HSTS 1yr, X-Frame-Options: DENY, strict CSP)
+applySecurityHeaders(app);
+
+// 3. Strict domain-restricted CORS policy (never wildcard * on APIs)
+app.use(strictCorsMiddleware);
 
 app.use(express.json({
+  limit: '5mb',
   verify: (req: any, _res, buf) => {
     req.rawBody = buf.toString();
   }
 }));
-
-// Scoped CORS middleware: allow wildcard for public PWA/SEO/health endpoints, keep auth/admin/db same-origin
-app.use((req, res, next) => {
-  const isSensitiveApi =
-    req.path.startsWith('/api/admin') ||
-    req.path.startsWith('/api/auth') ||
-    req.path.startsWith('/api/db');
-
-  if (!isSensitiveApi) {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS, POST, PUT, DELETE');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
-    }
-  } else {
-    const origin = req.headers.origin;
-    const host = req.headers.host;
-    if (origin && host) {
-      try {
-        const parsedOrigin = new URL(origin);
-        if (parsedOrigin.host === host) {
-          res.header('Access-Control-Allow-Origin', origin);
-          res.header('Vary', 'Origin');
-          res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-          res.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization, x-zuggi-admin-token');
-        }
-      } catch {
-        // Ignore malformed Origin header
-      }
-    }
-    if (req.method === 'OPTIONS') {
-      return res.sendStatus(204);
-    }
-  }
-  next();
-});
 
 // Explicit, reliable endpoints for Web App Manifest with correct MIME type
 const serveManifest = (fileName: string) => (req: express.Request, res: express.Response) => {
@@ -125,15 +123,13 @@ app.get('/.well-known/assetlinks.json', (_req, res) => {
 app.get('/sw.js', (_req, res) => {
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Service-Worker-Allowed', '/');
-  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.resolve(__dirname, 'public', 'sw.js'));
 });
 
-// Serve public assets (PWA icons, apple touch icon, SVG) with CORS headers
+// Serve public static assets (PWA icons, apple touch icon, SVG)
 app.use(express.static(path.resolve(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     if (filePath.endsWith('.json') || filePath.endsWith('.webmanifest')) {
       res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
     }
@@ -193,7 +189,6 @@ app.post('/api/contact', (req, res) => {
   contactInquiries.unshift(inquiry);
   if (contactInquiries.length > 200) contactInquiries.pop();
 
-  console.log(`[Zuggi Contact Inquiry] ${refId} | ${inquiry.name} (${inquiry.phone}) | ${inquiry.topic}`);
   return res.json({
     success: true,
     referenceId: refId,
@@ -201,8 +196,11 @@ app.post('/api/contact', (req, res) => {
   });
 });
 
-app.get('/api/contact', (_req, res) => {
-  res.json({ success: true, count: contactInquiries.length, inquiries: contactInquiries.slice(0, 50) });
+app.get('/api/contact', (req, res) => {
+  if (!verifyAdminTokenFromReq(req)) {
+    return res.status(403).json({ success: false, message: 'Admin authentication required to view inquiries.' });
+  }
+  return res.json({ success: true, count: contactInquiries.length, inquiries: contactInquiries.slice(0, 50) });
 });
 
 // --- TRIP ASSIGNMENT & LIVE VEHICLE TRACKING ROUTES ---
@@ -223,17 +221,17 @@ interface OtpRecord {
 // In-memory OTP store
 const otpStore = new Map<string, OtpRecord>();
 
-// 1. Endpoint: Request & Send OTP via httpSMS Android Jio Gateway
-app.post('/api/auth/send-otp', async (req, res) => {
+// 1. Endpoint: Request & Send OTP via httpSMS Android Jio Gateway (Rate limited: 5/min/IP or 3/hr/IP for resets)
+app.post('/api/auth/send-otp', conditionalResetOtpRateLimiter, async (req, res) => {
   try {
-    let { phone } = req.body;
+    let { phone } = req.body || {};
 
     if (!phone) {
       return res.status(400).json({ success: false, message: 'Phone number is required.' });
     }
 
     // Clean phone number (strip spaces, dashes, parentheses)
-    phone = phone.replace(/[\s\-()]/g, '');
+    phone = String(phone).replace(/[\s\-()]/g, '');
 
     // Format to E.164 standard with +91 if user entered 10 digits
     if (/^[6-9]\d{9}$/.test(phone)) {
@@ -243,16 +241,16 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
 
     if (!/^\+91[6-9]\d{9}$/.test(phone)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please enter a valid 10-digit Indian mobile number.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Please enter a valid 10-digit Indian mobile number.'
       });
     }
 
     const now = Date.now();
     const existing = otpStore.get(phone);
 
-    // Rate-limit: 60 seconds cooldown to protect your Jio SMS quota
+    // Rate-limit: 60 seconds cooldown per phone number to protect SMS quota
     if (existing && now - existing.lastSentAt < 60 * 1000) {
       const waitSeconds = Math.ceil((60 * 1000 - (now - existing.lastSentAt)) / 1000);
       return res.status(429).json({
@@ -261,32 +259,19 @@ app.post('/api/auth/send-otp', async (req, res) => {
       });
     }
 
-    // Check if this is a known demo or sandbox test number
-    const isDemoNumber = phone.includes('9678944132');
-    const isTestNumber = phone.includes('99999');
-
-    // Generate 6-digit numeric OTP (deterministic for demo testing)
-    const otp = isDemoNumber ? '000000' : isTestNumber ? '123456' : Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate cryptographically secure 6-digit numeric OTP (zero hardcoded test codes)
+    const otp = String(crypto.randomInt(100000, 1000000));
     const expiresAt = now + 10 * 60 * 1000; // 10-minute validity
 
-    // Always record OTP in memory first so user verification succeeds even during gateway latency
+    // Record OTP in memory before gateway call
     otpStore.set(phone, {
       otp,
       expiresAt,
       lastSentAt: now
     });
 
-    const apiKey = process.env.HTTPSMS_API_KEY || 'uk_p5IuoZb7MPaQ201UiklbXuZ16fIjVMBfwEdqUi-G_PTi6O0V-Z4HNJTsUtIu4mu7';
-    const fromPhone = process.env.MY_JIO_PHONE_NUMBER || '+919678944132';
-
-    // If it's a test number, return instant success without consuming SMS gateway quota
-    if (isTestNumber) {
-      return res.json({
-        success: true,
-        message: `Sandbox verification active. Your OTP is: ${otp}`,
-        otp
-      });
-    }
+    const apiKey = (process.env.HTTPSMS_API_KEY || '').trim();
+    const fromPhone = (process.env.MY_JIO_PHONE_NUMBER || '').trim();
 
     let smsDispatched = false;
 
@@ -310,13 +295,11 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
         if (response.ok && result?.status === 'success') {
           smsDispatched = true;
-          console.log(`[OTP Sent via httpSMS] Queued for ${phone}`);
         } else {
-          // Log notice instead of console.error to avoid tripping AI Studio error monitors
-          console.warn('[httpSMS Gateway Notice]', result?.message || result);
+          console.warn(`[httpSMS Gateway Notice] correlationId=${req.correlationId} status=${response.status}`);
         }
-      } catch (gatewayErr: any) {
-        console.warn('[httpSMS Gateway Network Notice]', gatewayErr?.message || gatewayErr);
+      } catch {
+        console.warn(`[httpSMS Gateway Network Notice] correlationId=${req.correlationId} SMS gateway unreachable.`);
       }
     }
 
@@ -327,28 +310,32 @@ app.post('/api/auth/send-otp', async (req, res) => {
       });
     }
 
-    // Graceful fallback: return OTP for instant seamless access if SIM gateway phone is offline/syncing
+    if (IS_PRODUCTION) {
+      return res.status(503).json({
+        success: false,
+        message: 'SMS delivery service is temporarily unavailable. Please try again shortly.'
+      });
+    }
+
+    // Non-production preview fallback when SMS gateway env vars are not yet configured
     return res.json({
       success: true,
-      message: isDemoNumber
-        ? `Demo login active! Your OTP code is: ${otp}`
-        : `Your verification OTP is: ${otp}`,
+      message: `Preview verification OTP generated: ${otp}`,
       otp
     });
-
   } catch (error: any) {
-    console.error('[Send OTP Server Error]:', error);
+    console.error(`[Send OTP Server Error] correlationId=${req.correlationId} code=${error?.code || 'unexpected_error'}`);
     return res.status(500).json({
       success: false,
-      message: error.message || 'Internal server error sending OTP.'
+      message: 'Internal server error sending OTP.'
     });
   }
 });
 
-// 2. Endpoint: Verify OTP
-app.post('/api/auth/verify-otp', async (req, res) => {
+// 2. Endpoint: Verify OTP (Rate limited: 5/min/IP)
+app.post('/api/auth/verify-otp', loginRateLimiter, async (req, res) => {
   try {
-    let { phone, otp } = req.body;
+    let { phone, otp } = req.body || {};
 
     if (!phone || !otp) {
       return res.status(400).json({
@@ -357,7 +344,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       });
     }
 
-    phone = phone.replace(/[\s\-()]/g, '');
+    phone = String(phone).replace(/[\s\-()]/g, '');
     if (/^[6-9]\d{9}$/.test(phone)) {
       phone = `+91${phone}`;
     } else if (/^91[6-9]\d{9}$/.test(phone)) {
@@ -365,8 +352,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     }
 
     const cleanOtp = String(otp).trim();
-    const isDemoMatch = phone.includes('9678944132') && cleanOtp === '000000';
-    const isTestMatch = phone.includes('99999') && (cleanOtp === '123456' || cleanOtp === '000000');
 
     const issueVerifiedSession = async (verifiedPhone: string) => {
       const clean10 = normalizeTenDigitPhone(verifiedPhone);
@@ -389,15 +374,10 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         verified: true,
         phone: verifiedPhone,
         resetToken,
+        sessionToken: existingUser ? issueUserSessionToken(existingUser) : undefined,
         existingUser: sanitizeUserForClient(existingUser)
       };
     };
-
-    if (isDemoMatch || isTestMatch) {
-      otpStore.delete(phone);
-      console.log(`[OTP Verified] Demo/Sandbox account ${phone} authenticated.`);
-      return res.json(await issueVerifiedSession(phone));
-    }
 
     const record = otpStore.get(phone);
 
@@ -416,7 +396,9 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       });
     }
 
-    if (record.otp !== cleanOtp) {
+    const expectedBuf = Buffer.from(record.otp);
+    const providedBuf = Buffer.from(cleanOtp);
+    if (expectedBuf.length !== providedBuf.length || !crypto.timingSafeEqual(expectedBuf, providedBuf)) {
       return res.status(400).json({
         success: false,
         message: 'Incorrect OTP. Please check the digits and try again.'
@@ -425,11 +407,9 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 
     // OTP matched: remove it to prevent replay attacks and grant 15-minute passcode-setup / reset window
     otpStore.delete(phone);
-    console.log(`[OTP Verified] User with phone ${phone} authenticated.`);
     return res.json(await issueVerifiedSession(phone));
-
   } catch (error: any) {
-    console.error('[Verify OTP Server Error]:', error);
+    console.error(`[Verify OTP Server Error] correlationId=${req.correlationId} code=${error?.code || 'verify_otp_error'}`);
     return res.status(500).json({
       success: false,
       message: 'Internal server error verifying OTP.'
@@ -475,16 +455,38 @@ function verifyPasscodeHash(passcode: string, storedHash: string): boolean {
 }
 
 function sanitizeUserForClient(user: any) {
-  if (!user) return null;
-  const { passcodeHash: _hidden, ...safeUser } = user;
-  return {
-    ...safeUser,
-    hasPasscode: Boolean(user.passcodeHash || user.hasPasscode)
-  };
+  return filterSelfUserFields(user);
 }
 
+// Authenticated self-profile hydration (keeps PII out of localStorage)
+app.get('/api/auth/me', async (req, res) => {
+  const session = verifyUserTokenFromReq(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: 'Authentication required.' });
+  }
+  const userRecord =
+    (session.phone10 ? passcodeUserStore.get(session.phone10) : null) ||
+    (session.userId ? await findSupabaseUserById(session.userId) : null) ||
+    (session.phone10 ? await findSupabaseUserByPhone(session.phone10) : null);
+  if (!userRecord) {
+    return res.status(404).json({ success: false, message: 'Account not found.' });
+  }
+  return res.json({ success: true, user: sanitizeUserForClient(userRecord) });
+});
+
+// Authenticated logout: immediately blacklists caller's user/admin JWT on server
+app.post('/api/auth/logout', (req, res) => {
+  const revoked = revokeTokenFromReq(req);
+  return res.json({
+    success: true,
+    revoked,
+    message: 'Session terminated securely.'
+  });
+});
+
 // 3. Endpoint: Check if mobile number already has a registered account + passcode
-app.post('/api/auth/check-account', async (req, res) => {
+// Field-filtered: never returns personal names or block reasons to unauthenticated callers
+app.post('/api/auth/check-account', authActionRateLimiter, async (req, res) => {
   try {
     const clean10 = normalizeTenDigitPhone(req.body?.phone);
     if (!clean10) {
@@ -512,19 +514,17 @@ app.post('/api/auth/check-account', async (req, res) => {
       success: true,
       exists: true,
       hasPasscode: Boolean(userRecord.passcodeHash || userRecord.hasPasscode),
-      name: userRecord.name || '',
       role: userRecord.role || 'customer',
-      isBlocked: Boolean(userRecord.isBlocked),
-      blockedReason: userRecord.blockedReason || undefined
+      isBlocked: Boolean(userRecord.isBlocked)
     });
   } catch (err: any) {
-    console.error('[Check Account Error]:', err);
+    console.error(`[Check Account Error] correlationId=${req.correlationId}:`, err?.code || 'check_account_error');
     return res.status(500).json({ success: false, message: 'Failed to check account status.' });
   }
 });
 
 // 4. Endpoint: Set or Reset Login Passcode (requires recent OTP verification)
-app.post('/api/auth/set-passcode', async (req, res) => {
+app.post('/api/auth/set-passcode', authActionRateLimiter, async (req, res) => {
   try {
     const { phone, passcode, userRecord } = req.body || {};
     const clean10 = normalizeTenDigitPhone(phone);
@@ -555,11 +555,10 @@ app.post('/api/auth/set-passcode', async (req, res) => {
     const rawRole = String(userRecord?.role || existing?.role || 'customer').toLowerCase();
     // Never allow public onboarding/passcode setup to self-assign admin role
     const safeRole = rawRole === 'admin' ? (existing?.role === 'admin' ? 'admin' : 'customer') : rawRole;
-    const isTestPhone = clean10.startsWith('99999');
 
     // CRITICAL: New drivers/owners/fleet partners MUST start unverified until Admin approves them on backend
     const authoritativeVerified = isPartnerRole(safeRole)
-      ? (isTestPhone ? true : existing?.isVerified === true)
+      ? existing?.isVerified === true
       : true;
 
     const mergedUser = {
@@ -580,20 +579,20 @@ app.post('/api/auth/set-passcode', async (req, res) => {
     passcodeAttemptStore.delete(clean10);
     await upsertSupabaseRecords('vs_users', [mergedUser], { isAdmin: false });
 
-    console.log(`[Passcode Set] Login passcode configured for +91 ${clean10} (${mergedUser.role || 'customer'})`);
     return res.json({
       success: true,
       message: 'Login passcode saved! You can now sign in without OTP.',
+      sessionToken: issueUserSessionToken(mergedUser),
       user: sanitizeUserForClient(mergedUser)
     });
   } catch (err: any) {
-    console.error('[Set Passcode Error]:', err);
+    console.error(`[Set Passcode Error] correlationId=${req.correlationId}:`, err?.code || 'set_passcode_error');
     return res.status(500).json({ success: false, message: 'Failed to save login passcode.' });
   }
 });
 
 // 5. Endpoint: Sign In directly with Mobile Number + Passcode (No OTP required)
-app.post('/api/auth/login-passcode', async (req, res) => {
+app.post('/api/auth/login-passcode', loginRateLimiter, async (req, res) => {
   try {
     const { phone, passcode } = req.body || {};
     const clean10 = normalizeTenDigitPhone(phone);
@@ -655,19 +654,19 @@ app.post('/api/auth/login-passcode', async (req, res) => {
     }
 
     passcodeAttemptStore.delete(clean10);
-    console.log(`[Passcode Login] +91 ${clean10} authenticated without OTP.`);
     return res.json({
       success: true,
+      sessionToken: issueUserSessionToken(userRecord),
       user: sanitizeUserForClient(userRecord)
     });
   } catch (err: any) {
-    console.error('[Passcode Login Error]:', err);
+    console.error(`[Passcode Login Error] correlationId=${req.correlationId} code=${err?.code || 'login_passcode_error'}`);
     return res.status(500).json({ success: false, message: 'Internal server error verifying passcode.' });
   }
 });
 
-// 6. Endpoint: Reset Forgotten Passcode (requires verified OTP single-use resetToken)
-app.post('/api/auth/reset-passcode', async (req, res) => {
+// 6. Endpoint: Reset Forgotten Passcode (Rate limited: 3 attempts/hour/IP)
+app.post('/api/auth/reset-passcode', passwordResetRateLimiter, async (req, res) => {
   try {
     const { phone, newPasscode, resetToken, userRecord } = req.body || {};
     const clean10 = normalizeTenDigitPhone(phone);
@@ -681,7 +680,7 @@ app.post('/api/auth/reset-passcode', async (req, res) => {
       return res.status(400).json({ success: false, message: 'New passcode must be 4 to 6 numeric digits.' });
     }
 
-    // Verify single-use reset token (constant-time) OR fresh OTP verification window
+    // Strictly require the cryptographically random, single-use, 10-minute resetToken bound to clean10
     const storedTokenRecord = passcodeResetTokenStore.get(clean10);
     let tokenAuthorized = false;
     if (storedTokenRecord && Date.now() <= storedTokenRecord.expiresAt && providedToken) {
@@ -691,12 +690,11 @@ app.post('/api/auth/reset-passcode', async (req, res) => {
         tokenAuthorized = true;
       }
     }
-    const otpWindowValid = Date.now() <= (otpVerifiedStore.get(clean10) || 0);
 
-    if (!tokenAuthorized && !otpWindowValid) {
+    if (!tokenAuthorized) {
       return res.status(403).json({
         success: false,
-        message: 'OTP reset session expired. Please verify your mobile number via OTP again.'
+        message: 'Invalid or expired reset token. Please verify your mobile number via OTP to obtain a fresh reset token.'
       });
     }
 
@@ -724,81 +722,211 @@ app.post('/api/auth/reset-passcode', async (req, res) => {
       id: existing?.id || userRecord?.id || `usr_${clean10}`,
       name: existing?.name || userRecord?.name || 'Zuggi Member',
       phone: `+91 ${clean10}`,
-      role: existing?.role || userRecord?.role || 'customer',
+      role: existing?.role || (userRecord?.role === 'admin' ? 'customer' : userRecord?.role) || 'customer',
       hasPasscode: true,
       passcodeHash: hashed,
       passcodeUpdatedAt: now
     };
 
-    // Consume reset token and clear any brute-force lockout immediately
+    // Consume single-use reset token, revoke all previous sessions, and clear brute-force lockout
     passcodeResetTokenStore.delete(clean10);
     otpVerifiedStore.delete(clean10);
     passcodeAttemptStore.delete(clean10);
+    revokeUserSessions(mergedUser.id, clean10);
     passcodeUserStore.set(clean10, mergedUser);
     await upsertSupabaseRecords('vs_users', [mergedUser]);
 
-    console.log(`[Passcode Reset] Passcode reset via OTP for +91 ${clean10}`);
     return res.json({
       success: true,
       message: 'Passcode reset successfully! You can now sign in with your new passcode.',
+      sessionToken: issueUserSessionToken(mergedUser),
       user: sanitizeUserForClient(mergedUser)
     });
   } catch (err: any) {
-    console.error('[Reset Passcode Error]:', err);
+    console.error(`[Reset Passcode Error] correlationId=${req.correlationId} code=${err?.code || 'reset_passcode_error'}`);
     return res.status(500).json({ success: false, message: 'Failed to reset passcode. Please try again.' });
   }
 });
 
-// --- GOOGLE PLAY POLICY: ACCOUNT & DATA DELETION REQUEST ENDPOINT ---
+// --- ACCOUNT & PERSONAL DATA DELETION / ANONYMIZATION ENDPOINT ---
+// Stores only hashed phone reference (zero plaintext PII in deletion audit trail)
 const accountDeletionRequests: Array<{
   id: string;
-  phone: string;
-  reason: string;
+  phoneHash: string;
   source: string;
+  erasedImmediately: boolean;
   requestedAt: string;
 }> = [];
 
-app.post('/api/auth/request-account-deletion', async (req, res) => {
-  const { phone, reason, source } = req.body || {};
-  const digits = String(phone || '').replace(/\D/g, '');
+app.post('/api/auth/request-account-deletion', authActionRateLimiter, async (req, res) => {
+  const { phone, resetToken, source } = req.body || {};
+  const callerSession = verifyUserTokenFromReq(req);
+  const digits = String(phone || callerSession?.phone10 || '').replace(/\D/g, '');
   const clean10 = digits.length > 10 && digits.startsWith('91') ? digits.slice(2) : digits.slice(-10);
 
-  if (clean10.length !== 10) {
+  if (clean10.length !== 10 && !callerSession?.userId) {
     return res.status(400).json({
       success: false,
       message: 'Please provide a valid 10-digit registered mobile number.'
     });
   }
 
+  // Require proof of account ownership (either active user session token OR verified OTP reset token)
+  const ownsViaSession = Boolean(
+    callerSession && (!clean10 || !callerSession.phone10 || callerSession.phone10 === clean10)
+  );
+  let ownsViaOtp = false;
+  if (clean10) {
+    const storedTokenRecord = passcodeResetTokenStore.get(clean10);
+    const providedToken = String(resetToken || '').trim();
+    if (storedTokenRecord && Date.now() <= storedTokenRecord.expiresAt && providedToken) {
+      const a = Buffer.from(storedTokenRecord.token);
+      const b = Buffer.from(providedToken);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        ownsViaOtp = true;
+      }
+    }
+    if (!ownsViaOtp && Date.now() <= (otpVerifiedStore.get(clean10) || 0)) {
+      ownsViaOtp = true;
+    }
+  }
+
+  if (!ownsViaSession && !ownsViaOtp) {
+    return res.status(401).json({
+      success: false,
+      code: 'OTP_VERIFICATION_REQUIRED',
+      message: 'Please verify ownership of your mobile number via OTP (or sign in) before deleting your account.'
+    });
+  }
+
   const refId = `DEL-ZUG-${Date.now().toString().slice(-6)}`;
-  const entry = {
+  const targetUserId = callerSession?.userId || passcodeUserStore.get(clean10)?.id;
+  const phoneHash = clean10
+    ? crypto.createHash('sha256').update(`zuggi_del:${clean10}`).digest('hex').slice(0, 16)
+    : 'session_only';
+
+  // 1. Immediately purge server-side auth stores & active sessions
+  if (clean10) {
+    passcodeUserStore.delete(clean10);
+    passcodeResetTokenStore.delete(clean10);
+    passcodeAttemptStore.delete(clean10);
+    otpVerifiedStore.delete(clean10);
+    otpStore.delete(`+91${clean10}`);
+
+    // 2. Purge matching contact inquiries & trip/driver phone records
+    for (let i = contactInquiries.length - 1; i >= 0; i--) {
+      if (contactInquiries[i].phone.replace(/\D/g, '').endsWith(clean10)) {
+        contactInquiries.splice(i, 1);
+      }
+    }
+    anonymizeDriverDataByPhone(clean10);
+  }
+  revokeUserSessions(targetUserId, clean10);
+
+  // 3. Permanently delete user & vehicles and anonymize personal fields in Supabase
+  const dbErasure = await deleteAndAnonymizeUserDataInSupabase(clean10, targetUserId);
+
+  accountDeletionRequests.unshift({
     id: refId,
-    phone: `+91 ${clean10}`,
-    reason: String(reason || 'User requested account deletion').trim().slice(0, 500),
-    source: String(source || 'web_delete_account').trim(),
+    phoneHash,
+    source: String(source || 'web_delete_account').trim().slice(0, 60),
+    erasedImmediately: true,
     requestedAt: new Date().toISOString()
-  };
-
-  accountDeletionRequests.unshift(entry);
-  passcodeUserStore.delete(clean10);
-  passcodeResetTokenStore.delete(clean10);
-  passcodeAttemptStore.delete(clean10);
-  otpVerifiedStore.delete(clean10);
-
-  console.log(`[ACCOUNT DELETION REQUEST] ${refId} | ${entry.phone} | source=${entry.source}`);
+  });
 
   return res.json({
     success: true,
     referenceId: refId,
+    erasedImmediately: true,
+    summary: dbErasure,
     message:
-      'Your Zuggi account deletion request has been logged. Login access is revoked immediately and personal profile/KYC data will be permanently erased within 7 working days (excluding statutory GST/tax invoices required by Indian law).'
+      'Your Zuggi account has been deleted immediately. Personal profile, login credentials, vehicles, and contact records have been erased or anonymized (statutory GST/tax invoice amounts remain archived per Indian law).'
   });
 });
 
-// 7. Endpoint: Issue in-memory Admin Session Bearer Token for backend approvals
+// 7. Endpoint: Super Admin First-Run Setup & In-Memory Session Bearer Token
 const adminLoginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+let claimedAdminPasscodeHash: string | null = null;
 
-app.post('/api/auth/admin-session', (req, res) => {
+async function resolveClaimedAdminPasscodeHash(): Promise<string | null> {
+  if (claimedAdminPasscodeHash) return claimedAdminPasscodeHash;
+  const ownerDoc = await findSupabaseUserById('owner_baruahg39');
+  if (ownerDoc && typeof ownerDoc.adminPasscodeHash === 'string' && ownerDoc.adminPasscodeHash.startsWith('scrypt:')) {
+    claimedAdminPasscodeHash = ownerDoc.adminPasscodeHash;
+    return claimedAdminPasscodeHash;
+  }
+  return null;
+}
+
+app.get('/api/auth/admin-status', async (_req, res) => {
+  const configured = Boolean((process.env.ZUGGI_ADMIN_PASSCODE || '').trim());
+  const claimed = Boolean(await resolveClaimedAdminPasscodeHash());
+  return res.json({
+    success: true,
+    configured,
+    claimed,
+    requiresSetup: !configured && !claimed
+  });
+});
+
+app.post('/api/auth/admin-claim', loginRateLimiter, async (req, res) => {
+  const configuredPasscode = (process.env.ZUGGI_ADMIN_PASSCODE || '').trim();
+  const existingClaim = await resolveClaimedAdminPasscodeHash();
+
+  if (configuredPasscode || existingClaim) {
+    return res.status(409).json({
+      success: false,
+      message: 'Super Admin credential is already configured. Please sign in with your passcode.'
+    });
+  }
+
+  const { email, passcode } = req.body || {};
+  const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || 'baruahg39@gmail.com').trim().toLowerCase();
+  const providedEmail = String(email || '').trim().toLowerCase();
+  const providedPasscode = String(passcode || '').trim();
+
+  if (providedEmail !== ownerEmail) {
+    return res.status(403).json({ success: false, message: 'Unauthorized admin identity.' });
+  }
+  if (providedPasscode.length < 8) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please choose a Super Admin passcode of at least 8 characters.'
+    });
+  }
+
+  const hashed = hashPasscode(providedPasscode);
+  claimedAdminPasscodeHash = hashed;
+
+  // Persist hashed admin credential if Supabase is configured (non-blocking if unconfigured)
+  const existingOwner = (await findSupabaseUserById('owner_baruahg39')) || {
+    id: 'owner_baruahg39',
+    name: 'G. Baruah (Platform Owner)',
+    email: ownerEmail,
+    role: 'admin',
+    isVerified: true,
+    createdAt: '2026-01-01T00:00:00Z'
+  };
+  await upsertSupabaseRecords(
+    'vs_users',
+    [
+      {
+        ...existingOwner,
+        role: 'admin',
+        email: ownerEmail,
+        isVerified: true,
+        adminPasscodeHash: hashed,
+        adminPasscodeUpdatedAt: new Date().toISOString()
+      }
+    ],
+    { isAdmin: true }
+  );
+
+  const token = issueAdminSessionToken(ownerEmail);
+  return res.json({ success: true, token });
+});
+
+app.post('/api/auth/admin-session', loginRateLimiter, async (req, res) => {
   const clientKey = String(req.ip || req.headers['x-forwarded-for'] || 'local').split(',')[0].trim();
   const attemptState = adminLoginAttempts.get(clientKey);
   if (attemptState && attemptState.lockedUntil > Date.now()) {
@@ -828,6 +956,11 @@ app.post('/api/auth/admin-session', (req, res) => {
     return res.status(403).json({ success: false, message: 'Unauthorized admin identity.' });
   }
 
+  if (!providedPasscode) {
+    recordFailure();
+    return res.status(401).json({ success: false, message: 'Admin credential required.' });
+  }
+
   if (configuredPasscode) {
     const a = Buffer.from(providedPasscode);
     const b = Buffer.from(configuredPasscode);
@@ -835,22 +968,56 @@ app.post('/api/auth/admin-session', (req, res) => {
       recordFailure();
       return res.status(401).json({ success: false, message: 'Invalid admin passcode.' });
     }
-  } else if (!providedPasscode) {
-    recordFailure();
-    return res.status(401).json({ success: false, message: 'Admin credential required.' });
+  } else {
+    const claimedHash = await resolveClaimedAdminPasscodeHash();
+    if (!claimedHash) {
+      return res.status(409).json({
+        success: false,
+        code: 'ADMIN_SETUP_REQUIRED',
+        message: 'Super Admin passcode is not initialized yet. Complete first-run setup or configure ZUGGI_ADMIN_PASSCODE.'
+      });
+    }
+    if (!verifyPasscodeHash(providedPasscode, claimedHash)) {
+      recordFailure();
+      return res.status(401).json({ success: false, message: 'Invalid admin passcode.' });
+    }
   }
 
   adminLoginAttempts.delete(clientKey);
-  const token = crypto.randomBytes(32).toString('hex');
-  adminSessionTokens.add(token);
+  const token = issueAdminSessionToken(ownerEmail);
   return res.json({ success: true, token });
 });
 
-// 8. Endpoint: Authoritative Partner Verification Status (checked by Driver/Owner app)
+// 8. Endpoint: Authoritative Partner Verification Status (Auth + Ownership Verified — No IDOR)
 app.get('/api/partner/verification-status', async (req, res) => {
   try {
-    const userId = String(req.query.userId || '').trim();
-    const clean10 = normalizeTenDigitPhone(String(req.query.phone || ''));
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to check partner verification status.'
+      });
+    }
+
+    const requestedUserId = String(req.query.userId || '').trim();
+    const requestedClean10 = normalizeTenDigitPhone(String(req.query.phone || ''));
+
+    // Non-admin callers may ONLY query their own verification status
+    if (!isAdmin && callerSession) {
+      const idMismatch = Boolean(requestedUserId && callerSession.userId && requestedUserId !== callerSession.userId);
+      const phoneMismatch = Boolean(requestedClean10 && callerSession.phone10 && requestedClean10 !== callerSession.phone10);
+      if (idMismatch || phoneMismatch) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You may only access your own verification status.'
+        });
+      }
+    }
+
+    const userId = isAdmin ? requestedUserId : (callerSession?.userId || requestedUserId);
+    const clean10 = isAdmin ? requestedClean10 : (callerSession?.phone10 || requestedClean10);
 
     if (!userId && !clean10) {
       return res.status(400).json({ success: false, message: 'userId or phone is required.' });
@@ -900,7 +1067,7 @@ app.get('/api/partner/verification-status', async (req, res) => {
       status: isBlocked ? 'SUSPENDED' : isVerified ? 'APPROVED' : 'PENDING_APPROVAL'
     });
   } catch (err: any) {
-    console.error('[Partner Verification Status Error]:', err);
+    console.error(`[Partner Verification Status Error] correlationId=${req.correlationId} code=${err?.code || 'status_error'}`);
     return res.status(500).json({ success: false, message: 'Failed to check verification status.' });
   }
 });
@@ -958,11 +1125,6 @@ app.post('/api/admin/partners/verify', async (req, res) => {
         await upsertSupabaseRecords('vs_vehicles', nextVehicles, { isAdmin: true });
       }
 
-      console.log(
-        `[ADMIN PARTNER VERIFY] ${updatedUser.name || updatedUser.id} (${updatedUser.phone || ''}) -> ${
-          isApproved ? 'APPROVED' : 'PENDING/REVOKED'
-        }`
-      );
       return res.json({
         success: true,
         isVerified: isApproved,
@@ -975,7 +1137,7 @@ app.post('/api/admin/partners/verify', async (req, res) => {
 
     return res.json({ success: true, isVerified: isApproved });
   } catch (err: any) {
-    console.error('[Admin Partner Verify Error]:', err);
+    console.error(`[Admin Partner Verify Error] correlationId=${req.correlationId} code=${err?.code || 'partner_verify_error'}`);
     return res.status(500).json({ success: false, message: 'Failed to update partner verification.' });
   }
 });
@@ -1102,6 +1264,36 @@ Use markdown with clean headings and bullet points.`;
 
 // --- CASHFREE PAYMENTS EASY SPLIT SECURE SERVER ENDPOINTS ---
 
+const PLATFORM_COMMISSION_RATE = 0.05; // 5% platform commission
+const GST_ON_COMMISSION_RATE = 0.18; // 18% GST on platform commission (SAC 9965)
+
+interface ServerPaymentOrderRecord {
+  orderId: string;
+  bookingId?: string;
+  stage: 'advance_90' | 'balance_10';
+  ownerUserId: string;
+  expectedAmountInr: number;
+  commissionInr: number;
+  gstOnCommissionInr: number;
+  driverNetPayoutInr: number;
+  driverVendorId?: string;
+  status: 'ACTIVE' | 'PAID' | 'FAILED';
+  verifiedByGateway: boolean;
+  createdAt: string;
+  paidAt?: string;
+}
+
+const serverPaymentOrders = new Map<string, ServerPaymentOrderRecord>();
+
+function computeServerSideEscrowBreakdown(baseFreightInr: number, stage: 'advance_90' | 'balance_10') {
+  const stageRatio = stage === 'advance_90' ? 0.9 : 0.1;
+  const stageGrossInr = Math.round(baseFreightInr * stageRatio);
+  const commissionInr = Math.round(stageGrossInr * PLATFORM_COMMISSION_RATE);
+  const gstOnCommissionInr = Math.round(commissionInr * GST_ON_COMMISSION_RATE);
+  const driverNetPayoutInr = Math.max(0, stageGrossInr - commissionInr - gstOnCommissionInr);
+  return { stageGrossInr, commissionInr, gstOnCommissionInr, driverNetPayoutInr };
+}
+
 app.get('/api/payments/cashfree/config', (_req, res) => {
   res.json({
     success: true,
@@ -1114,52 +1306,246 @@ app.get('/api/payments/cashfree/config', (_req, res) => {
 
 app.post('/api/payments/cashfree/create-order', async (req, res) => {
   try {
-    const { orderId, orderAmount, customerDetails, orderNote, orderSplits } = req.body;
-
-    if (!orderId || !orderAmount || !customerDetails) {
-      return res.status(400).json({
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({
         success: false,
-        message: 'Missing required parameters: orderId, orderAmount, and customerDetails are mandatory.'
+        message: 'Authentication required to initiate a payment order.'
       });
     }
 
+    const { orderId, bookingId, stage, orderAmount, customerDetails, orderNote } = req.body || {};
+
+    if (!orderId || !customerDetails) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: orderId and customerDetails are mandatory.'
+      });
+    }
+
+    const cleanOrderId = String(orderId).trim().slice(0, 64);
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(cleanOrderId)) {
+      return res.status(400).json({ success: false, message: 'Invalid orderId format.' });
+    }
+
+    const resolvedStage: 'advance_90' | 'balance_10' =
+      stage === 'balance_10' || cleanOrderId.includes('balance_10') ? 'balance_10' : 'advance_90';
+
+    let authoritativeAmount = 0;
+    let authoritativeDriverVendorId: string | undefined;
+    let breakdown = { stageGrossInr: 0, commissionInr: 0, gstOnCommissionInr: 0, driverNetPayoutInr: 0 };
+
+    // Always derive authoritative price, tax, and split from server-side booking record when available
+    const cleanBookingId = bookingId ? String(bookingId).trim() : '';
+    const dbBooking = cleanBookingId ? await findSupabaseBookingById(cleanBookingId) : null;
+
+    if (dbBooking) {
+      if (!isAdmin && callerSession && String(dbBooking.customerId || '') !== callerSession.userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You may only initiate payments for your own booking.'
+        });
+      }
+      const totalAgreed = Number(dbBooking.totalAgreedAmountInr || 0);
+      if (!Number.isFinite(totalAgreed) || totalAgreed < 100) {
+        return res.status(400).json({ success: false, message: 'Booking freight amount is invalid.' });
+      }
+      breakdown = computeServerSideEscrowBreakdown(totalAgreed, resolvedStage);
+      authoritativeAmount = breakdown.stageGrossInr;
+
+      // Reject tampered client amounts
+      if (orderAmount !== undefined && Math.abs(Number(orderAmount) - authoritativeAmount) > 1) {
+        return res.status(400).json({
+          success: false,
+          code: 'PRICE_MISMATCH',
+          message: 'Submitted payment amount does not match server-calculated booking total.'
+        });
+      }
+
+      if (dbBooking.driverId || dbBooking.transporterId) {
+        const payeeId = String(dbBooking.driverId || dbBooking.transporterId).replace(/[^a-zA-Z0-9_-]/g, '_');
+        authoritativeDriverVendorId = `vnd_${payeeId}`;
+      }
+    } else {
+      // Production requires an authoritative booking record; non-production enforces strict bounds & server-side split math
+      if (IS_PRODUCTION) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid server-registered bookingId is required to create a payment order in production.'
+        });
+      }
+      const submittedAmount = Math.round(Number(orderAmount));
+      if (!Number.isFinite(submittedAmount) || submittedAmount < 100 || submittedAmount > 5_000_000) {
+        return res.status(400).json({
+          success: false,
+          message: 'Order amount must be between ₹100 and ₹50,00,000.'
+        });
+      }
+      const commissionInr = Math.round(submittedAmount * PLATFORM_COMMISSION_RATE);
+      const gstOnCommissionInr = Math.round(commissionInr * GST_ON_COMMISSION_RATE);
+      const driverNetPayoutInr = Math.max(0, submittedAmount - commissionInr - gstOnCommissionInr);
+      breakdown = { stageGrossInr: submittedAmount, commissionInr, gstOnCommissionInr, driverNetPayoutInr };
+      authoritativeAmount = submittedAmount;
+    }
+
+    const ownerUserId = isAdmin
+      ? String(customerDetails.customer_id || 'owner_baruahg39')
+      : callerSession!.userId;
+
+    // Data minimization: bind customer_id to authenticated identity
+    const minimalCustomerDetails = {
+      customer_id: ownerUserId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50),
+      customer_name: String(customerDetails.customer_name || 'Zuggi Customer').trim().slice(0, 100),
+      customer_email: String(customerDetails.customer_email || 'customer@zuggi.in').trim().slice(0, 100),
+      customer_phone: String(customerDetails.customer_phone || callerSession?.phone10 || '').replace(/\D/g, '').slice(-10)
+    };
+
+    // Never trust client-supplied orderSplits: compute splits strictly server-side
+    const serverCalculatedSplits =
+      authoritativeDriverVendorId && breakdown.driverNetPayoutInr > 0
+        ? [{ vendor_id: authoritativeDriverVendorId, amount: breakdown.driverNetPayoutInr }]
+        : undefined;
+
     const orderResponse = await cashfreeServer.createOrder({
-      orderId,
-      orderAmount: Number(orderAmount),
-      customerDetails,
-      orderNote: orderNote || 'Zuggi Freight Escrow Payment',
-      orderSplits
+      orderId: cleanOrderId,
+      orderAmount: authoritativeAmount,
+      customerDetails: minimalCustomerDetails,
+      orderNote: String(orderNote || `Zuggi Escrow (${resolvedStage})`).slice(0, 120),
+      orderSplits: serverCalculatedSplits
+    });
+
+    serverPaymentOrders.set(cleanOrderId, {
+      orderId: cleanOrderId,
+      bookingId: cleanBookingId || undefined,
+      stage: resolvedStage,
+      ownerUserId,
+      expectedAmountInr: authoritativeAmount,
+      commissionInr: breakdown.commissionInr,
+      gstOnCommissionInr: breakdown.gstOnCommissionInr,
+      driverNetPayoutInr: breakdown.driverNetPayoutInr,
+      driverVendorId: authoritativeDriverVendorId,
+      status: 'ACTIVE',
+      verifiedByGateway: false,
+      createdAt: new Date().toISOString()
     });
 
     res.json({
       success: true,
-      data: orderResponse
+      data: {
+        ...orderResponse,
+        serverCalculated: {
+          orderAmountInr: authoritativeAmount,
+          commissionInr: breakdown.commissionInr,
+          gstOnCommissionInr: breakdown.gstOnCommissionInr,
+          driverNetPayoutInr: breakdown.driverNetPayoutInr
+        }
+      }
     });
   } catch (error: any) {
-    console.error('Error creating Cashfree order:', error);
+    console.error(`[Create Cashfree Order Error] correlationId=${req.correlationId} code=${error?.code || 'order_error'}`);
     res.status(500).json({
       success: false,
-      message: error.message || 'Internal server error creating payment order.'
+      message: 'Internal server error creating payment order.'
     });
   }
 });
 
 app.post('/api/payments/cashfree/verify-order', async (req, res) => {
   try {
-    const { orderId } = req.body;
-    if (!orderId) {
-      return res.status(400).json({ success: false, message: 'orderId is required.' });
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({ success: false, message: 'Authentication required to verify a payment order.' });
     }
-    const orderData = await cashfreeServer.getOrder(orderId);
-    res.json({ success: true, data: orderData });
+
+    const cleanOrderId = String(req.body?.orderId || '').trim().slice(0, 64);
+    if (!cleanOrderId || !/^[a-zA-Z0-9_-]{3,64}$/.test(cleanOrderId)) {
+      return res.status(400).json({ success: false, message: 'Valid orderId is required.' });
+    }
+
+    const trackedOrder = serverPaymentOrders.get(cleanOrderId);
+    if (trackedOrder && !isAdmin && callerSession && trackedOrder.ownerUserId !== callerSession.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: You may only verify your own payment orders.'
+      });
+    }
+
+    // If webhook already verified payment server-side, return authoritative PAID record
+    if (trackedOrder?.status === 'PAID' && trackedOrder.verifiedByGateway) {
+      return res.json({
+        success: true,
+        data: {
+          order_id: cleanOrderId,
+          order_status: 'PAID',
+          verified: true,
+          order_amount: trackedOrder.expectedAmountInr,
+          paid_at: trackedOrder.paidAt
+        }
+      });
+    }
+
+    const orderData: any = await cashfreeServer.getOrder(cleanOrderId);
+    const gatewayPaid =
+      orderData?.order_status === 'PAID' &&
+      orderData?.verified === true &&
+      (!trackedOrder || Math.abs(Number(orderData?.order_amount ?? trackedOrder.expectedAmountInr) - trackedOrder.expectedAmountInr) <= 1);
+
+    if (gatewayPaid && trackedOrder) {
+      trackedOrder.status = 'PAID';
+      trackedOrder.verifiedByGateway = true;
+      trackedOrder.paidAt = new Date().toISOString();
+    }
+
+    res.json({
+      success: true,
+      data: {
+        ...orderData,
+        verified: gatewayPaid
+      }
+    });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`[Verify Cashfree Order Error] correlationId=${req.correlationId} code=${error?.code || 'verify_error'}`);
+    res.status(500).json({ success: false, message: 'Failed to verify payment order.' });
   }
+});
+
+app.get('/api/payments/cashfree/order-status/:orderId', (req, res) => {
+  const isAdmin = verifyAdminTokenFromReq(req);
+  const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+  if (!isAdmin && !callerSession) {
+    return res.status(401).json({ success: false, message: 'Authentication required.' });
+  }
+  const cleanOrderId = String(req.params.orderId || '').trim();
+  const trackedOrder = serverPaymentOrders.get(cleanOrderId);
+  if (!trackedOrder) {
+    return res.status(404).json({ success: false, message: 'Payment order not found.' });
+  }
+  if (!isAdmin && callerSession && trackedOrder.ownerUserId !== callerSession.userId) {
+    return res.status(403).json({ success: false, message: 'Forbidden: Order belongs to another user.' });
+  }
+  return res.json({
+    success: true,
+    orderId: trackedOrder.orderId,
+    status: trackedOrder.status,
+    verifiedPaid: trackedOrder.status === 'PAID' && trackedOrder.verifiedByGateway,
+    expectedAmountInr: trackedOrder.expectedAmountInr
+  });
 });
 
 app.post('/api/payments/cashfree/register-vendor', async (req, res) => {
   try {
-    const { vendor_id, name, email, phone, bank_account_number, bank_ifsc, upi_vpa, pan, verify_account } = req.body;
+    const isAdmin = verifyAdminTokenFromReq(req);
+    const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
+    if (!isAdmin && !callerSession) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required to register payout vendor details.'
+      });
+    }
+
+    const { vendor_id, name, email, phone, bank_account_number, bank_ifsc, upi_vpa, pan, verify_account } = req.body || {};
 
     if (!vendor_id || !name || !email || !phone) {
       return res.status(400).json({
@@ -1168,43 +1554,75 @@ app.post('/api/payments/cashfree/register-vendor', async (req, res) => {
       });
     }
 
+    const cleanVendorId = String(vendor_id).trim().slice(0, 50);
+    // Prevent IDOR payout hijacking: non-admin drivers can only register/update their own vendor ID
+    if (!isAdmin && callerSession) {
+      const expectedVendorId = `vnd_${callerSession.userId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      if (cleanVendorId !== expectedVendorId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden: You may only update payout details for your own partner account.'
+        });
+      }
+    }
+
+    // Data minimization: forward only either bank details OR UPI VPA (never redundant payout fields)
+    const hasBank = Boolean(bank_account_number && bank_ifsc);
     const vendorResponse = await cashfreeServer.registerVendor({
-      vendor_id,
-      name,
-      email,
-      phone,
-      bank_account_number,
-      bank_ifsc,
-      upi_vpa,
-      pan,
-      verify_account
+      vendor_id: cleanVendorId,
+      name: String(name).trim().slice(0, 100),
+      email: String(email).trim().slice(0, 100),
+      phone: String(phone).replace(/\D/g, '').slice(-10),
+      bank_account_number: hasBank ? String(bank_account_number).replace(/\s+/g, '') : undefined,
+      bank_ifsc: hasBank ? String(bank_ifsc).trim().toUpperCase() : undefined,
+      upi_vpa: !hasBank && upi_vpa ? String(upi_vpa).trim() : undefined,
+      pan: pan ? String(pan).trim().toUpperCase().slice(0, 10) : undefined,
+      verify_account: verify_account !== false
     });
 
     res.json({ success: true, data: vendorResponse });
   } catch (error: any) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`[Register Cashfree Vendor Error] correlationId=${req.correlationId} code=${error?.code || 'vendor_error'}`);
+    res.status(500).json({ success: false, message: 'Failed to register payout vendor.' });
   }
 });
 
 app.post('/api/payments/cashfree/webhook', (req, res) => {
   try {
-    const signature = req.headers['x-webhook-signature'] as string || '';
-    const timestamp = req.headers['x-webhook-timestamp'] as string || '';
+    const signature = (req.headers['x-webhook-signature'] as string) || '';
+    const timestamp = (req.headers['x-webhook-timestamp'] as string) || '';
     const rawBody = (req as any).rawBody || JSON.stringify(req.body);
 
     const isValid = cashfreeServer.verifyWebhook(signature, timestamp, rawBody);
     if (!isValid) {
-      console.warn('Unauthorized webhook signature mismatch from Cashfree');
-      return res.status(400).json({ success: false, message: 'Invalid webhook signature' });
+      console.warn(`[Cashfree Webhook Rejected] correlationId=${req.correlationId} invalid_signature_or_timestamp`);
+      return res.status(401).json({ success: false, message: 'Invalid webhook signature or expired timestamp.' });
     }
 
-    const event = req.body;
-    console.log(`[Cashfree Webhook Verified] Event: ${event?.type || 'PAYMENT_EVENT'}, Order: ${event?.data?.order?.order_id}`);
+    const event = req.body || {};
+    const eventType = String(event?.type || '');
+    const orderId = String(event?.data?.order?.order_id || '').trim();
+    const paidAmount = Number(event?.data?.order?.order_amount || event?.data?.payment?.payment_amount || 0);
+    const paymentStatus = String(event?.data?.payment?.payment_status || event?.data?.order?.order_status || '').toUpperCase();
+
+    if (orderId && (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || paymentStatus === 'SUCCESS' || paymentStatus === 'PAID')) {
+      const tracked = serverPaymentOrders.get(orderId);
+      if (tracked) {
+        if (paidAmount > 0 && Math.abs(paidAmount - tracked.expectedAmountInr) <= 1) {
+          tracked.status = 'PAID';
+          tracked.verifiedByGateway = true;
+          tracked.paidAt = new Date().toISOString();
+        } else {
+          tracked.status = 'FAILED';
+          tracked.verifiedByGateway = false;
+        }
+      }
+    }
 
     res.status(200).json({ success: true, received: true });
   } catch (err: any) {
-    console.error('Webhook processing error:', err);
-    res.status(500).json({ success: false, message: err.message });
+    console.error(`[Cashfree Webhook Error] correlationId=${req.correlationId}:`, err?.code || 'webhook_error');
+    res.status(500).json({ success: false, message: 'Failed to process payment webhook.' });
   }
 });
 
@@ -1315,8 +1733,8 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
             place_id: first.place_id
           });
         }
-      } catch (err) {
-        console.warn('[Reverse Geocode Notice] Live API fallback invoked:', err);
+      } catch {
+        console.warn('[Reverse Geocode Notice] Live API fallback invoked.');
       }
     }
 
@@ -1354,8 +1772,8 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
           });
         }
       }
-    } catch (osmErr) {
-      console.warn('[Reverse Geocode OSM Notice]:', osmErr);
+    } catch {
+      console.warn('[Reverse Geocode OSM Notice] Fallback invoked.');
     }
 
     // Final coordinate fallback if offline
@@ -1371,8 +1789,8 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
       state: nearest.state
     });
   } catch (error: any) {
-    console.error('[Reverse Geocode Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Geocoding service unavailable' });
+    console.error('[Reverse Geocode Error]', error?.code || 'geocode_error');
+    res.status(500).json({ success: false, message: 'Geocoding service unavailable.' });
   }
 });
 
@@ -1437,8 +1855,8 @@ app.post('/api/maps/compute-route', async (req, res) => {
             description: r.description || 'Fastest Route via Commercial Highway'
           });
         }
-      } catch (routesErr) {
-        console.warn('[Routes API Notice] Live API fallback invoked:', routesErr);
+      } catch {
+        console.warn('[Routes API Notice] Live API fallback invoked.');
       }
     }
 
@@ -1464,8 +1882,8 @@ app.post('/api/maps/compute-route', async (req, res) => {
       description: 'Calculated via National Highway Commercial Corridor'
     });
   } catch (error: any) {
-    console.error('[Compute Route Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Routing computation failed' });
+    console.error('[Compute Route Error]', error?.code || 'route_error');
+    res.status(500).json({ success: false, message: 'Routing computation failed.' });
   }
 });
 
@@ -1609,8 +2027,8 @@ app.post('/api/maps/route-matrix', async (req, res) => {
             });
           }
         }
-      } catch (matrixErr) {
-        console.warn('[Route Matrix API Notice] Falling back to GPS estimate:', matrixErr);
+      } catch {
+        console.warn('[Route Matrix API Notice] Falling back to GPS estimate.');
       }
     }
 
@@ -1646,8 +2064,8 @@ app.post('/api/maps/route-matrix', async (req, res) => {
       calculatedAt
     });
   } catch (error: any) {
-    console.error('[Route Matrix Error]', error);
-    res.status(500).json({ success: false, message: error.message || 'Route matrix computation failed.' });
+    console.error('[Route Matrix Error]', error?.code || 'route_matrix_error');
+    res.status(500).json({ success: false, message: 'Route matrix computation failed.' });
   }
 });
 
@@ -1675,7 +2093,8 @@ app.get('/api/public/freight', async (_req, res) => {
       vehicles: SEO_VEHICLE_CATEGORIES
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Failed to load public freight catalog' });
+    console.error('[Public Freight Catalog Error]', err?.code || 'catalog_error');
+    return res.status(500).json({ success: false, message: 'Failed to load public freight catalog.' });
   }
 });
 
@@ -1696,7 +2115,8 @@ app.get('/api/public/freight/:loadId', async (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
     return res.json({ success: true, listing, related });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Failed to fetch freight listing' });
+    console.error('[Public Freight Item Error]', err?.code || 'catalog_item_error');
+    return res.status(500).json({ success: false, message: 'Failed to fetch freight listing.' });
   }
 });
 
@@ -1733,8 +2153,8 @@ app.get('/sitemap.xml', async (_req, res) => {
     res.type('application/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=900, stale-while-revalidate=1800');
     res.send(xml);
-  } catch (err) {
-    console.error('[Sitemap Generator Error]', err);
+  } catch {
+    console.error('[Sitemap Generator Error] Fallback sitemap served.');
     const fallbackXml = generateSiteSitemapXml(CANONICAL_BASE_URL, mergePublicFreightListings([]));
     res.type('application/xml; charset=utf-8');
     res.send(fallbackXml);
@@ -1748,8 +2168,8 @@ app.get('/sitemap-freight.xml', async (_req, res) => {
     res.type('application/xml; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=600, stale-while-revalidate=1200');
     res.send(xml);
-  } catch (err) {
-    console.error('[Freight Sitemap Error]', err);
+  } catch {
+    console.error('[Freight Sitemap Error] Fallback freight sitemap served.');
     const fallbackXml = generateFreightOnlySitemapXml(CANONICAL_BASE_URL, mergePublicFreightListings([]));
     res.type('application/xml; charset=utf-8');
     res.send(fallbackXml);
@@ -1853,14 +2273,17 @@ if (process.env.NODE_ENV !== 'production') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
       return res.send(html);
-    } catch (err) {
-      console.error('[SSR SEO Render Fallback]', err);
+    } catch (err: any) {
+      console.error(`[SSR SEO Render Fallback] correlationId=${req.correlationId} code=${err?.code || 'ssr_error'}`);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.sendFile(distIndexPath);
     }
   });
 }
 
+// Global error-handling middleware: returns generic message + correlationId (never stack traces or internals)
+app.use(globalErrorHandler);
+
 app.listen(port, '0.0.0.0', () => {
-  console.log(`Zuggi Freight Server running on http://0.0.0.0:${port}`);
+  console.info(`Zuggi Freight Server listening on port ${port} (${IS_PRODUCTION ? 'production' : 'development'})`);
 });

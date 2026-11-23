@@ -67,7 +67,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const [selectedTrackTripId, setSelectedTrackTripId] = useState<string>('trip_demo_01');
   const [showDriverSimulator, setShowDriverSimulator] = useState<boolean>(false);
   const [simulatorTripId, setSimulatorTripId] = useState<string>('trip_demo_01');
-  const [simulatorToken, setSimulatorToken] = useState<string>('trk_sec_993821739182371928371923');
+  const [simulatorToken, setSimulatorToken] = useState<string>('');
   const [paymentModalTarget, setPaymentModalTarget] = useState<{
     booking: Booking;
     stage: 'advance_90' | 'balance_10';

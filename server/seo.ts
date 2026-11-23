@@ -2,10 +2,18 @@
  * Zuggi Freight — Server-Side SEO Engine
  * - Site-wide dynamic XML sitemap generator (/sitemap.xml, /sitemap-freight.xml)
  * - Route-specific meta tags, canonical URLs, OpenGraph & Twitter Cards
- * - Schema.org JSON-LD Structured Data for individual freight listings,
+ * - Schema.org JSON-LD Structured Data for SEO landing pages, freight listings,
  *   freight directory, freight corridors, and vehicle categories
- * - Crawler-ready semantic HTML pre-render injection
+ * - Crawler-ready semantic HTML pre-render injection & true HTTP 404 handling
  */
+
+import {
+  SEO_LANDING_PAGES,
+  SEO_LANDING_PAGE_BY_SLUG,
+  findSeoLandingPage,
+  getFactualVehiclesByIds,
+  type SeoLandingPageConfig
+} from '../src/data/seoLandingPages.js';
 
 export interface PublicFreightListing {
   id: string;
@@ -619,6 +627,17 @@ export function buildSitemapEntries(baseUrl: string, listings: PublicFreightList
   // 1. Core canonical pages (zero #fragments — every URL is crawlable)
   push({ loc: `${cleanBase}/`, lastmod: today, changefreq: 'daily', priority: '1.0' });
   push({ loc: `${cleanBase}/freight`, lastmod: today, changefreq: 'hourly', priority: '0.95' });
+
+  // 1b. Dedicated Regional & Commercial Freight SEO Landing Pages
+  for (const page of SEO_LANDING_PAGES) {
+    push({
+      loc: `${cleanBase}${page.slug}`,
+      lastmod: today,
+      changefreq: 'weekly',
+      priority: '0.9'
+    });
+  }
+
   push({ loc: `${cleanBase}/corridors`, lastmod: today, changefreq: 'weekly', priority: '0.85' });
   push({ loc: `${cleanBase}/fleet`, lastmod: today, changefreq: 'weekly', priority: '0.85' });
   push({ loc: `${cleanBase}/partner`, lastmod: today, changefreq: 'weekly', priority: '0.85' });
@@ -960,7 +979,7 @@ export function buildVehicleCategoryJsonLd(baseUrl: string, vehicle: SeoVehicleC
         '@type': 'BreadcrumbList',
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Home', item: `${cleanBase}/` },
-          { '@type': 'ListItem', position: 2, name: '5,000+ Verified Fleet', item: `${cleanBase}/fleet` },
+          { '@type': 'ListItem', position: 2, name: 'Commercial Fleet Network', item: `${cleanBase}/fleet` },
           { '@type': 'ListItem', position: 3, name: vehicle.name, item: canonicalUrl }
         ]
       }
@@ -968,18 +987,220 @@ export function buildVehicleCategoryJsonLd(baseUrl: string, vehicle: SeoVehicleC
   };
 }
 
+export function buildSeoLandingPageJsonLd(baseUrl: string, page: SeoLandingPageConfig): Record<string, any> {
+  const cleanBase = baseUrl.replace(/\/$/, '');
+  const canonicalUrl = `${cleanBase}${page.slug}`;
+
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'WebPage',
+        '@id': `${canonicalUrl}#webpage`,
+        url: canonicalUrl,
+        name: page.seoTitle,
+        description: page.metaDescription,
+        inLanguage: 'en-IN',
+        isPartOf: { '@id': `${cleanBase}/#website` },
+        about: { '@id': `${canonicalUrl}#service` },
+        breadcrumb: { '@id': `${canonicalUrl}#breadcrumb` }
+      },
+      {
+        '@type': 'Service',
+        '@id': `${canonicalUrl}#service`,
+        name: page.h1,
+        description: page.metaDescription,
+        serviceType: page.serviceType,
+        url: canonicalUrl,
+        provider: {
+          '@type': 'Organization',
+          '@id': `${cleanBase}/#organization`,
+          name: 'Zuggi',
+          url: `${cleanBase}/`
+        },
+        areaServed: page.areaServed.map((place) => ({
+          '@type': 'AdministrativeArea',
+          name: place
+        }))
+      },
+      {
+        '@type': 'BreadcrumbList',
+        '@id': `${canonicalUrl}#breadcrumb`,
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: 'Home', item: `${cleanBase}/` },
+          { '@type': 'ListItem', position: 2, name: page.shortLabel, item: canonicalUrl }
+        ]
+      },
+      ...(page.faqs.length > 0
+        ? [
+            {
+              '@type': 'FAQPage',
+              '@id': `${canonicalUrl}#faq`,
+              mainEntity: page.faqs.map((faq) => ({
+                '@type': 'Question',
+                name: faq.question,
+                acceptedAnswer: {
+                  '@type': 'Answer',
+                  text: faq.answer
+                }
+              }))
+            }
+          ]
+        : [])
+    ]
+  };
+}
+
+function renderSeoLandingPrerenderHtml(baseUrl: string, page: SeoLandingPageConfig): string {
+  const cleanBase = baseUrl.replace(/\/$/, '');
+  const vehicles = getFactualVehiclesByIds(page.featuredVehicleIds);
+  const relatedPages = page.relatedSlugs
+    .map((slug) => SEO_LANDING_PAGE_BY_SLUG[slug])
+    .filter((p): p is SeoLandingPageConfig => Boolean(p));
+
+  const sectionsHtml = page.sections
+    .map(
+      (sec) => `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+        <h2 style="font-size:22px;font-weight:800;margin:0 0 10px;color:#171318;">${escapeHtml(sec.heading)}</h2>
+        <p style="font-size:15px;line-height:1.65;color:#4b5563;margin:0 0 16px;">${escapeHtml(sec.intro)}</p>
+        ${sec.subsections
+          .map(
+            (sub) => `<div style="margin-bottom:14px;">
+              <h3 style="font-size:16px;font-weight:700;margin:0 0 6px;color:#171318;">${escapeHtml(sub.subheading)}</h3>
+              <p style="font-size:14px;line-height:1.6;color:#4b5563;margin:0;">${escapeHtml(sub.body)}</p>
+            </div>`
+          )
+          .join('\n')}
+      </section>`
+    )
+    .join('\n');
+
+  const workflowHtml = `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+    <h2 style="font-size:22px;font-weight:800;margin:0 0 14px;color:#171318;">How It Works on Zuggi</h2>
+    <ol style="padding-left:20px;margin:0;line-height:1.65;color:#4b5563;">
+      ${page.workflowSteps
+        .map(
+          (w) => `<li style="margin-bottom:10px;"><strong style="color:#171318;">${escapeHtml(w.title)}:</strong> ${escapeHtml(w.detail)}</li>`
+        )
+        .join('\n')}
+    </ol>
+  </section>`;
+
+  const vehiclesHtml = vehicles.length
+    ? `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+      <h2 style="font-size:22px;font-weight:800;margin:0 0 14px;color:#171318;">Supported Commercial Vehicle Categories</h2>
+      <ul style="list-style:none;padding:0;margin:0;">
+        ${vehicles
+          .map(
+            (v) => `<li style="border-bottom:1px solid #f1f5f9;padding:10px 0;">
+              <a href="${cleanBase}/fleet/${encodeURIComponent(v.id)}" style="font-weight:700;color:#171318;text-decoration:none;">${escapeHtml(v.name)} (${v.capacityTonnes} MT · ${escapeHtml(v.dimensions)})</a>
+              <p style="margin:4px 0 0;font-size:13px;color:#4b5563;">Body options: ${escapeHtml(v.bodyTypes.join(', '))}. Ideal for: ${escapeHtml(v.idealFor)}</p>
+            </li>`
+          )
+          .join('\n')}
+      </ul>
+    </section>`
+    : '';
+
+  const routesHtml = page.featuredRoutes.length
+    ? `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+      <h2 style="font-size:22px;font-weight:800;margin:0 0 14px;color:#171318;">Key Commercial Highway Corridors</h2>
+      <ul style="list-style:none;padding:0;margin:0;">
+        ${page.featuredRoutes
+          .map((r) => {
+            const routeHref = r.corridorSlug ? `${cleanBase}/corridors/${encodeURIComponent(r.corridorSlug)}` : `${cleanBase}/corridors`;
+            return `<li style="border-bottom:1px solid #f1f5f9;padding:10px 0;">
+              <a href="${routeHref}" style="font-weight:700;color:#171318;text-decoration:none;">${escapeHtml(r.origin)} to ${escapeHtml(r.destination)} (${r.distanceKm} km via ${escapeHtml(r.highway)})</a>
+              <p style="margin:4px 0 0;font-size:13px;color:#4b5563;">Typical cargo: ${escapeHtml(r.typicalCargo)}. Suitable trucks: ${escapeHtml(r.suitableVehicles.join(', '))}.</p>
+            </li>`;
+          })
+          .join('\n')}
+      </ul>
+    </section>`
+    : '';
+
+  const faqsHtml = page.faqs.length
+    ? `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+      <h2 style="font-size:22px;font-weight:800;margin:0 0 14px;color:#171318;">Frequently Asked Questions</h2>
+      <dl style="margin:0;">
+        ${page.faqs
+          .map(
+            (faq) => `<div style="border-bottom:1px solid #f1f5f9;padding:12px 0;">
+              <dt style="font-weight:700;color:#171318;margin-bottom:6px;">${escapeHtml(faq.question)}</dt>
+              <dd style="margin:0;font-size:14px;line-height:1.6;color:#4b5563;">${escapeHtml(faq.answer)}</dd>
+            </div>`
+          )
+          .join('\n')}
+      </dl>
+    </section>`
+    : '';
+
+  const relatedHtml = relatedPages.length
+    ? `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:20px;">
+      <h2 style="font-size:18px;font-weight:800;margin:0 0 12px;color:#171318;">Related Zuggi Freight &amp; Transport Guides</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;">
+        ${relatedPages
+          .map(
+            (rel) => `<a href="${cleanBase}${rel.slug}" style="color:#E83E83;font-weight:700;text-decoration:none;">${escapeHtml(rel.shortLabel)} →</a>`
+          )
+          .join('\n')}
+      </div>
+    </section>`
+    : '';
+
+  const ctaHtml = `<p style="margin:0 0 24px;display:flex;flex-wrap:wrap;gap:14px;">
+    <a href="${cleanBase}${page.audience === 'transporter' ? '/partner' : '/freight'}" style="background:#E83E83;color:#ffffff;padding:10px 18px;border-radius:10px;font-weight:700;text-decoration:none;">${escapeHtml(page.primaryCtaLabel)}</a>
+    <a href="${cleanBase}${page.secondaryCtaPath}" style="background:#171318;color:#ffffff;padding:10px 18px;border-radius:10px;font-weight:700;text-decoration:none;">${escapeHtml(page.secondaryCtaLabel)}</a>
+  </p>`;
+
+  return renderPrerenderShell(
+    page.h1,
+    page.heroLead,
+    `${ctaHtml}${sectionsHtml}${workflowHtml}${vehiclesHtml}${routesHtml}${faqsHtml}${relatedHtml}`,
+    cleanBase
+  );
+}
+
+function renderNotFoundPrerenderHtml(baseUrl: string, pathname: string): string {
+  const cleanBase = baseUrl.replace(/\/$/, '');
+  const landingLinks = SEO_LANDING_PAGES.map(
+    (p) => `<li style="margin-bottom:8px;"><a href="${cleanBase}${p.slug}" style="color:#E83E83;font-weight:700;text-decoration:none;">${escapeHtml(p.shortLabel)}</a></li>`
+  ).join('\n');
+
+  const bodyHtml = `<section style="background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;padding:24px;margin-bottom:24px;">
+    <p style="margin:0 0 16px;font-size:15px;color:#4b5563;">The requested path <code>${escapeHtml(pathname)}</code> does not exist on Zuggi.in. Use the verified commercial freight pages below:</p>
+    <p style="margin:0 0 20px;display:flex;gap:14px;flex-wrap:wrap;">
+      <a href="${cleanBase}/" style="background:#E83E83;color:#ffffff;padding:10px 18px;border-radius:10px;font-weight:700;text-decoration:none;">Go to Zuggi Home</a>
+      <a href="${cleanBase}/freight" style="background:#171318;color:#ffffff;padding:10px 18px;border-radius:10px;font-weight:700;text-decoration:none;">Browse Live Freight</a>
+    </p>
+    <h2 style="font-size:18px;font-weight:800;margin:0 0 10px;color:#171318;">Commercial Transport &amp; Freight Guides</h2>
+    <ul style="list-style:none;padding:0;margin:0;">${landingLinks}</ul>
+  </section>`;
+
+  return renderPrerenderShell(
+    'Page Not Found (404)',
+    'The page you requested could not be found on Zuggi Commercial Freight.',
+    bodyHtml,
+    cleanBase
+  );
+}
+
 function renderPrerenderShell(title: string, subtitle: string, bodyHtml: string, baseUrl: string): string {
   const cleanBase = baseUrl.replace(/\/$/, '');
-  return `<div class="zuggi-ssr-shell" style="font-family:Inter,system-ui,-apple-system,sans-serif;color:#171318;background:#F8F6F8;min-height:100vh;">
-    <header style="background:#ffffff;border-bottom:1px solid #e5e7eb;padding:16px 24px;">
+  const footerGuideLinks = SEO_LANDING_PAGES.map(
+    (p) => `<a href="${cleanBase}${p.slug}" style="color:#f4a7c5;text-decoration:none;">${escapeHtml(p.shortLabel)}</a>`
+  ).join(' · ');
+
+  return `<div class="zuggi-ssr-shell" style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;color:#171318;background:#F8F6F8;min-height:100vh;">
+    <header style="background:#171318;border-bottom:1px solid #2b252d;padding:16px 24px;">
       <div style="max-width:1120px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
-        <a href="${cleanBase}/" style="font-size:20px;font-weight:800;color:#171318;text-decoration:none;">Zuggi Freight</a>
+        <a href="${cleanBase}/" style="font-size:20px;font-weight:800;color:#ffffff;text-decoration:none;">Zuggi</a>
         <nav aria-label="Primary Navigation" style="display:flex;gap:18px;font-size:14px;font-weight:600;flex-wrap:wrap;">
-          <a href="${cleanBase}/freight" style="color:#E83E83;text-decoration:none;">Live Freight</a>
-          <a href="${cleanBase}/corridors" style="color:#4b5563;text-decoration:none;">Corridors</a>
-          <a href="${cleanBase}/fleet" style="color:#4b5563;text-decoration:none;">5,000+ Fleet</a>
-          <a href="${cleanBase}/about" style="color:#4b5563;text-decoration:none;">About Us</a>
-          <a href="${cleanBase}/contact" style="color:#4b5563;text-decoration:none;">Contact</a>
+          <a href="${cleanBase}/freight" style="color:#f4a7c5;text-decoration:none;">Live Freight</a>
+          <a href="${cleanBase}/corridors" style="color:#d6cfd8;text-decoration:none;">Corridors</a>
+          <a href="${cleanBase}/fleet" style="color:#d6cfd8;text-decoration:none;">Fleet Network</a>
+          <a href="${cleanBase}/truck-loads" style="color:#d6cfd8;text-decoration:none;">Truck Loads</a>
+          <a href="${cleanBase}/contact" style="color:#d6cfd8;text-decoration:none;">Contact</a>
         </nav>
       </div>
     </header>
@@ -988,6 +1209,13 @@ function renderPrerenderShell(title: string, subtitle: string, bodyHtml: string,
       <p style="font-size:16px;line-height:1.6;color:#4b5563;max-width:780px;margin:0 0 28px;">${escapeHtml(subtitle)}</p>
       ${bodyHtml}
     </main>
+    <footer style="background:#171318;color:#c5bcc9;padding:28px 24px;font-size:13px;">
+      <div style="max-width:1120px;margin:0 auto;line-height:1.8;">
+        <p style="margin:0 0 8px;"><strong style="color:#ffffff;">Zuggi Commercial Goods Transportation</strong> — Guwahati, Assam, India</p>
+        <p style="margin:0 0 8px;">${footerGuideLinks}</p>
+        <p style="margin:0;"><a href="${cleanBase}/privacy" style="color:#d6cfd8;text-decoration:none;">Privacy Policy</a> · <a href="${cleanBase}/terms" style="color:#d6cfd8;text-decoration:none;">Terms &amp; Conditions</a> · <a href="${cleanBase}/refund-policy" style="color:#d6cfd8;text-decoration:none;">Refund Policy</a></p>
+      </div>
+    </footer>
   </div>`;
 }
 
@@ -999,6 +1227,22 @@ export function resolveRouteSeo(
   const cleanBase = baseUrl.replace(/\/$/, '');
   const pathname = (rawPathname || '/').split('?')[0].replace(/\/+$/, '') || '/';
   const defaultImage = `${cleanBase}/og-zuggi.jpg`;
+
+  // 0. Dedicated Regional & Commercial Freight SEO Landing Pages (7 primary organic routes)
+  const seoLandingPage = findSeoLandingPage(pathname);
+  if (seoLandingPage) {
+    return {
+      title: seoLandingPage.seoTitle,
+      description: seoLandingPage.metaDescription,
+      canonicalUrl: `${cleanBase}${seoLandingPage.slug}`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow, max-image-preview:large, max-snippet:-1',
+      jsonLd: buildSeoLandingPageJsonLd(cleanBase, seoLandingPage),
+      prerenderHtml: renderSeoLandingPrerenderHtml(cleanBase, seoLandingPage),
+      httpStatus: 200
+    };
+  }
 
   // 1. Individual freight listing: /freight/:loadId
   const freightDetailMatch = pathname.match(/^\/freight\/([^/]+)$/);
@@ -1017,6 +1261,7 @@ export function resolveRouteSeo(
         ogImage: defaultImage,
         robots: 'noindex, follow',
         jsonLd: null,
+        httpStatus: 404,
         prerenderHtml: renderPrerenderShell(
           'Freight Listing Unavailable',
           'This consignment may have already been fulfilled. Explore active commercial truck loads on Zuggi Freight Exchange.',
@@ -1118,6 +1363,7 @@ export function resolveRouteSeo(
         ogImage: defaultImage,
         robots: 'index, follow',
         jsonLd: buildCorridorJsonLd(cleanBase, corridor),
+        httpStatus: 200,
         prerenderHtml: renderPrerenderShell(
           `${corridor.originCity} to ${corridor.destinationCity} Commercial Freight Transport`,
           description,
@@ -1126,6 +1372,18 @@ export function resolveRouteSeo(
         )
       };
     }
+
+    return {
+      title: 'Freight Corridor Not Found (404) | Zuggi Freight',
+      description: 'The requested freight corridor was not found. Browse supported Assam and Northeast India highway corridors on Zuggi.',
+      canonicalUrl,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'noindex, follow',
+      jsonLd: null,
+      httpStatus: 404,
+      prerenderHtml: renderNotFoundPrerenderHtml(cleanBase, pathname)
+    };
   }
 
   // 4. Corridors Index: /corridors
@@ -1195,14 +1453,27 @@ export function resolveRouteSeo(
         ogImage: defaultImage,
         robots: 'index, follow',
         jsonLd: buildVehicleCategoryJsonLd(cleanBase, vehicle),
+        httpStatus: 200,
         prerenderHtml: renderPrerenderShell(
-          `Book ${vehicle.name} — ${vehicle.capacityTonnes} MT Verified Fleet`,
+          `Book ${vehicle.name} — ${vehicle.capacityTonnes} MT Commercial Truck`,
           description,
           bodyHtml,
           cleanBase
         )
       };
     }
+
+    return {
+      title: 'Vehicle Category Not Found (404) | Zuggi Freight',
+      description: 'The requested commercial vehicle category was not found. Explore all supported truck categories on Zuggi.',
+      canonicalUrl,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'noindex, follow',
+      jsonLd: null,
+      httpStatus: 404,
+      prerenderHtml: renderNotFoundPrerenderHtml(cleanBase, pathname)
+    };
   }
 
   // 6. Fleet Network Index: /fleet
@@ -1211,18 +1482,19 @@ export function resolveRouteSeo(
     const listHtml = SEO_VEHICLE_CATEGORIES.map(
       (v) => `<li style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px;margin-bottom:10px;">
         <a href="${cleanBase}/fleet/${v.id}" style="font-weight:800;color:#171318;text-decoration:none;">${escapeHtml(v.name)} — ${v.capacityTonnes} MT</a>
-        <span style="display:block;font-size:13px;color:#4b5563;margin-top:4px;">${escapeHtml(v.dimensions)} · From ₹${v.basePricePerKm}/km · ${escapeHtml(v.idealFor)}</span>
+        <span style="display:block;font-size:13px;color:#4b5563;margin-top:4px;">${escapeHtml(v.dimensions)} · ${escapeHtml(v.idealFor)}</span>
       </li>`
     ).join('\n');
 
     return {
-      title: '5,000+ Verified Trucks & Commercial Fleet | Zuggi',
+      title: 'Commercial Truck Categories & Fleet Options | Zuggi',
       description:
-        'Explore 5,000+ Parivahan-verified pickups, Tata Ace, Bolero, Eicher 14ft/17ft, 20ft trucks, 32ft containers & reefer vehicles ready for dispatch on Zuggi.',
+        'Explore commercial vehicle categories on Zuggi—3-Wheeler Cargo, Tata Ace, Bolero Pickup, Dost+, Tata 407, Eicher 14ft/17ft, 20ft trucks, 32ft containers & reefers.',
       canonicalUrl,
       ogType: 'website',
       ogImage: defaultImage,
       robots: 'index, follow',
+      httpStatus: 200,
       jsonLd: {
         '@context': 'https://schema.org',
         '@type': 'ItemList',
@@ -1236,8 +1508,8 @@ export function resolveRouteSeo(
         }))
       },
       prerenderHtml: renderPrerenderShell(
-        '5,000+ Verified Commercial Vehicles Ready for Dispatch',
-        'Every pickup, LCV, heavy truck, and 32ft container on Zuggi is Parivahan RC verified and GPS-tracked.',
+        'Commercial Vehicle Categories Supported on Zuggi',
+        'Choose from 10 commercial vehicle categories spanning 500 kg pickups to 15 MT multi-axle containers with live GPS tracking.',
         `<ul style="list-style:none;padding:0;margin:0;">${listHtml}</ul>`,
         cleanBase
       )
@@ -1247,13 +1519,14 @@ export function resolveRouteSeo(
   // 7. Partner Portal: /partner
   if (pathname === '/partner') {
     return {
-      title: 'Zuggi Partner — Driver & Fleet Owner Freight App',
+      title: 'Zuggi Partner — Driver & Fleet Owner Freight Portal',
       description:
-        'Attach your commercial truck or fleet with Zuggi. Bid directly on verified loads across Assam & India with 0% brokerage, 90% pickup advance & zero empty returns.',
+        'Attach your commercial truck or fleet with Zuggi. Bid directly on verified loads across Assam, Northeast India & Pan-India corridors with transparent settlements.',
       canonicalUrl: `${cleanBase}/partner`,
       ogType: 'website',
       ogImage: defaultImage,
       robots: 'index, follow',
+      httpStatus: 200,
       jsonLd: null,
       prerenderHtml: null
     };
@@ -1262,13 +1535,14 @@ export function resolveRouteSeo(
   // 8. About page: /about
   if (pathname === '/about') {
     return {
-      title: 'About Zuggi — 5,000+ Verified Commercial Truck Network',
+      title: 'About Zuggi — Commercial Freight Booking & Transport Marketplace',
       description:
-        'Learn how Zuggi connects commercial shippers directly with 5,000+ Parivahan-verified trucks across Assam, Northeast India & Pan-India with live GPS and escrow.',
+        'Learn how Zuggi connects commercial shippers directly with transporters across Assam, Northeast India & Pan-India with freight bidding, live GPS & GST billing.',
       canonicalUrl: `${cleanBase}/about`,
       ogType: 'website',
       ogImage: defaultImage,
       robots: 'index, follow',
+      httpStatus: 200,
       jsonLd: null,
       prerenderHtml: null
     };
@@ -1414,17 +1688,34 @@ export function resolveRouteSeo(
     };
   }
 
-  // Default Homepage (/)
+  // 11. Explicit Homepage (/)
+  if (pathname === '/') {
+    return {
+      title: 'Zuggi — Commercial Truck Booking & Freight Transport India',
+      description:
+        'Book commercial trucks across Assam, Northeast India & Pan-India on Zuggi. Direct freight bidding, live GPS shipment tracking, OTP e-POD & GST invoicing.',
+      canonicalUrl: `${cleanBase}/`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'index, follow, max-image-preview:large, max-snippet:-1',
+      httpStatus: 200,
+      jsonLd: listings.length > 0 ? buildFreightDirectoryJsonLd(cleanBase, listings.slice(0, 10)) : null,
+      prerenderHtml: null
+    };
+  }
+
+  // 12. True HTTP 404 Not Found (prevents Soft-404 indexing of invalid URLs)
   return {
-    title: 'Zuggi — Book Verified Trucks & Commercial Freight Online',
+    title: 'Page Not Found (404) | Zuggi Commercial Freight',
     description:
-      'Zuggi connects businesses with 5,000+ Parivahan-verified trucks across Assam, Northeast & Pan-India. Direct quotes, live GPS tracking, GST invoices & escrow.',
-    canonicalUrl: `${cleanBase}/`,
+      'The requested page could not be found on Zuggi.in. Explore commercial truck booking, Assam freight corridors, vehicle categories, and live freight listings.',
+    canonicalUrl: `${cleanBase}${pathname}`,
     ogType: 'website',
     ogImage: defaultImage,
-    robots: 'index, follow, max-image-preview:large, max-snippet:-1',
-    jsonLd: listings.length > 0 ? buildFreightDirectoryJsonLd(cleanBase, listings.slice(0, 10)) : null,
-    prerenderHtml: null
+    robots: 'noindex, follow',
+    httpStatus: 404,
+    jsonLd: null,
+    prerenderHtml: renderNotFoundPrerenderHtml(cleanBase, pathname)
   };
 }
 

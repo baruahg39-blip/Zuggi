@@ -127,14 +127,20 @@ app.get('/sw.js', (_req, res) => {
   res.sendFile(path.resolve(__dirname, 'public', 'sw.js'));
 });
 
-// Serve public static assets (PWA icons, apple touch icon, SVG)
-app.use(express.static(path.resolve(__dirname, 'public'), {
+// Serve public static assets (PWA icons, apple touch icon, SVG) while allowing dynamic /robots.txt and /sitemap*.xml routes
+const publicStaticMiddleware = express.static(path.resolve(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.json') || filePath.endsWith('.webmanifest')) {
       res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
     }
   }
-}));
+});
+app.use((req, res, next) => {
+  if (req.path === '/robots.txt' || req.path === '/sitemap.xml' || req.path === '/sitemap-freight.xml') {
+    return next();
+  }
+  return publicStaticMiddleware(req, res, next);
+});
 
 // Health check endpoint
 app.get('/api/health', (_req, res) => {
@@ -2070,10 +2076,12 @@ app.post('/api/maps/route-matrix', async (req, res) => {
 });
 
 // --- PUBLIC FREIGHT CATALOG & SEO CRAWLER ENDPOINTS ---
+// Canonical domain is strictly locked to https://zuggi.in (overridable only via PRIMARY_DOMAIN)
+// so preview/staging hosts never leak non-canonical URLs into sitemaps or <link rel="canonical">.
 const CANONICAL_BASE_URL = (
   process.env.PRIMARY_DOMAIN
     ? `https://${process.env.PRIMARY_DOMAIN.replace(/^https?:\/\//, '')}`
-    : process.env.APP_URL || 'https://zuggi.in'
+    : 'https://zuggi.in'
 ).replace(/\/$/, '');
 
 async function fetchPublicFreightCatalog(): Promise<PublicFreightListing[]> {
@@ -2127,6 +2135,13 @@ app.get('/robots.txt', (_req, res) => {
     [
       'User-agent: *',
       'Allow: /',
+      'Allow: /truck-booking-guwahati',
+      'Allow: /truck-transport-assam',
+      'Allow: /truck-hire-guwahati-dibrugarh',
+      'Allow: /northeast-india-transport',
+      'Allow: /online-freight-booking',
+      'Allow: /truck-loads',
+      'Allow: /logistics-companies-assam',
       'Allow: /freight',
       'Allow: /freight/',
       'Allow: /corridors',
@@ -2239,7 +2254,11 @@ if (process.env.NODE_ENV !== 'production') {
       const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
       const seoInjected = applyPartnerManifestIfNeeded(req, injectSeoIntoHtml(rawTemplate, seo));
       const html = await vite.transformIndexHtml(req.originalUrl, seoInjected);
-      res.status(seo.httpStatus || 200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
+      const status = seo.httpStatus || 200;
+      if (status === 404) {
+        res.setHeader('Cache-Control', 'no-store');
+      }
+      res.status(status).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
     } catch (e: any) {
       vite.ssrFixStacktrace(e);
       next(e);
@@ -2269,9 +2288,13 @@ if (process.env.NODE_ENV !== 'production') {
       const listings = await fetchPublicFreightCatalog();
       const seo = resolveRouteSeo(getRequestPathname(req), CANONICAL_BASE_URL, listings);
       const html = applyPartnerManifestIfNeeded(req, injectSeoIntoHtml(template, seo));
-      res.status(seo.httpStatus || 200);
+      const status = seo.httpStatus || 200;
+      res.status(status);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+      res.setHeader(
+        'Cache-Control',
+        status === 404 ? 'no-store' : 'public, max-age=300, stale-while-revalidate=600'
+      );
       return res.send(html);
     } catch (err: any) {
       console.error(`[SSR SEO Render Fallback] correlationId=${req.correlationId} code=${err?.code || 'ssr_error'}`);

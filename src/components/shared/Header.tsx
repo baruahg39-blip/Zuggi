@@ -20,6 +20,7 @@ import { showToast } from './Toast';
 
 import { AppPortalMode } from '../../utils/portalMode';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
+import { navigateSpa } from '../../utils/seo';
 
 interface HeaderProps {
   currentUser: User | null;
@@ -79,7 +80,11 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Zone 1: Brand Logo & Name */}
           {!currentUser && portalMode === 'web' ? (
             <a
-              href="#top"
+              href="/"
+              onClick={(e) => {
+                e.preventDefault();
+                navigateSpa('/');
+              }}
               className="flex items-center gap-2.5 shrink-0 whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E83E83] rounded-xl"
             >
               <div className="w-10 h-10 rounded-xl bg-[#060309] border border-white/10 overflow-hidden flex items-center justify-center shrink-0 shadow-md shadow-[#E83E83]/20">
@@ -122,31 +127,57 @@ export const Header: React.FC<HeaderProps> = ({
           {!currentUser && portalMode === 'web' && (
             <nav
               aria-label="Primary website navigation"
-              className="hidden md:flex items-center gap-7 text-sm font-medium text-gray-300"
+              className="hidden md:flex items-center gap-6 text-sm font-medium text-gray-300"
             >
               <a
-                href="#about-us"
+                href="/freight"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/freight');
+                }}
                 className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
               >
-                About Us
+                Live Freight
               </a>
               <a
-                href="#fleet-network"
+                href="/corridors"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/corridors');
+                }}
                 className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
               >
-                Fleet Network
+                Corridors
               </a>
               <a
-                href="#how-it-works"
+                href="/fleet"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/fleet');
+                }}
                 className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
               >
-                How It Works
+                Fleet
               </a>
               <a
-                href="#reach-out"
+                href="/truck-loads"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/truck-loads');
+                }}
                 className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
               >
-                Reach Out
+                Truck Loads
+              </a>
+              <a
+                href="/contact"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateSpa('/contact');
+                }}
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 hover:underline underline-offset-4 decoration-[#E83E83]"
+              >
+                Contact
               </a>
             </nav>
           )}

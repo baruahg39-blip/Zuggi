@@ -1,5 +1,8 @@
 import { LoadItem } from '../types';
 import { VEHICLE_CATEGORIES } from '../data/mockData';
+import type { SeoLandingPageConfig } from '../data/seoLandingPages';
+
+export const CANONICAL_SITE_ORIGIN = 'https://zuggi.in';
 
 export interface ClientSeoConfig {
   title: string;
@@ -161,7 +164,7 @@ export function upsertDynamicJsonLd(jsonLd: Record<string, any> | null): void {
 export function applyClientSeo(config: ClientSeoConfig): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
-  const origin = window.location.origin;
+  const origin = CANONICAL_SITE_ORIGIN;
   const canonicalPath = config.canonicalPath ?? window.location.pathname;
   const normalizedPath = canonicalPath === '/' ? '/' : canonicalPath.replace(/\/+$/, '');
   const canonicalUrl = `${origin}${normalizedPath}`;
@@ -194,7 +197,7 @@ export function applyClientSeo(config: ClientSeoConfig): void {
 }
 
 export function buildClientFreightListingJsonLd(item: PublicFreightItem): Record<string, any> {
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://zuggi.in';
+  const origin = CANONICAL_SITE_ORIGIN;
   const canonicalUrl = `${origin}/freight/${encodeURIComponent(item.id)}`;
   const isOpen = item.status === 'posted' || item.status === 'bidding';
   const weightTonnes = (item.weightKg / 1000).toFixed(item.weightKg >= 1000 ? 1 : 2);
@@ -300,7 +303,7 @@ export function buildClientFreightListingJsonLd(item: PublicFreightItem): Record
 }
 
 export function buildClientFreightDirectoryJsonLd(items: PublicFreightItem[]): Record<string, any> {
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://zuggi.in';
+  const origin = CANONICAL_SITE_ORIGIN;
   const directoryUrl = `${origin}/freight`;
 
   return {
@@ -346,3 +349,68 @@ export function buildClientFreightDirectoryJsonLd(items: PublicFreightItem[]): R
     ]
   };
 }
+
+export function buildSeoLandingJsonLd(page: SeoLandingPageConfig): Record<string, any> {
+  const origin = CANONICAL_SITE_ORIGIN;
+  const canonicalUrl = `${origin}${page.slug}`;
+
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'WebPage',
+        '@id': `${canonicalUrl}#webpage`,
+        url: canonicalUrl,
+        name: page.seoTitle,
+        description: page.metaDescription,
+        inLanguage: 'en-IN',
+        isPartOf: { '@id': `${origin}/#website` },
+        about: { '@id': `${canonicalUrl}#service` },
+        breadcrumb: { '@id': `${canonicalUrl}#breadcrumb` }
+      },
+      {
+        '@type': 'Service',
+        '@id': `${canonicalUrl}#service`,
+        name: page.h1,
+        description: page.metaDescription,
+        serviceType: page.serviceType,
+        url: canonicalUrl,
+        provider: {
+          '@type': 'Organization',
+          '@id': `${origin}/#organization`,
+          name: 'Zuggi',
+          url: `${origin}/`
+        },
+        areaServed: page.areaServed.map((place) => ({
+          '@type': 'AdministrativeArea',
+          name: place
+        }))
+      },
+      {
+        '@type': 'BreadcrumbList',
+        '@id': `${canonicalUrl}#breadcrumb`,
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: 'Home', item: `${origin}/` },
+          { '@type': 'ListItem', position: 2, name: page.shortLabel, item: canonicalUrl }
+        ]
+      },
+      ...(page.faqs.length > 0
+        ? [
+            {
+              '@type': 'FAQPage',
+              '@id': `${canonicalUrl}#faq`,
+              mainEntity: page.faqs.map((faq) => ({
+                '@type': 'Question',
+                name: faq.question,
+                acceptedAnswer: {
+                  '@type': 'Answer',
+                  text: faq.answer
+                }
+              }))
+            }
+          ]
+        : [])
+    ]
+  };
+}
+

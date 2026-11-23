@@ -1,5 +1,12 @@
 User-agent: *
 Allow: /
+Allow: /truck-booking-guwahati
+Allow: /truck-transport-assam
+Allow: /truck-hire-guwahati-dibrugarh
+Allow: /northeast-india-transport
+Allow: /online-freight-booking
+Allow: /truck-loads
+Allow: /logistics-companies-assam
 Allow: /freight
 Allow: /freight/
 Allow: /corridors

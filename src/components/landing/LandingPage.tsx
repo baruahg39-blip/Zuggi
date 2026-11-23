@@ -19,6 +19,7 @@ import {
 import { AppPortalMode } from '../../utils/portalMode';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { navigateSpa } from '../../utils/seo';
+import { SEO_LANDING_PAGES } from '../../data/seoLandingPages';
 import highwayFleetImg from '../../assets/images/zuggi_highway_fleet_1795160250051.jpg';
 import operationsHubImg from '../../assets/images/zuggi_operations_hub_1795160248893.jpg';
 
@@ -838,7 +839,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       {/* 6. QUIET PROFESSIONAL WEBSITE FOOTER */}
       <footer className="mt-12 bg-[#171318] text-gray-300 border-t border-gray-800">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12 space-y-10">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-8">
             {/* Brand Column */}
             <div className="space-y-3">
               <div className="flex items-center gap-2.5">
@@ -852,8 +853,29 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <span className="text-lg font-extrabold text-white tracking-tight">Zuggi</span>
               </div>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Commercial goods transportation marketplace connecting shippers directly with over 5,000 verified trucks, pickups, and fleet owners across India.
+                Commercial goods transportation marketplace connecting shippers directly with truck owners, drivers, and fleet operators across Assam, Northeast India, and Pan-India corridors.
               </p>
+            </div>
+
+            {/* Regional & Freight SEO Guides (All 7 Landing Pages) */}
+            <div className="space-y-3">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider">Freight &amp; Routes</h3>
+              <ul className="space-y-2 text-xs text-gray-400">
+                {SEO_LANDING_PAGES.map((page) => (
+                  <li key={page.slug}>
+                    <a
+                      href={page.slug}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigateSpa(page.slug);
+                      }}
+                      className="hover:text-white transition-colors"
+                    >
+                      {page.shortLabel}
+                    </a>
+                  </li>
+                ))}
+              </ul>
             </div>
 
             {/* Company & SEO Directory Links */}
@@ -893,7 +915,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     }}
                     className="hover:text-white transition-colors"
                   >
-                    5,000+ Fleet Network
+                    Commercial Fleet Network
                   </a>
                 </li>
                 <li>

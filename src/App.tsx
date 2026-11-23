@@ -30,6 +30,9 @@ import { AuthModal } from './components/auth/AuthModal';
 import { LandingPage } from './components/landing/LandingPage';
 import { PublicRouteView } from './components/landing/PublicRouteView';
 import { LegalPagesView } from './components/landing/LegalPagesView';
+import { SeoLandingPageView } from './components/landing/SeoLandingPageView';
+import { NotFoundView } from './components/landing/NotFoundView';
+import { isSeoLandingRoute } from './data/seoLandingPages';
 import { MobileAppInstallModal } from './components/mobile/MobileAppInstallModal';
 import { MobileBottomNav } from './components/mobile/MobileBottomNav';
 import { ToastContainer } from './components/shared/Toast';
@@ -59,6 +62,19 @@ function isPublicCatalogRoute(pathname: string): boolean {
 function isLegalRoute(pathname: string): boolean {
   const clean = (pathname || '/').replace(/\/+$/, '').toLowerCase();
   return clean === '/privacy' || clean === '/terms' || clean === '/refund-policy' || clean === '/delete-account';
+}
+
+function isKnownSignedOutRoute(pathname: string): boolean {
+  const clean = (pathname || '/').replace(/\/+$/, '') || '/';
+  return (
+    clean === '/' ||
+    clean === '/about' ||
+    clean === '/contact' ||
+    clean === '/partner' ||
+    isLegalRoute(clean) ||
+    isPublicCatalogRoute(clean) ||
+    isSeoLandingRoute(clean)
+  );
 }
 
 export default function App() {
@@ -224,17 +240,23 @@ export default function App() {
       manifestLink.setAttribute('href', portalMode === 'partner' ? '/manifest-partner.json' : '/manifest.json');
     }
 
-    // Dynamic catalog & legal routes manage their own route-specific title, meta & JSON-LD
-    if (isLegalRoute(currentPath) || (!currentUser && isPublicCatalogRoute(currentPath))) {
+    // Dynamic catalog, SEO landing, 404, and legal routes manage their own route-specific title, meta & JSON-LD
+    if (
+      isLegalRoute(currentPath) ||
+      (!currentUser &&
+        (isPublicCatalogRoute(currentPath) ||
+          isSeoLandingRoute(currentPath) ||
+          !isKnownSignedOutRoute(currentPath)))
+    ) {
       return;
     }
 
     const clean = (currentPath || '/').replace(/\/+$/, '') || '/';
     if (!currentUser && clean === '/about') {
       applyClientSeo({
-        title: 'About Zuggi — 5,000+ Verified Commercial Truck Network',
+        title: 'About Zuggi — Commercial Freight Booking & Transport Marketplace',
         description:
-          'Learn how Zuggi connects commercial shippers directly with 5,000+ Parivahan-verified trucks across Assam, Northeast India & Pan-India with live GPS and escrow.',
+          'Learn how Zuggi connects commercial shippers directly with transporters across Assam, Northeast India & Pan-India with freight bidding, live GPS & GST billing.',
         canonicalPath: '/about',
         robots: 'index, follow'
       });
@@ -256,17 +278,17 @@ export default function App() {
 
     if (portalMode === 'partner') {
       applyClientSeo({
-        title: 'Zuggi Partner — Driver & Fleet Owner Freight App',
+        title: 'Zuggi Partner — Driver & Fleet Owner Freight Portal',
         description:
-          'Attach your commercial truck or fleet with Zuggi. Bid directly on verified loads across Assam & India with 0% brokerage, 90% pickup advance & zero empty returns.',
+          'Attach your commercial truck or fleet with Zuggi. Bid directly on verified loads across Assam, Northeast India & Pan-India corridors with transparent settlements.',
         canonicalPath: '/partner',
         robots: 'index, follow'
       });
     } else if (!customerActiveLoadId) {
       applyClientSeo({
-        title: 'Zuggi — Book Verified Trucks & Commercial Freight Online',
+        title: 'Zuggi — Commercial Truck Booking & Freight Transport India',
         description:
-          'Zuggi connects businesses with 5,000+ Parivahan-verified trucks across Assam, Northeast & Pan-India. Direct quotes, live GPS tracking, GST invoices & escrow.',
+          'Book commercial trucks across Assam, Northeast India & Pan-India on Zuggi. Direct freight bidding, live GPS shipment tracking, OTP e-POD & GST invoicing.',
         canonicalPath: '/',
         robots: 'index, follow'
       });
@@ -380,6 +402,14 @@ export default function App() {
               onOpenAuth={handleOpenAuthModal}
               onSwitchToPartner={() => navigateToPortal('partner')}
             />
+          ) : isSeoLandingRoute(currentPath) ? (
+            <SeoLandingPageView
+              pathname={currentPath}
+              onOpenAuth={handleOpenAuthModal}
+              onSwitchToPartner={() => navigateToPortal('partner')}
+            />
+          ) : !isKnownSignedOutRoute(currentPath) ? (
+            <NotFoundView pathname={currentPath} />
           ) : (
             <LandingPage
               portalMode={portalMode}

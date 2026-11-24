@@ -137,12 +137,115 @@ function extractTenDigits(raw: unknown): string {
   return digits.length === 10 ? digits : '';
 }
 
+const USER_SESSION_COOKIE = 'zuggi_session';
+const ADMIN_SESSION_COOKIE = 'zuggi_admin_session';
+
+function parseCookies(req: express.Request): Record<string, string> {
+  const raw = String(req.headers.cookie || '');
+  if (!raw) return {};
+  const map: Record<string, string> = {};
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      map[key] = decodeURIComponent(val);
+    } catch {
+      map[key] = val;
+    }
+  }
+  return map;
+}
+
+function isSecureRequest(req: express.Request): boolean {
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || '').toLowerCase();
+  return proto.includes('https') || process.env.NODE_ENV === 'production';
+}
+
+function buildSessionCookieHeader(name: string, value: string, maxAgeSec: number, secure: boolean): string {
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    'Path=/',
+    `Max-Age=${maxAgeSec}`,
+    'HttpOnly'
+  ];
+  if (secure) {
+    parts.push('Secure', 'SameSite=None', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  return parts.join('; ');
+}
+
+function appendSetCookie(res: express.Response, cookieStr: string): void {
+  const existing = res.getHeader('Set-Cookie');
+  if (!existing) {
+    res.setHeader('Set-Cookie', [cookieStr]);
+  } else if (Array.isArray(existing)) {
+    res.setHeader('Set-Cookie', [...existing.map(String), cookieStr]);
+  } else {
+    res.setHeader('Set-Cookie', [String(existing), cookieStr]);
+  }
+}
+
+export function setUserSessionCookie(req: express.Request, res: express.Response, token: string): void {
+  if (!token) return;
+  appendSetCookie(res, buildSessionCookieHeader(USER_SESSION_COOKIE, token, USER_SESSION_TTL_SEC, isSecureRequest(req)));
+}
+
+export function setAdminSessionCookie(req: express.Request, res: express.Response, token: string): void {
+  if (!token) return;
+  appendSetCookie(res, buildSessionCookieHeader(ADMIN_SESSION_COOKIE, token, ADMIN_SESSION_TTL_SEC, isSecureRequest(req)));
+}
+
+export function clearSessionCookies(req: express.Request, res: express.Response): void {
+  const secure = isSecureRequest(req);
+  appendSetCookie(res, buildSessionCookieHeader(USER_SESSION_COOKIE, '', 0, secure));
+  appendSetCookie(res, buildSessionCookieHeader(ADMIN_SESSION_COOKIE, '', 0, secure));
+}
+
+function hasExplicitAuthHeader(req: express.Request): boolean {
+  return Boolean(
+    String(req.headers.authorization || '').trim() ||
+      String(req.headers['x-zuggi-user-token'] || '').trim() ||
+      String(req.headers['x-zuggi-admin-token'] || '').trim()
+  );
+}
+
+/**
+ * Guard cookie-authenticated mutations against cross-site request forgery.
+ * Explicit Bearer / custom token headers are inherently CSRF-safe.
+ */
+export function isCsrfSafeMutation(req: express.Request): boolean {
+  if (hasExplicitAuthHeader(req)) return true;
+  const xrw = String(req.headers['x-requested-with'] || '').trim().toLowerCase();
+  if (xrw === 'xmlhttprequest') return true;
+  const secFetchSite = String(req.headers['sec-fetch-site'] || '').trim().toLowerCase();
+  if (secFetchSite === 'same-origin' || secFetchSite === 'same-site' || secFetchSite === 'none') return true;
+  const origin = String(req.headers.origin || '').trim();
+  const host = String(req.headers.host || '').trim().toLowerCase();
+  if (origin && host) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.host.toLowerCase() === host) return true;
+    } catch {
+      return false;
+    }
+  }
+  return !origin;
+}
+
 function extractRawTokensFromReq(req: express.Request): string[] {
   const authHeader = String(req.headers.authorization || '').trim();
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const adminHdr = String(req.headers['x-zuggi-admin-token'] || '').trim();
   const userHdr = String(req.headers['x-zuggi-user-token'] || '').trim();
-  return [adminHdr, userHdr, bearer].filter(Boolean);
+  const cookies = parseCookies(req);
+  const adminCookie = (cookies[ADMIN_SESSION_COOKIE] || '').trim();
+  const userCookie = (cookies[USER_SESSION_COOKIE] || '').trim();
+  return [adminHdr, userHdr, bearer, adminCookie, userCookie].filter(Boolean);
 }
 
 // Legacy Set kept exported for backwards compatibility; all new tokens are signed expiring JWTs
@@ -166,7 +269,9 @@ export function verifyAdminTokenFromReq(req: express.Request): boolean {
   const authHeader = String(req.headers.authorization || '').trim();
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const custom = String(req.headers['x-zuggi-admin-token'] || '').trim();
-  const candidates = [custom, bearer].filter(Boolean);
+  const cookies = parseCookies(req);
+  const adminCookie = (cookies[ADMIN_SESSION_COOKIE] || '').trim();
+  const candidates = [custom, bearer, adminCookie].filter(Boolean);
   for (const token of candidates) {
     if (adminSessionTokens.has(token)) return true;
     const claims = verifySessionJwt(token);
@@ -195,7 +300,9 @@ export function verifyUserTokenFromReq(req: express.Request): UserSessionInfo | 
   const authHeader = String(req.headers.authorization || '').trim();
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const custom = String(req.headers['x-zuggi-user-token'] || '').trim();
-  const candidates = [custom, bearer].filter(Boolean);
+  const cookies = parseCookies(req);
+  const userCookie = (cookies[USER_SESSION_COOKIE] || '').trim();
+  const candidates = [custom, bearer, userCookie].filter(Boolean);
   for (const token of candidates) {
     const claims = verifySessionJwt(token);
     if (claims && claims.role !== 'admin') {
@@ -558,13 +665,18 @@ function isLegacyBotRecord(rec: any): boolean {
 function normalizeSupabaseUrl(rawUrl: string): string {
   return rawUrl
     .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .trim()
     .replace(/\/rest\/v1\/?$/i, '')
     .replace(/\/+$/, '');
 }
 
 export function isSupabaseConfigured(): boolean {
   const url = normalizeSupabaseUrl(process.env.SUPABASE_URL || '');
-  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '').trim();
+  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '')
+    .trim()
+    .replace(/^['"]+|['"]+$/g, '')
+    .trim();
   if (!url || !key) return false;
   try {
     const parsed = new URL(url);
@@ -1132,6 +1244,13 @@ supabaseRouter.get('/bootstrap', async (req, res) => {
 });
 
 supabaseRouter.post('/sync', async (req, res) => {
+  if (!isCsrfSafeMutation(req)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Cross-site request blocked.'
+    });
+  }
+
   const isAdmin = verifyAdminTokenFromReq(req);
   const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
 

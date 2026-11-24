@@ -578,14 +578,24 @@ export function anonymizeDriverDataByPhone(cleanTenDigits: string): void {
   }
 }
 
+function normalizeE164IndianPhone(raw: string): string {
+  const cleaned = String(raw || '').replace(/[\s\-()]/g, '').trim();
+  if (/^\+91[6-9]\d{9}$/.test(cleaned)) return cleaned;
+  if (/^[6-9]\d{9}$/.test(cleaned)) return `+91${cleaned}`;
+  if (/^91[6-9]\d{9}$/.test(cleaned)) return `+${cleaned}`;
+  if (/^\+\d{10,15}$/.test(cleaned)) return cleaned;
+  return '';
+}
+
 // Helper: Dispatch SMS alert to driver (data-minimized: sends only vehicle number & trip link)
 async function dispatchDriverTripSms(driverPhone: string, _driverName: string, tripId: string, trackingUrl: string, vehicleNumber: string) {
   const apiKey = (process.env.HTTPSMS_API_KEY || '').trim();
-  const fromPhone = (process.env.MY_JIO_PHONE_NUMBER || '').trim();
+  const fromPhone = normalizeE164IndianPhone(process.env.MY_JIO_PHONE_NUMBER || '');
+  const toPhone = normalizeE164IndianPhone(driverPhone);
 
   const message = `Zuggi Freight Alert: Vehicle ${vehicleNumber} assigned for Trip #${tripId.slice(-6).toUpperCase()}. Tap to start trip & transmit GPS: ${trackingUrl}`;
 
-  if (apiKey && fromPhone && driverPhone.startsWith('+91')) {
+  if (apiKey && fromPhone && toPhone) {
     try {
       const response = await fetch('https://api.httpsms.com/v1/messages/send', {
         method: 'POST',
@@ -597,7 +607,7 @@ async function dispatchDriverTripSms(driverPhone: string, _driverName: string, t
         body: JSON.stringify({
           content: message,
           from: fromPhone,
-          to: driverPhone
+          to: toPhone
         })
       });
       await response.json().catch(() => null);

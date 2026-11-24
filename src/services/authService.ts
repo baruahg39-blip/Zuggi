@@ -657,7 +657,8 @@ class AuthService {
 
     const res = await fetch('/api/auth/set-passcode', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({
         phone: clean,
         passcode: cleanPasscode,
@@ -707,7 +708,8 @@ class AuthService {
     try {
       const res = await fetch('/api/auth/login-passcode', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone: clean, passcode: cleanPasscode })
       });
       const data = await res.json().catch(() => ({}));
@@ -817,7 +819,8 @@ class AuthService {
     try {
       const res = await fetch('/api/auth/reset-passcode', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({
           phone: clean,
           newPasscode: cleanPasscode,
@@ -969,7 +972,8 @@ class AuthService {
 
     const sessionRes = await fetch('/api/auth/admin-session', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: cleanPasscode })
     });
 
@@ -1008,12 +1012,16 @@ class AuthService {
 
     // 1. Trigger authoritative server-side & Supabase erasure/anonymization
     if (cleanPhone.length === 10 || userToken) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest'
+      };
       if (userToken) {
         headers['Authorization'] = `Bearer ${userToken}`;
       }
       const res = await fetch('/api/auth/request-account-deletion', {
         method: 'POST',
+        credentials: 'same-origin',
         headers,
         body: JSON.stringify({
           phone: cleanPhone || undefined,
@@ -1082,15 +1090,14 @@ class AuthService {
    * signs out of Firebase Auth, and ensures currentUser is null.
    */
   public async logout(): Promise<void> {
-    // Blacklist active user/admin JWT session token server-side before clearing locally
+    // Blacklist active user/admin JWT session token & clear HttpOnly cookies server-side
     try {
       const headers = logisticsStore.buildAuthHeaders(true);
-      if (headers['Authorization']) {
-        await fetch('/api/auth/logout', {
-          method: 'POST',
-          headers
-        });
-      }
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers
+      });
     } catch {
       // Non-blocking if offline
     }

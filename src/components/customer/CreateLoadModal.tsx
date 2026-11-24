@@ -102,16 +102,18 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   const defaultPickupCoord = { lat: 26.1445, lng: 91.7362 };
   const defaultDropCoord = { lat: 26.7509, lng: 94.2037 };
 
-  // Callback from FreightLocationPicker
-  const handleMapLocationPayload = (payload: FreightLocationPayload) => {
-    setPickupCustomAddress(payload.pickup.formatted_address);
-    setPickupCity(payload.pickup.city);
+  // Live sync helper from FreightLocationPicker (keeps CreateLoadModal synced for both "Save & Apply" and "Next Step")
+  const syncMapLocationPayload = (payload: FreightLocationPayload, advanceToNextStep: boolean) => {
+    if (payload.pickup.formatted_address) setPickupCustomAddress(payload.pickup.formatted_address);
+    if (payload.pickup.city) setPickupCity(payload.pickup.city);
+    if (payload.pickup.pincode) setPickupPincode(payload.pickup.pincode);
     if (payload.pickup.state) setPickupState(payload.pickup.state);
     if (payload.pickup.contactName) setPickupContactName(payload.pickup.contactName);
     if (payload.pickup.contactPhone) setPickupContactPhone(payload.pickup.contactPhone);
 
-    setDeliveryCustomAddress(payload.drop.formatted_address);
-    setDeliveryCity(payload.drop.city);
+    if (payload.drop.formatted_address) setDeliveryCustomAddress(payload.drop.formatted_address);
+    if (payload.drop.city) setDeliveryCity(payload.drop.city);
+    if (payload.drop.pincode) setDeliveryPincode(payload.drop.pincode);
     if (payload.drop.state) setDeliveryState(payload.drop.state);
     if (payload.drop.contactName) setDeliveryContactName(payload.drop.contactName);
     if (payload.drop.contactPhone) setDeliveryContactPhone(payload.drop.contactPhone);
@@ -143,8 +145,14 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
     setRouteDistanceKm(payload.route_meta.distance_km);
     setRouteDurationMins(payload.route_meta.duration_mins);
 
-    // Smoothly progress to Step 2: Cargo Requirements
-    setStep(2);
+    if (advanceToNextStep) {
+      setStep(2);
+    }
+  };
+
+  // Callback from FreightLocationPicker final confirm button
+  const handleMapLocationPayload = (payload: FreightLocationPayload) => {
+    syncMapLocationPayload(payload, true);
   };
 
   // Live Estimate calculation
@@ -310,9 +318,17 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
         targetBudgetInr: pricingMode === 'instant_fixed' ? estimate.totalEstimate : targetBudgetInr,
         estimatedDistanceKm: finalDistanceKm,
         estimatedDurationHours: finalDurationHours
-      });
+      }, { skipImmediateSync: true });
 
-      showToast('Commercial load published to marketplace!', 'success');
+      const syncResult = await logisticsStore.syncLoadToCloud(newLoad);
+      if (syncResult.authRequired) {
+        showToast(
+          'Load saved locally, but your login session expired. Please sign in again so transporters can see this load.',
+          'info'
+        );
+      } else {
+        showToast('Commercial load published to marketplace!', 'success');
+      }
       onLoadCreated(newLoad.id);
       onClose();
     } catch (err: any) {
@@ -420,6 +436,7 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                     contactName: deliveryContactName,
                     contactPhone: deliveryContactPhone
                   }}
+                  onLocationsChange={(payload) => syncMapLocationPayload(payload, false)}
                   onLocationSelected={handleMapLocationPayload}
                 />
               ) : (
@@ -445,8 +462,11 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                         <LocationAutocompleteInput
                           value={pickupSearchText}
                           onChangeText={(txt) => {
+                            const prev = pickupSearchText;
                             setPickupSearchText(txt);
-                            if (!pickupCity) setPickupCity(txt);
+                            if (!pickupCity || pickupCity === prev) {
+                              setPickupCity(txt);
+                            }
                           }}
                           onSelectPlace={handleSelectPickupPlace}
                           placeholder="e.g. Six Mile Guwahati, Nagaon, Jorhat..."
@@ -544,8 +564,11 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
                       <LocationAutocompleteInput
                         value={deliverySearchText}
                         onChangeText={(txt) => {
+                          const prev = deliverySearchText;
                           setDeliverySearchText(txt);
-                          if (!deliveryCity) setDeliveryCity(txt);
+                          if (!deliveryCity || deliveryCity === prev) {
+                            setDeliveryCity(txt);
+                          }
                         }}
                         onSelectPlace={handleSelectDeliveryPlace}
                         placeholder="e.g. Dibrugarh, Tinsukia, Shillong, Siliguri, Kolkata..."

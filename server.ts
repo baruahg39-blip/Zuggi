@@ -1,14 +1,15 @@
+import './server/env.js';
 import express from 'express';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { cashfreeServer } from './server/cashfree.js';
 import { tripsRouter, anonymizeDriverDataByPhone } from './server/trips.js';
 import {
   supabaseRouter,
+  isSupabaseConfigured,
   findSupabaseUserByPhone,
   findSupabaseUserById,
   findSupabaseVehiclesByOwner,
@@ -23,6 +24,9 @@ import {
   verifyUserTokenFromReq,
   revokeTokenFromReq,
   revokeUserSessions,
+  setUserSessionCookie,
+  setAdminSessionCookie,
+  clearSessionCookies,
   filterSelfUserFields,
   deleteAndAnonymizeUserDataInSupabase
 } from './server/supabase.js';
@@ -49,9 +53,6 @@ import {
   authActionRateLimiter,
   conditionalResetOtpRateLimiter
 } from './server/security.js';
-
-dotenv.config({ path: '.env.local' });
-dotenv.config(); // fallback to .env if .env.local doesn't exist
 
 // Refuse to start in production if critical environment variables or DB TLS checks fail
 validateEnvironmentConfig();
@@ -142,13 +143,26 @@ app.use((req, res, next) => {
   return publicStaticMiddleware(req, res, next);
 });
 
-// Health check endpoint
+function normalizeIndianE164(raw: unknown): string {
+  const cleaned = String(raw || '').replace(/['"\s\-()]/g, '').trim();
+  if (/^\+91[6-9]\d{9}$/.test(cleaned)) return cleaned;
+  if (/^[6-9]\d{9}$/.test(cleaned)) return `+91${cleaned}`;
+  if (/^91[6-9]\d{9}$/.test(cleaned)) return `+${cleaned}`;
+  if (/^\+\d{10,15}$/.test(cleaned)) return cleaned;
+  return '';
+}
+
+// Health check endpoint (boolean capability flags only — zero secrets or PII)
 app.get('/api/health', (_req, res) => {
+  const apiKey = (process.env.HTTPSMS_API_KEY || '').trim();
+  const fromPhone = normalizeIndianE164(process.env.MY_JIO_PHONE_NUMBER || '');
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'Zuggi Freight Server',
-    gateway: 'SIM / httpSMS'
+    gateway: 'SIM / httpSMS',
+    smsGatewayConfigured: Boolean(apiKey && fromPhone),
+    supabaseConfigured: isSupabaseConfigured()
   });
 });
 
@@ -269,17 +283,12 @@ app.post('/api/auth/send-otp', conditionalResetOtpRateLimiter, async (req, res) 
     const otp = String(crypto.randomInt(100000, 1000000));
     const expiresAt = now + 10 * 60 * 1000; // 10-minute validity
 
-    // Record OTP in memory before gateway call
-    otpStore.set(phone, {
-      otp,
-      expiresAt,
-      lastSentAt: now
-    });
-
     const apiKey = (process.env.HTTPSMS_API_KEY || '').trim();
-    const fromPhone = (process.env.MY_JIO_PHONE_NUMBER || '').trim();
+    const rawFromPhone = (process.env.MY_JIO_PHONE_NUMBER || '').trim();
+    const fromPhone = normalizeIndianE164(rawFromPhone);
 
     let smsDispatched = false;
+    let gatewayFailureReason = '';
 
     if (apiKey && fromPhone) {
       try {
@@ -291,41 +300,71 @@ app.post('/api/auth/send-otp', conditionalResetOtpRateLimiter, async (req, res) 
             'Accept': 'application/json'
           },
           body: JSON.stringify({
-            content: `Your Zuggi login OTP is: ${otp}. Valid for 5 minutes. Please do not share it with anyone.`,
+            content: `Your Zuggi login OTP is: ${otp}. Valid for 10 minutes. Please do not share it with anyone.`,
             from: fromPhone,
             to: phone
           })
         });
 
         const result = await response.json().catch(() => ({}));
+        const isSuccessStatus =
+          response.ok &&
+          result?.status !== 'error' &&
+          (result?.status === 'success' || Boolean(result?.data?.id) || response.status === 200 || response.status === 201 || response.status === 202);
 
-        if (response.ok && result?.status === 'success') {
+        if (isSuccessStatus) {
           smsDispatched = true;
         } else {
-          console.warn(`[httpSMS Gateway Notice] correlationId=${req.correlationId} status=${response.status}`);
+          gatewayFailureReason = String(result?.message || result?.status || `HTTP_${response.status}`).slice(0, 120);
+          console.warn(
+            `[httpSMS Gateway Notice] correlationId=${req.correlationId} status=${response.status} reason=${gatewayFailureReason}`
+          );
         }
       } catch {
+        gatewayFailureReason = 'network_unreachable';
         console.warn(`[httpSMS Gateway Network Notice] correlationId=${req.correlationId} SMS gateway unreachable.`);
       }
+    } else if (IS_PRODUCTION) {
+      gatewayFailureReason = !apiKey
+        ? 'missing_httpsms_api_key'
+        : !rawFromPhone
+          ? 'missing_sender_phone'
+          : 'invalid_sender_phone_format';
+      console.warn(`[httpSMS Config Notice] correlationId=${req.correlationId} reason=${gatewayFailureReason}`);
     }
 
     if (smsDispatched) {
+      otpStore.set(phone, {
+        otp,
+        expiresAt,
+        lastSentAt: now
+      });
       return res.json({
         success: true,
+        deliveryMode: 'sms',
         message: 'OTP sent successfully to your mobile number.'
       });
     }
 
     if (IS_PRODUCTION) {
+      // Do NOT record a 60s cooldown when SMS dispatch fails so users can retry right away
       return res.status(503).json({
         success: false,
-        message: 'SMS delivery service is temporarily unavailable. Please try again shortly.'
+        code: gatewayFailureReason || 'SMS_GATEWAY_UNAVAILABLE',
+        message:
+          'SMS delivery service is temporarily unavailable. Please try again shortly, or sign in with your Passcode if you already have an account.'
       });
     }
 
-    // Non-production preview fallback when SMS gateway env vars are not yet configured
+    // Non-production preview fallback when SMS gateway env vars are not configured or gateway returned an error
+    otpStore.set(phone, {
+      otp,
+      expiresAt,
+      lastSentAt: now
+    });
     return res.json({
       success: true,
+      deliveryMode: 'preview',
       message: `Preview verification OTP generated: ${otp}`,
       otp
     });
@@ -375,12 +414,16 @@ app.post('/api/auth/verify-otp', loginRateLimiter, async (req, res) => {
           passcodeUserStore.set(clean10, existingUser);
         }
       }
+      const sessionToken = existingUser ? issueUserSessionToken(existingUser) : undefined;
+      if (sessionToken) {
+        setUserSessionCookie(req, res, sessionToken);
+      }
       return {
         success: true,
         verified: true,
         phone: verifiedPhone,
         resetToken,
-        sessionToken: existingUser ? issueUserSessionToken(existingUser) : undefined,
+        sessionToken,
         existingUser: sanitizeUserForClient(existingUser)
       };
     };
@@ -480,9 +523,10 @@ app.get('/api/auth/me', async (req, res) => {
   return res.json({ success: true, user: sanitizeUserForClient(userRecord) });
 });
 
-// Authenticated logout: immediately blacklists caller's user/admin JWT on server
+// Authenticated logout: immediately blacklists caller's user/admin JWT on server & clears cookies
 app.post('/api/auth/logout', (req, res) => {
   const revoked = revokeTokenFromReq(req);
+  clearSessionCookies(req, res);
   return res.json({
     success: true,
     revoked,
@@ -585,10 +629,12 @@ app.post('/api/auth/set-passcode', authActionRateLimiter, async (req, res) => {
     passcodeAttemptStore.delete(clean10);
     await upsertSupabaseRecords('vs_users', [mergedUser], { isAdmin: false });
 
+    const sessionToken = issueUserSessionToken(mergedUser);
+    setUserSessionCookie(req, res, sessionToken);
     return res.json({
       success: true,
       message: 'Login passcode saved! You can now sign in without OTP.',
-      sessionToken: issueUserSessionToken(mergedUser),
+      sessionToken,
       user: sanitizeUserForClient(mergedUser)
     });
   } catch (err: any) {
@@ -660,9 +706,11 @@ app.post('/api/auth/login-passcode', loginRateLimiter, async (req, res) => {
     }
 
     passcodeAttemptStore.delete(clean10);
+    const sessionToken = issueUserSessionToken(userRecord);
+    setUserSessionCookie(req, res, sessionToken);
     return res.json({
       success: true,
-      sessionToken: issueUserSessionToken(userRecord),
+      sessionToken,
       user: sanitizeUserForClient(userRecord)
     });
   } catch (err: any) {
@@ -742,10 +790,12 @@ app.post('/api/auth/reset-passcode', passwordResetRateLimiter, async (req, res) 
     passcodeUserStore.set(clean10, mergedUser);
     await upsertSupabaseRecords('vs_users', [mergedUser]);
 
+    const sessionToken = issueUserSessionToken(mergedUser);
+    setUserSessionCookie(req, res, sessionToken);
     return res.json({
       success: true,
       message: 'Passcode reset successfully! You can now sign in with your new passcode.',
-      sessionToken: issueUserSessionToken(mergedUser),
+      sessionToken,
       user: sanitizeUserForClient(mergedUser)
     });
   } catch (err: any) {
@@ -929,6 +979,7 @@ app.post('/api/auth/admin-claim', loginRateLimiter, async (req, res) => {
   );
 
   const token = issueAdminSessionToken(ownerEmail);
+  setAdminSessionCookie(req, res, token);
   return res.json({ success: true, token });
 });
 
@@ -991,6 +1042,7 @@ app.post('/api/auth/admin-session', loginRateLimiter, async (req, res) => {
 
   adminLoginAttempts.delete(clientKey);
   const token = issueAdminSessionToken(ownerEmail);
+  setAdminSessionCookie(req, res, token);
   return res.json({ success: true, token });
 });
 

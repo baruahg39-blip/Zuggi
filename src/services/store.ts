@@ -381,8 +381,37 @@ class LogisticsStore {
     if (active) {
       this.initFirestoreSync(active);
     }
+    void this.hydrateSessionFromServer();
     void this.initSupabaseSync();
     this.startLiveBackgroundSync();
+  }
+
+  public async hydrateSessionFromServer(): Promise<User | null> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return null;
+    try {
+      const res = await fetch('/api/auth/me', {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: this.buildAuthHeaders(false)
+      });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => null);
+      if (data?.success && data?.user?.id) {
+        const serverUser = data.user as User;
+        const current = this.currentUserMemory;
+        this.currentUserMemory = {
+          ...(current || {}),
+          ...serverUser,
+          role: current?.role || serverUser.role
+        };
+        this.notifyListeners();
+        return this.currentUserMemory;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   private startLiveBackgroundSync() {
@@ -626,7 +655,9 @@ class LogisticsStore {
   }
 
   public buildAuthHeaders(includeJsonContentType = false): Record<string, string> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = {
+      'X-Requested-With': 'XMLHttpRequest'
+    };
     if (includeJsonContentType) {
       headers['Content-Type'] = 'application/json';
     }
@@ -647,9 +678,40 @@ class LogisticsStore {
     const body = Array.isArray(payload) ? { table, records: payload } : { table, record: payload };
     fetch('/api/db/sync', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: this.buildAuthHeaders(true),
       body: JSON.stringify(body)
     }).catch(() => {});
+  }
+
+  public async syncLoadToCloud(
+    load: LoadItem
+  ): Promise<{ ok: boolean; authRequired?: boolean; message?: string }> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return { ok: true };
+    }
+    try {
+      const res = await fetch('/api/db/sync', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: this.buildAuthHeaders(true),
+        body: JSON.stringify({ table: 'vs_loads', record: load })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          authRequired: true,
+          message: data?.message || 'Authentication required to sync load.'
+        };
+      }
+      return {
+        ok: res.ok || res.status === 202,
+        message: data?.message
+      };
+    } catch {
+      return { ok: false, message: 'Network unavailable; load saved locally.' };
+    }
   }
 
   public async initSupabaseSync(force = false): Promise<void> {
@@ -662,6 +724,7 @@ class LogisticsStore {
     try {
       const res = await fetch('/api/db/bootstrap', {
         cache: 'no-store',
+        credentials: 'same-origin',
         headers: this.buildAuthHeaders(false)
       });
       if (!res.ok) return;
@@ -1118,7 +1181,10 @@ class LogisticsStore {
     return this.getLoads().find((l) => l.id === id);
   }
 
-  public createLoad(newLoadData: Omit<LoadItem, 'id' | 'createdAt' | 'status' | 'matchedVehicleCount' | 'deliveryOtp'>): LoadItem {
+  public createLoad(
+    newLoadData: Omit<LoadItem, 'id' | 'createdAt' | 'status' | 'matchedVehicleCount' | 'deliveryOtp'>,
+    options?: { skipImmediateSync?: boolean }
+  ): LoadItem {
     const loads = this.getLoads();
     const id = `load_${Date.now()}`;
     // Generate secure 4-digit OTP for consignee delivery handover
@@ -1150,7 +1216,9 @@ class LogisticsStore {
     setDoc(doc(db, 'loads', newLoad.id), newLoad).catch((err) => {
       console.warn('Firestore load sync notice:', err?.message);
     });
-    this.syncToSupabase('vs_loads', newLoad);
+    if (!options?.skipImmediateSync) {
+      this.syncToSupabase('vs_loads', newLoad);
+    }
 
     // Notify drivers in network
     this.addNotification({

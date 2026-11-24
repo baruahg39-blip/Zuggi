@@ -64,6 +64,7 @@ interface FreightLocationPickerProps {
   initialPickup?: Partial<LocationDetail>;
   initialDrop?: Partial<LocationDetail>;
   onLocationSelected: (payload: FreightLocationPayload) => void;
+  onLocationsChange?: (payload: FreightLocationPayload) => void;
   onCancel?: () => void;
   compact?: boolean;
 }
@@ -286,6 +287,7 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   initialPickup,
   initialDrop,
   onLocationSelected,
+  onLocationsChange,
   onCancel,
   compact = false
 }) => {
@@ -294,14 +296,14 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   // Active step: 'pickup' | 'drop' | 'preview'
   const [activeStep, setActiveStep] = useState<'pickup' | 'drop' | 'preview'>('pickup');
 
-  // Location States
+  // Location States (seeded with safe default coordinates + resolved on mount so fields are never blank)
   const [pickup, setPickup] = useState<LocationDetail>({
     lat: initialPickup?.lat || 26.1445,
     lng: initialPickup?.lng || 91.7362,
-    formatted_address: initialPickup?.formatted_address || '',
-    city: initialPickup?.city || '',
-    state: initialPickup?.state || '',
-    pincode: initialPickup?.pincode || '',
+    formatted_address: initialPickup?.formatted_address || 'Guwahati, Assam',
+    city: initialPickup?.city || 'Guwahati',
+    state: initialPickup?.state || 'Assam',
+    pincode: initialPickup?.pincode || '781001',
     landmark: initialPickup?.landmark || '',
     contactName: initialPickup?.contactName || '',
     contactPhone: initialPickup?.contactPhone || ''
@@ -310,10 +312,10 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
   const [drop, setDrop] = useState<LocationDetail>({
     lat: initialDrop?.lat || 26.7509,
     lng: initialDrop?.lng || 94.2037,
-    formatted_address: initialDrop?.formatted_address || '',
-    city: initialDrop?.city || '',
-    state: initialDrop?.state || '',
-    pincode: initialDrop?.pincode || '',
+    formatted_address: initialDrop?.formatted_address || 'Jorhat, Assam',
+    city: initialDrop?.city || 'Jorhat',
+    state: initialDrop?.state || 'Assam',
+    pincode: initialDrop?.pincode || '785001',
     landmark: initialDrop?.landmark || '',
     contactName: initialDrop?.contactName || '',
     contactPhone: initialDrop?.contactPhone || ''
@@ -321,6 +323,8 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
 
   const [pickupConfirmed, setPickupConfirmed] = useState<boolean>(!!initialPickup?.formatted_address);
   const [dropConfirmed, setDropConfirmed] = useState<boolean>(!!initialDrop?.formatted_address);
+  const onLocationsChangeRef = useRef(onLocationsChange);
+  onLocationsChangeRef.current = onLocationsChange;
 
   // Address resolution state
   const [isGeocoding, setIsGeocoding] = useState<boolean>(false);
@@ -358,6 +362,64 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
     window.addEventListener('gmp-quota-exceeded', handleQuota);
     return () => window.removeEventListener('gmp-quota-exceeded', handleQuota);
   }, []);
+
+  // Auto-resolve initial coordinates via server reverse-geocode when no explicit address was passed in
+  useEffect(() => {
+    let cancelled = false;
+    const resolveIfInitialEmpty = async () => {
+      try {
+        if (!initialPickup?.formatted_address) {
+          const res = await fetch(`/api/maps/reverse-geocode?lat=${pickup.lat}&lng=${pickup.lng}`);
+          const data = await res.json().catch(() => null);
+          if (!cancelled && data?.success && data.formatted_address) {
+            setPickup((prev) => ({
+              ...prev,
+              formatted_address: data.formatted_address,
+              city: data.city || prev.city || 'Guwahati',
+              state: data.state || prev.state || 'Assam',
+              pincode: data.pincode || prev.pincode
+            }));
+          }
+        }
+        if (!initialDrop?.formatted_address) {
+          const res = await fetch(`/api/maps/reverse-geocode?lat=${drop.lat}&lng=${drop.lng}`);
+          const data = await res.json().catch(() => null);
+          if (!cancelled && data?.success && data.formatted_address) {
+            setDrop((prev) => ({
+              ...prev,
+              formatted_address: data.formatted_address,
+              city: data.city || prev.city || 'Jorhat',
+              state: data.state || prev.state || 'Assam',
+              pincode: data.pincode || prev.pincode
+            }));
+          }
+        }
+      } catch {
+        // Retain safe default Guwahati / Jorhat Assam labels if offline
+      }
+    };
+    void resolveIfInitialEmpty();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Live-sync current pickup/drop/route selection to parent modal so both "Save & Apply" and "Next Step" work seamlessly
+  useEffect(() => {
+    if (!onLocationsChangeRef.current) return;
+    if (!pickup.city && !pickup.formatted_address) return;
+    if (!drop.city && !drop.formatted_address) return;
+    const straightKm = Math.max(10, Math.round(Math.hypot(drop.lat - pickup.lat, drop.lng - pickup.lng) * 111 * 1.25));
+    onLocationsChangeRef.current({
+      pickup,
+      drop,
+      route_meta: routeMeta || {
+        distance_km: straightKm,
+        duration_mins: Math.max(15, Math.round((straightKm / 45) * 60)),
+        polyline: ''
+      }
+    });
+  }, [pickup, drop, routeMeta]);
 
   // Update address resolution from inner controller
   const handleCenterAddressResolved = useCallback((step: 'pickup' | 'drop', detail: LocationDetail) => {
@@ -695,12 +757,26 @@ export const FreightLocationPicker: React.FC<FreightLocationPickerProps> = ({
 
   // 5. Final Submit to Parent
   const handleFinalSubmit = () => {
+    const safePickup: LocationDetail = {
+      ...pickup,
+      city: (pickup.city || 'Guwahati').trim(),
+      formatted_address: (pickup.formatted_address || `${pickup.city || 'Guwahati'}, ${pickup.state || 'Assam'}`).trim()
+    };
+    const safeDrop: LocationDetail = {
+      ...drop,
+      city: (drop.city || 'Jorhat').trim(),
+      formatted_address: (drop.formatted_address || `${drop.city || 'Jorhat'}, ${drop.state || 'Assam'}`).trim()
+    };
+    const straightKm = Math.max(
+      10,
+      Math.round(Math.hypot(safeDrop.lat - safePickup.lat, safeDrop.lng - safePickup.lng) * 111 * 1.25)
+    );
     const finalPayload: FreightLocationPayload = {
-      pickup,
-      drop,
+      pickup: safePickup,
+      drop: safeDrop,
       route_meta: routeMeta || {
-        distance_km: Math.round(Math.hypot(drop.lat - pickup.lat, drop.lng - pickup.lng) * 111 * 1.25),
-        duration_mins: Math.round(Math.hypot(drop.lat - pickup.lat, drop.lng - pickup.lng) * 111 * 1.25 / 45 * 60),
+        distance_km: straightKm,
+        duration_mins: Math.max(15, Math.round((straightKm / 45) * 60)),
         polyline: ''
       }
     };

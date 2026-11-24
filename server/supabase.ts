@@ -874,6 +874,7 @@ export async function upsertSupabaseRecords(
     const rows = prepared.map((r) => buildRowForTable(table, r));
     const { error } = await client.from(table).upsert(rows, { onConflict: 'id' });
     if (error) return { ok: false, error: error.message };
+    invalidateBootstrapTableCache(table);
     return { ok: true };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'Supabase upsert failed' };
@@ -1123,6 +1124,85 @@ supabaseRouter.get('/status', async (_req, res) => {
   }
 });
 
+const BOOTSTRAP_CACHE_TTL_MS = 10 * 1000;
+const bootstrapTableCache = new Map<SupabaseSyncTable, { rows: any[]; fetchedAt: number }>();
+const bootstrapInFlight = new Map<SupabaseSyncTable, Promise<{ rows: any[]; schemaMissing: boolean; transientError: boolean }>>();
+
+function invalidateBootstrapTableCache(table?: SupabaseSyncTable): void {
+  if (table) {
+    bootstrapTableCache.delete(table);
+  } else {
+    bootstrapTableCache.clear();
+  }
+}
+
+function isMissingSchemaError(err: any): boolean {
+  const code = String(err?.code || '').toUpperCase();
+  return code === '42P01' || code === 'PGRST205' || code === '42703';
+}
+
+async function fetchBootstrapTableRows(
+  client: SupabaseClient,
+  table: SupabaseSyncTable,
+  orderByUpdatedAt = false
+): Promise<{ rows: any[]; schemaMissing: boolean; transientError: boolean }> {
+  const cached = bootstrapTableCache.get(table);
+  if (cached && Date.now() - cached.fetchedAt < BOOTSTRAP_CACHE_TTL_MS) {
+    return { rows: cached.rows, schemaMissing: false, transientError: false };
+  }
+
+  const existingFlight = bootstrapInFlight.get(table);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const runFetch = (async () => {
+    const executeQuery = async () => {
+      const q = client.from(table).select('data');
+      return orderByUpdatedAt
+        ? q.order('updated_at', { ascending: false }).limit(500)
+        : q.limit(500);
+    };
+
+    try {
+      let res = await executeQuery();
+      if (res.error && !isMissingSchemaError(res.error)) {
+        // One quick retry for transient network / socket resets from Supabase
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        res = await executeQuery();
+      }
+
+      if (res.error) {
+        if (isMissingSchemaError(res.error)) {
+          return { rows: [], schemaMissing: true, transientError: false };
+        }
+        return {
+          rows: cached?.rows || [],
+          schemaMissing: false,
+          transientError: true
+        };
+      }
+
+      const cleaned = (res.data || [])
+        .map((r: any) => r?.data)
+        .filter((r: any) => r && !isLegacyBotRecord(r));
+      bootstrapTableCache.set(table, { rows: cleaned, fetchedAt: Date.now() });
+      return { rows: cleaned, schemaMissing: false, transientError: false };
+    } catch {
+      return {
+        rows: cached?.rows || [],
+        schemaMissing: false,
+        transientError: true
+      };
+    } finally {
+      bootstrapInFlight.delete(table);
+    }
+  })();
+
+  bootstrapInFlight.set(table, runFetch);
+  return runFetch;
+}
+
 supabaseRouter.get('/bootstrap', async (req, res) => {
   const client = getSupabaseClient();
   if (!client) {
@@ -1133,20 +1213,21 @@ supabaseRouter.get('/bootstrap', async (req, res) => {
   const callerSession = !isAdmin ? verifyUserTokenFromReq(req) : null;
   const callerId = callerSession?.userId || '';
   const callerPhone10 = callerSession?.phone10 || '';
+  const needsPrivateTables = isAdmin || Boolean(callerSession);
 
   try {
+    const emptyTableResult = Promise.resolve({ rows: [] as any[], schemaMissing: false, transientError: false });
     const [usersRes, vehRes, loadsRes, quotesRes, bookingsRes, ticketsRes] = await Promise.all([
-      client.from('vs_users').select('data').limit(500),
-      client.from('vs_vehicles').select('data').limit(500),
-      client.from('vs_loads').select('data').order('updated_at', { ascending: false }).limit(500),
-      client.from('vs_quotations').select('data').limit(500),
-      client.from('vs_bookings').select('data').order('updated_at', { ascending: false }).limit(500),
-      client.from('vs_support_tickets').select('data').limit(500)
+      needsPrivateTables ? fetchBootstrapTableRows(client, 'vs_users', false) : emptyTableResult,
+      fetchBootstrapTableRows(client, 'vs_vehicles', false),
+      fetchBootstrapTableRows(client, 'vs_loads', true),
+      needsPrivateTables ? fetchBootstrapTableRows(client, 'vs_quotations', false) : emptyTableResult,
+      needsPrivateTables ? fetchBootstrapTableRows(client, 'vs_bookings', true) : emptyTableResult,
+      needsPrivateTables ? fetchBootstrapTableRows(client, 'vs_support_tickets', false) : emptyTableResult
     ]);
 
-    const firstError = [usersRes, vehRes, loadsRes, quotesRes, bookingsRes, ticketsRes].find((r) => r.error)?.error;
-    if (firstError) {
-      console.warn('[Supabase Bootstrap Notice] Query error:', firstError.code || 'query_failed');
+    const allResults = [usersRes, vehRes, loadsRes, quotesRes, bookingsRes, ticketsRes];
+    if (allResults.some((r) => r.schemaMissing)) {
       return res.json({
         success: true,
         configured: true,
@@ -1156,12 +1237,12 @@ supabaseRouter.get('/bootstrap', async (req, res) => {
       });
     }
 
-    const rawUsers = (usersRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
-    const rawVehicles = (vehRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
-    const rawLoads = (loadsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
-    const rawQuotes = (quotesRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
-    const rawBookings = (bookingsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
-    const rawTickets = (ticketsRes.data || []).map((r: any) => r.data).filter((r: any) => r && !isLegacyBotRecord(r));
+    const rawUsers = usersRes.rows;
+    const rawVehicles = vehRes.rows;
+    const rawLoads = loadsRes.rows;
+    const rawQuotes = quotesRes.rows;
+    const rawBookings = bookingsRes.rows;
+    const rawTickets = ticketsRes.rows;
 
     const isSelfUser = (u: any) =>
       Boolean(

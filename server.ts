@@ -2187,6 +2187,8 @@ app.get('/robots.txt', (_req, res) => {
     [
       'User-agent: *',
       'Allow: /',
+      'Allow: /sitemap.xml',
+      'Allow: /sitemap-freight.xml',
       'Allow: /truck-booking-guwahati',
       'Allow: /truck-transport-assam',
       'Allow: /truck-hire-guwahati-dibrugarh',

@@ -12,14 +12,6 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// Global handler for Google Maps authentication & quota tracking
-// Source: Google Maps Platform Code Assist
-(window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
-  window.dispatchEvent(
-    new CustomEvent('gmp-quota-exceeded', { detail: { reason: 'auth_error' } })
-  );
-};
-
 // Suppress benign WebSocket closure and external reCAPTCHA messages in proxy environment
 window.addEventListener('unhandledrejection', (event) => {
   const msg = String(event.reason || '');
@@ -35,20 +27,6 @@ console.error = (...args: unknown[]) => {
     return;
   }
   origError.apply(console, args);
-  if (msg.includes('OverQuotaMapError') || msg.includes('QuotaExceededError')) {
-    window.dispatchEvent(
-      new CustomEvent('gmp-quota-exceeded', { detail: { reason: 'quota_exceeded' } })
-    );
-  } else if (
-    msg.includes('RefererNotAllowedMapError') ||
-    msg.includes('InvalidKeyMapError') ||
-    msg.includes('ApiNotActivatedMapError') ||
-    msg.includes('BillingNotEnabledMapError')
-  ) {
-    window.dispatchEvent(
-      new CustomEvent('gmp-quota-exceeded', { detail: { reason: 'auth_error' } })
-    );
-  }
 };
 
 createRoot(document.getElementById('root')!).render(<App />);

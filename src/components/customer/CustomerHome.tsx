@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { LoadItem, User, Booking, CommercialVehicle } from '../../types';
 import { logisticsStore } from '../../services/store';
+import { fetchOsrmRoute } from '../../services/osmMapService';
 import { exportCustomerBookingsToCsv } from '../../utils/csvExport';
 import { ShipperLiveTracker } from '../tracking/ShipperLiveTracker';
 import { DriverGpsSimulatorModal } from '../tracking/DriverGpsSimulatorModal';
@@ -61,6 +62,7 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   const [calcFromCoords, setCalcFromCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [calcTo, setCalcTo] = useState('');
   const [calcToCoords, setCalcToCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [calcOsrmRoute, setCalcOsrmRoute] = useState<{ distanceKm: number; durationHours: number } | null>(null);
   const [calcVehicle, setCalcVehicle] = useState(vehicleCategories[1]?.id || 'bolero_pickup');
 
   // Live Tracking and Simulator state
@@ -146,7 +148,27 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
     };
   }, [bookings]);
 
-  // Quick instant estimate computation from real selected coordinates
+  // Fetch real OSRM road distance & transit duration whenever estimator origin & destination change
+  useEffect(() => {
+    if (!calcFromCoords || !calcToCoords) {
+      setCalcOsrmRoute(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetchOsrmRoute(calcFromCoords, calcToCoords, controller.signal)
+      .then((res) => {
+        if (!controller.signal.aborted) {
+          setCalcOsrmRoute({
+            distanceKm: res.distanceKm,
+            durationHours: Math.round((res.durationMins / 60) * 10) / 10
+          });
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [calcFromCoords?.lat, calcFromCoords?.lng, calcToCoords?.lat, calcToCoords?.lng]);
+
+  // Quick instant estimate computation from real OSRM road distance (or 1.3x Haversine fallback while loading)
   const quickEst = useMemo(() => {
     if (!calcFromCoords || !calcToCoords) return null;
     return logisticsStore.calculateEstimatedFreight(
@@ -154,9 +176,13 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
       calcFromCoords.lng,
       calcToCoords.lat,
       calcToCoords.lng,
-      calcVehicle
+      calcVehicle,
+      'full_load',
+      0,
+      calcOsrmRoute?.distanceKm ?? null,
+      calcOsrmRoute?.durationHours ?? null
     );
-  }, [calcFromCoords, calcToCoords, calcVehicle]);
+  }, [calcFromCoords, calcToCoords, calcVehicle, calcOsrmRoute]);
 
   const handleExportBookingsCsv = () => {
     exportCustomerBookingsToCsv(loads, bookings);

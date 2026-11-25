@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   X, 
   MapPin, 
@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { GoodsCategory, LocationPoint, VehicleCategoryType } from '../../types';
 import { logisticsStore } from '../../services/store';
+import { fetchOsrmRoute } from '../../services/osmMapService';
 import { showToast } from '../shared/Toast';
 import { FreightLocationPicker, FreightLocationPayload } from '../maps/FreightLocationPicker';
 import { LocationAutocompleteInput, SelectedPlace } from '../shared/LocationAutocompleteInput';
@@ -25,6 +26,7 @@ interface CreateLoadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onLoadCreated: (loadId: string) => void;
+  onRequireAuth?: () => void;
 }
 
 const GOODS_CATEGORIES: { id: GoodsCategory; label: string; icon: string }[] = [
@@ -43,7 +45,8 @@ const GOODS_CATEGORIES: { id: GoodsCategory; label: string; icon: string }[] = [
 export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   isOpen,
   onClose,
-  onLoadCreated
+  onLoadCreated,
+  onRequireAuth
 }) => {
   const vehicleCategories = useMemo(() => logisticsStore.getVehicleCategories(), []);
   const currentUser = logisticsStore.getCurrentUser();
@@ -155,7 +158,35 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
     syncMapLocationPayload(payload, true);
   };
 
-  // Live Estimate calculation
+  // Compute exact OSRM road distance & transit time when user picks places in Manual mode
+  useEffect(() => {
+    if (locationInputMode !== 'manual') return;
+    if (!pickupPointState || !deliveryPointState) return;
+
+    const controller = new AbortController();
+    fetchOsrmRoute(
+      { lat: pickupPointState.lat, lng: pickupPointState.lng },
+      { lat: deliveryPointState.lat, lng: deliveryPointState.lng },
+      controller.signal
+    )
+      .then((res) => {
+        if (!controller.signal.aborted) {
+          setRouteDistanceKm(res.distanceKm);
+          setRouteDurationMins(res.durationMins);
+        }
+      })
+      .catch(() => {});
+
+    return () => controller.abort();
+  }, [
+    locationInputMode,
+    pickupPointState?.lat,
+    pickupPointState?.lng,
+    deliveryPointState?.lat,
+    deliveryPointState?.lng
+  ]);
+
+  // Live Estimate calculation (uses exact OSRM road distance & duration when available, 1.3x Haversine fallback otherwise)
   const estimate = useMemo(() => {
     const lat1 = pickupPointState?.lat ?? defaultPickupCoord.lat;
     const lng1 = pickupPointState?.lng ?? defaultPickupCoord.lng;
@@ -169,9 +200,19 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
       lng2,
       requiredVehicleCategory,
       loadType,
-      helpersNeeded
+      helpersNeeded,
+      routeDistanceKm,
+      routeDurationMins ? routeDurationMins / 60 : null
     );
-  }, [pickupPointState, deliveryPointState, requiredVehicleCategory, loadType, helpersNeeded]);
+  }, [
+    pickupPointState,
+    deliveryPointState,
+    requiredVehicleCategory,
+    loadType,
+    helpersNeeded,
+    routeDistanceKm,
+    routeDurationMins
+  ]);
 
   if (!isOpen) return null;
 
@@ -323,8 +364,17 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
       const syncResult = await logisticsStore.syncLoadToCloud(newLoad);
       if (syncResult.authRequired) {
         showToast(
-          'Load saved locally, but your login session expired. Please sign in again so transporters can see this load.',
+          'Load saved locally. Please sign in to publish it to transporters — it will sync automatically right after sign-in.',
           'info'
+        );
+        onLoadCreated(newLoad.id);
+        onClose();
+        onRequireAuth?.();
+        return;
+      } else if (syncResult.forbidden) {
+        showToast(
+          syncResult.message || 'Unable to publish load for this account. Please sign in again.',
+          'error'
         );
       } else {
         showToast('Commercial load published to marketplace!', 'success');

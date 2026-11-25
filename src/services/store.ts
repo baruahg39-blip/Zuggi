@@ -293,6 +293,9 @@ class LogisticsStore {
   private supabaseBootstrapped = false;
   private adminSessionToken: string | null = null;
   private userSessionToken: string | null = null;
+  private sessionEpoch = 0;
+  private sessionHydrationPromise: Promise<User | null> | null = null;
+  private pendingCloudSyncLoads: Map<string, LoadItem> = new Map();
   // In-memory PII stores (never persisted to localStorage to protect against XSS exposure)
   private currentUserMemory: User | null = null;
   private usersMemory: User[] = [];
@@ -301,6 +304,7 @@ class LogisticsStore {
   private partnerApplicationsMemory: PartnerApplication[] = [];
 
   public setAdminSessionToken(token: string | null) {
+    this.sessionEpoch++;
     this.adminSessionToken = token;
   }
 
@@ -309,6 +313,7 @@ class LogisticsStore {
   }
 
   public setUserSessionToken(token: string | null) {
+    this.sessionEpoch++;
     this.userSessionToken = token;
   }
 
@@ -386,32 +391,94 @@ class LogisticsStore {
     this.startLiveBackgroundSync();
   }
 
-  public async hydrateSessionFromServer(): Promise<User | null> {
+  public async hydrateSessionFromServer(force = false): Promise<User | null> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return null;
-    try {
-      const res = await fetch('/api/auth/me', {
-        method: 'GET',
-        credentials: 'same-origin',
-        cache: 'no-store',
-        headers: this.buildAuthHeaders(false)
-      });
-      if (!res.ok) return null;
-      const data = await res.json().catch(() => null);
-      if (data?.success && data?.user?.id) {
-        const serverUser = data.user as User;
-        const current = this.currentUserMemory;
-        this.currentUserMemory = {
-          ...(current || {}),
-          ...serverUser,
-          role: current?.role || serverUser.role
-        };
-        this.notifyListeners();
-        return this.currentUserMemory;
-      }
-      return null;
-    } catch {
-      return null;
+    if (this.sessionHydrationPromise && !force) {
+      return this.sessionHydrationPromise;
     }
+
+    const startEpoch = this.sessionEpoch;
+    let runPromise: Promise<User | null> | null = null;
+    runPromise = (async (): Promise<User | null> => {
+      try {
+        const res = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'no-store',
+          headers: this.buildAuthHeaders(false)
+        });
+        if (res.status === 401 || res.status === 403) {
+          // Only clear a stale sessionStorage stub if no newer login happened while this check was in flight
+          if (this.sessionEpoch === startEpoch) {
+            this.userSessionToken = null;
+            this.adminSessionToken = null;
+            if (this.currentUserMemory) {
+              this.currentUserMemory = null;
+              try {
+                sessionStorage.removeItem('vs_session_stub');
+              } catch {
+                // ignore
+              }
+              this.notifyListeners();
+            }
+          }
+          return null;
+        }
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        if (data?.success && data?.user?.id) {
+          if (data.isAdmin && data.sessionToken) {
+            this.adminSessionToken = String(data.sessionToken);
+          } else if (data.sessionToken) {
+            this.userSessionToken = String(data.sessionToken);
+          }
+          const serverUser = data.user as User;
+          const current = this.currentUserMemory;
+          const resolvedRole =
+            data.isAdmin
+              ? 'admin'
+              : current?.role && current.role !== 'admin'
+              ? current.role
+              : serverUser.role;
+          const mergedUser: User = {
+            ...(current || {}),
+            ...serverUser,
+            id: serverUser.id,
+            role: resolvedRole
+          };
+          this.currentUserMemory = mergedUser;
+          try {
+            const nonPiiStub = {
+              id: mergedUser.id,
+              name: mergedUser.name,
+              role: mergedUser.role,
+              businessName: mergedUser.businessName,
+              city: mergedUser.city,
+              state: mergedUser.state,
+              isVerified: Boolean(mergedUser.isVerified),
+              isBlocked: Boolean(mergedUser.isBlocked),
+              hasPasscode: Boolean(mergedUser.hasPasscode),
+              createdAt: mergedUser.createdAt
+            };
+            sessionStorage.setItem('vs_session_stub', JSON.stringify(nonPiiStub));
+          } catch {
+            // ignore storage errors
+          }
+          this.notifyListeners();
+          return this.currentUserMemory;
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        if (this.sessionHydrationPromise === runPromise) {
+          this.sessionHydrationPromise = null;
+        }
+      }
+    })();
+
+    this.sessionHydrationPromise = runPromise;
+    return runPromise;
   }
 
   private startLiveBackgroundSync() {
@@ -595,6 +662,7 @@ class LogisticsStore {
   }
 
   public setCurrentUser(user: User | null) {
+    this.sessionEpoch++;
     this.currentUserMemory = user;
     if (typeof window !== 'undefined') {
       try {
@@ -678,40 +746,122 @@ class LogisticsStore {
     const body = Array.isArray(payload) ? { table, records: payload } : { table, record: payload };
     fetch('/api/db/sync', {
       method: 'POST',
-      credentials: 'same-origin',
+      credentials: 'include',
       headers: this.buildAuthHeaders(true),
       body: JSON.stringify(body)
     }).catch(() => {});
   }
 
+  private updateLocalLoadOwner(load: LoadItem, owner: User): LoadItem {
+    if (!owner?.id || owner.role === 'admin') return load;
+    const updated: LoadItem = {
+      ...load,
+      customerId: owner.id,
+      customerName: owner.name || load.customerName,
+      customerPhone: owner.phone || load.customerPhone
+    };
+    try {
+      const loads = this.getLoads();
+      const idx = loads.findIndex((l) => l.id === updated.id);
+      if (idx >= 0) {
+        loads[idx] = updated;
+        localStorage.setItem(STORAGE_KEYS.LOADS, JSON.stringify(loads));
+        this.triggerChange();
+      }
+    } catch {
+      // ignore local storage update errors
+    }
+    return updated;
+  }
+
   public async syncLoadToCloud(
     load: LoadItem
-  ): Promise<{ ok: boolean; authRequired?: boolean; message?: string }> {
+  ): Promise<{ ok: boolean; authRequired?: boolean; forbidden?: boolean; message?: string }> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return { ok: true };
     }
     try {
-      const res = await fetch('/api/db/sync', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: this.buildAuthHeaders(true),
-        body: JSON.stringify({ table: 'vs_loads', record: load })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (res.status === 401 || res.status === 403) {
+      // Ensure in-memory session token is hydrated from HttpOnly cookie if page was recently reloaded
+      if (!this.userSessionToken && !this.adminSessionToken) {
+        await this.hydrateSessionFromServer();
+      }
+
+      let loadToSync = load;
+      const hydratedUser = this.currentUserMemory;
+      if (hydratedUser?.id && hydratedUser.role !== 'admin' && loadToSync.customerId !== hydratedUser.id) {
+        loadToSync = this.updateLocalLoadOwner(loadToSync, hydratedUser);
+      }
+
+      const postLoad = async (record: LoadItem) => {
+        const res = await fetch('/api/db/sync', {
+          method: 'POST',
+          credentials: 'include',
+          headers: this.buildAuthHeaders(true),
+          body: JSON.stringify({ table: 'vs_loads', record })
+        });
+        const data = await res.json().catch(() => ({}));
+        return { res, data };
+      };
+
+      let { res, data } = await postLoad(loadToSync);
+
+      // If 401, attempt one forced session refresh from HttpOnly cookie before asking user to sign in
+      if (res.status === 401) {
+        const refreshedUser = await this.hydrateSessionFromServer(true);
+        if (refreshedUser?.id) {
+          if (refreshedUser.role !== 'admin' && loadToSync.customerId !== refreshedUser.id) {
+            loadToSync = this.updateLocalLoadOwner(loadToSync, refreshedUser);
+          }
+          ({ res, data } = await postLoad(loadToSync));
+        }
+      }
+
+      if (res.status === 401) {
+        this.pendingCloudSyncLoads.set(loadToSync.id, loadToSync);
         return {
           ok: false,
           authRequired: true,
-          message: data?.message || 'Authentication required to sync load.'
+          message: data?.message || 'Your login session expired. Please sign in to publish this load.'
         };
       }
+
+      if (res.status === 403) {
+        return {
+          ok: false,
+          forbidden: true,
+          message: data?.message || 'Permission denied while publishing this load.'
+        };
+      }
+
+      if (res.ok || res.status === 202) {
+        this.pendingCloudSyncLoads.delete(loadToSync.id);
+      }
+
       return {
         ok: res.ok || res.status === 202,
         message: data?.message
       };
     } catch {
+      this.pendingCloudSyncLoads.set(load.id, load);
       return { ok: false, message: 'Network unavailable; load saved locally.' };
     }
+  }
+
+  public async flushPendingCloudSyncLoads(): Promise<number> {
+    if (this.pendingCloudSyncLoads.size === 0) return 0;
+    const currentUser = this.currentUserMemory;
+    if (!currentUser || (!this.userSessionToken && !this.adminSessionToken)) return 0;
+
+    let publishedCount = 0;
+    const pending = Array.from(this.pendingCloudSyncLoads.values());
+    for (const load of pending) {
+      const boundLoad = currentUser.role === 'admin' ? load : this.updateLocalLoadOwner(load, currentUser);
+      const res = await this.syncLoadToCloud(boundLoad);
+      if (res.ok) {
+        publishedCount++;
+      }
+    }
+    return publishedCount;
   }
 
   public async initSupabaseSync(force = false): Promise<void> {
@@ -724,7 +874,7 @@ class LogisticsStore {
     try {
       const res = await fetch('/api/db/bootstrap', {
         cache: 'no-store',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: this.buildAuthHeaders(false)
       });
       if (!res.ok) return;
@@ -4016,21 +4166,28 @@ class LogisticsStore {
     dropLng: number,
     categoryType: VehicleCategoryType,
     loadType: 'full_load' | 'part_load' = 'full_load',
-    helpersNeeded = 0
+    helpersNeeded = 0,
+    overrideRoadDistanceKm?: number | null,
+    overrideDurationHours?: number | null
   ) {
-    // Great circle distance with 1.32x road curvature winding factor for Assam/Northeast terrain
-    const R = 6371; // Earth radius in km
-    const dLat = ((dropLat - pickupLat) * Math.PI) / 180;
-    const dLon = ((dropLng - pickupLng) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((pickupLat * Math.PI) / 180) *
-        Math.cos((dropLat * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    const aerialKm = R * c;
-    const roadKm = Math.max(12, Math.round(aerialKm * 1.34));
+    let roadKm: number;
+    if (typeof overrideRoadDistanceKm === 'number' && Number.isFinite(overrideRoadDistanceKm) && overrideRoadDistanceKm > 0) {
+      roadKm = Math.max(1, Math.round(overrideRoadDistanceKm * 10) / 10);
+    } else {
+      // Graceful Haversine straight-line fallback multiplier (1.3x) when OSRM road distance is not yet loaded
+      const R = 6371; // Earth radius in km
+      const dLat = ((dropLat - pickupLat) * Math.PI) / 180;
+      const dLon = ((dropLng - pickupLng) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((pickupLat * Math.PI) / 180) *
+          Math.cos((dropLat * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const aerialKm = R * c;
+      roadKm = Math.max(5, Math.round(aerialKm * 1.3));
+    }
 
     const category = VEHICLE_CATEGORIES.find((cat) => cat.id === categoryType) || VEHICLE_CATEGORIES[1];
     const baseDistancePrice = roadKm * category.basePricePerKm;
@@ -4045,7 +4202,10 @@ class LogisticsStore {
     const gstAmount = Math.round(adjustedFreight * 0.05); // 5% GTA GST
 
     const totalEstimate = adjustedFreight + helperCharges + tollEstimate + gstAmount;
-    const estimatedHours = Math.round((roadKm / 42) * 10) / 10; // 42 km/h commercial truck average in hills/plains
+    const estimatedHours =
+      typeof overrideDurationHours === 'number' && Number.isFinite(overrideDurationHours) && overrideDurationHours > 0
+        ? Math.round(overrideDurationHours * 10) / 10
+        : Math.round((roadKm / 42) * 10) / 10;
 
     return {
       distanceKm: roadKm,

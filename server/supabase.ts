@@ -28,10 +28,33 @@ export function isPartnerRole(role: unknown): boolean {
   return PARTNER_ROLES.has(String(role || '').toLowerCase());
 }
 
-// Strong HMAC-SHA256 signing secret for stateless-verified + revocable JWT sessions
-const SESSION_TOKEN_SECRET =
-  (process.env.SESSION_TOKEN_SECRET || process.env.TRACKING_TOKEN_SECRET || '').trim() ||
-  crypto.randomBytes(32).toString('hex');
+// Strong HMAC-SHA256 signing secret for stateless-verified + revocable JWT sessions.
+// Uses explicit SESSION_TOKEN_SECRET / TRACKING_TOKEN_SECRET when set, or derives a stable
+// restart-safe signing key from existing high-entropy server-only env secrets via HMAC domain separation.
+let cachedSessionTokenSecret = '';
+function getSessionTokenSecret(): string {
+  if (cachedSessionTokenSecret) return cachedSessionTokenSecret;
+  const explicit = (process.env.SESSION_TOKEN_SECRET || process.env.TRACKING_TOKEN_SECRET || '').trim();
+  if (explicit) {
+    cachedSessionTokenSecret = explicit;
+    return cachedSessionTokenSecret;
+  }
+  const serverKeyMaterial = (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.ZUGGI_ADMIN_PASSCODE ||
+    ''
+  ).trim();
+  if (serverKeyMaterial) {
+    cachedSessionTokenSecret = crypto
+      .createHmac('sha256', serverKeyMaterial)
+      .update('zuggi:session-signing-key:v1')
+      .digest('hex');
+    return cachedSessionTokenSecret;
+  }
+  cachedSessionTokenSecret = crypto.randomBytes(32).toString('hex');
+  return cachedSessionTokenSecret;
+}
 
 const USER_SESSION_TTL_SEC = 24 * 60 * 60; // 24 hours
 const ADMIN_SESSION_TTL_SEC = 12 * 60 * 60; // 12 hours
@@ -76,7 +99,7 @@ function signSessionJwt(claims: SignedTokenClaims): string {
   const header = base64UrlEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = base64UrlEncode(JSON.stringify(claims));
   const signingInput = `${header}.${payload}`;
-  const sig = crypto.createHmac('sha256', SESSION_TOKEN_SECRET).update(signingInput).digest('base64url');
+  const sig = crypto.createHmac('sha256', getSessionTokenSecret()).update(signingInput).digest('base64url');
   return `${signingInput}.${sig}`;
 }
 
@@ -93,7 +116,7 @@ function verifySessionJwt(token: string): SignedTokenClaims | null {
 
     const signingInput = `${headerB64}.${payloadB64}`;
     const expectedSig = crypto
-      .createHmac('sha256', SESSION_TOKEN_SECRET)
+      .createHmac('sha256', getSessionTokenSecret())
       .update(signingInput)
       .digest('base64url');
 
@@ -1384,11 +1407,44 @@ supabaseRouter.post('/sync', async (req, res) => {
           });
         }
       } else if (table === 'vs_loads') {
-        if (!callerId || String(item.customerId || '') !== callerId) {
+        if (!callerId) {
           return res.status(403).json({
             success: false,
-            message: 'Forbidden: You can only modify loads created by your account.'
+            message: 'Forbidden: Valid account identity is required to publish loads.'
           });
+        }
+        const existingLoadRow = item.id ? await findSupabaseLoadById(String(item.id)) : null;
+        if (existingLoadRow?.data) {
+          const existingOwnerId = String(existingLoadRow.data.customerId || '');
+          const existingOwnerPhone10 = extractTenDigits(existingLoadRow.data.customerPhone);
+          const ownsExisting =
+            existingOwnerId === callerId ||
+            Boolean(callerPhone10 && existingOwnerPhone10 && existingOwnerPhone10 === callerPhone10);
+          if (!ownsExisting) {
+            return res.status(403).json({
+              success: false,
+              message: 'Forbidden: You can only modify loads created by your account.'
+            });
+          }
+          // Enforce authoritative owner ID on existing load updates
+          item.customerId = callerId;
+        } else {
+          // Brand-new load creation: enforce ownership strictly to the authenticated caller
+          const providedCustomerId = String(item.customerId || '');
+          const itemPhone10 = extractTenDigits(item.customerPhone);
+          const isProvisionalOrSelf =
+            !providedCustomerId ||
+            providedCustomerId === callerId ||
+            providedCustomerId.startsWith('shipper_') ||
+            providedCustomerId.startsWith('user_') ||
+            Boolean(callerPhone10 && itemPhone10 && itemPhone10 === callerPhone10);
+          if (!isProvisionalOrSelf) {
+            return res.status(403).json({
+              success: false,
+              message: 'Forbidden: You can only create loads under your own account.'
+            });
+          }
+          item.customerId = callerId;
         }
       } else if (table === 'vs_quotations') {
         const isPartnerOwner = callerId && (String(item.transporterId || '') === callerId || String(item.driverId || '') === callerId);

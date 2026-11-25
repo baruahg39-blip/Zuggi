@@ -977,8 +977,8 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
             <span>
               Source:{' '}
               <strong className="text-gray-200">
-                {liveEta?.source === 'google_routes_matrix'
-                  ? 'Google Maps Live Traffic Route Matrix'
+                {liveEta?.source === 'osrm_route'
+                  ? 'OSRM Road Route Engine'
                   : 'GPS Corridor Estimate'}
               </strong>
             </span>

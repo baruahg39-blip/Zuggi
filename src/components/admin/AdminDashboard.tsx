@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, InfoWindow } from '@vis.gl/react-google-maps';
 import {
   ShieldAlert,
   Users,
@@ -40,9 +39,7 @@ import { AdminSupportDesk } from './AdminSupportDesk';
 import { AdminPaymentsTab } from './AdminPaymentsTab';
 import { AdminPartnerVerificationTab } from './AdminPartnerVerificationTab';
 import { ShipperLiveTracker } from '../tracking/ShipperLiveTracker';
-import { GeofenceOverlay } from '../maps/GeofenceOverlay';
-import { LiveTelemetryFallbackMap } from '../maps/LiveTelemetryFallbackMap';
-import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
+import { AdminFleetRadarMap } from '../maps/AdminFleetRadarMap';
 import { AdminAnalyticsCharts } from './AdminAnalyticsCharts';
 
 interface AdminDashboardProps {
@@ -86,8 +83,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   currentUser,
   onViewInvoice
 }) => {
-  const { apiKey, canRenderGoogleMap, mapAuthError, reportMapError } = useGoogleMapsApiKey();
-
   const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   const [vehicles, setVehicles] = useState<CommercialVehicle[]>([]);
   const [loads, setLoads] = useState<LoadItem[]>([]);
@@ -115,10 +110,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [statusOverrides, setStatusOverrides] = useState<Record<string, LoadStatus>>({});
   const [liveTrackBooking, setLiveTrackBooking] = useState<Booking | null>(null);
   const [inspectLoadBids, setInspectLoadBids] = useState<LoadItem | null>(null);
-
-  // Radar InfoWindow selection
-  const [selectedRadarVehicle, setSelectedRadarVehicle] = useState<CommercialVehicle | null>(null);
-  const [selectedRadarLoad, setSelectedRadarLoad] = useState<LoadItem | null>(null);
 
   useEffect(() => {
     const update = () => {
@@ -768,191 +759,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           <div className="w-full h-[460px] rounded-3xl overflow-hidden border border-gray-200 shadow-lg bg-[#E8EEF4] relative">
-            {canRenderGoogleMap ? (
-              <APIProvider apiKey={apiKey} language="en" region="IN" libraries={['maps', 'marker']} onError={reportMapError}>
-                <GoogleMap
-                  mapId="DEMO_MAP_ID"
-                  colorScheme="LIGHT"
-                  mapTypeId="roadmap"
-                  internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-                  defaultCenter={{ lat: 26.25, lng: 92.9 }}
-                  defaultZoom={7}
-                  gestureHandling="greedy"
-                  style={{ width: '100%', height: '100%' }}
-                >
-                  {vehicles.map((v) => {
-                    const pos = v.currentLocation || { lat: 26.1445, lng: 91.7362 };
-                    const bg = v.isBlocked
-                      ? '#DC3545'
-                      : !v.isOnline
-                      ? '#6B7280'
-                      : v.isAvailable
-                      ? '#16A36A'
-                      : '#E9A23B';
-                    return (
-                      <AdvancedMarker
-                        key={v.id}
-                        position={{ lat: pos.lat, lng: pos.lng }}
-                        title={`${v.registrationNumber} (${v.driverName || v.transporterName})`}
-                        onClick={() => {
-                          setSelectedRadarLoad(null);
-                          setSelectedRadarVehicle(v);
-                        }}
-                      >
-                        <Pin background={bg} borderColor="#171318" glyphColor="#FFFFFF" glyphText="T" />
-                      </AdvancedMarker>
-                    );
-                  })}
-
-                  {loads
-                    .filter((l) => l.status !== 'completed' && l.status !== 'cancelled')
-                    .map((l) => (
-                      <AdvancedMarker
-                        key={l.id}
-                        position={{ lat: l.pickup.lat, lng: l.pickup.lng }}
-                        title={`${l.pickup.city} → ${l.delivery.city}`}
-                        onClick={() => {
-                          setSelectedRadarVehicle(null);
-                          setSelectedRadarLoad(l);
-                        }}
-                      >
-                        <Pin
-                          background={l.isBlocked ? '#DC3545' : '#E83E83'}
-                          borderColor="#FFFFFF"
-                          glyphColor="#FFFFFF"
-                          glyphText="L"
-                        />
-                      </AdvancedMarker>
-                    ))}
-
-                  {bookings
-                    .filter((b) =>
-                      ['assigned', 'en_route_pickup', 'at_pickup', 'loading', 'in_transit', 'at_destination'].includes(b.status)
-                    )
-                    .map((b) => (
-                      <GeofenceOverlay
-                        key={`gf_${b.id}`}
-                        pickup={b.pickup}
-                        delivery={b.delivery}
-                        pickupRadiusMeters={b.geofenceConfig?.pickupRadiusMeters || 800}
-                        deliveryRadiusMeters={b.geofenceConfig?.deliveryRadiusMeters || 500}
-                        insidePickup={b.geofenceState?.insidePickup}
-                        insideDelivery={b.geofenceState?.insideDelivery}
-                      />
-                    ))}
-
-                  {selectedRadarVehicle && (
-                    <InfoWindow
-                      position={{
-                        lat: selectedRadarVehicle.currentLocation?.lat || 26.1445,
-                        lng: selectedRadarVehicle.currentLocation?.lng || 91.7362
-                      }}
-                      onCloseClick={() => setSelectedRadarVehicle(null)}
-                    >
-                      <div className="p-1.5 text-xs space-y-1.5 max-w-[230px]">
-                        <div className="font-mono font-black text-sm text-[#171318]">
-                          {selectedRadarVehicle.registrationNumber}
-                        </div>
-                        <div className="text-gray-600">
-                          {selectedRadarVehicle.modelName} • {selectedRadarVehicle.driverName || selectedRadarVehicle.transporterName}
-                        </div>
-                        <div className="text-gray-500">
-                          {selectedRadarVehicle.currentLocation?.address || selectedRadarVehicle.currentLocation?.city}
-                        </div>
-                        <div className="flex items-center gap-1.5 pt-1">
-                          {selectedRadarVehicle.isBlocked ? (
-                            <button
-                              onClick={() => {
-                                handleUnblockVehicle(selectedRadarVehicle.id);
-                                setSelectedRadarVehicle(null);
-                              }}
-                              className="px-2.5 py-1 rounded-lg bg-[#16A36A] text-white font-bold cursor-pointer"
-                            >
-                              Unblock Truck
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                setPendingBlock({
-                                  type: 'vehicle',
-                                  id: selectedRadarVehicle.id,
-                                  label: selectedRadarVehicle.registrationNumber
-                                });
-                                setSelectedRadarVehicle(null);
-                              }}
-                              className="px-2.5 py-1 rounded-lg bg-[#DC3545] text-white font-bold cursor-pointer"
-                            >
-                              Block Truck
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </InfoWindow>
-                  )}
-
-                  {selectedRadarLoad && (
-                    <InfoWindow
-                      position={{ lat: selectedRadarLoad.pickup.lat, lng: selectedRadarLoad.pickup.lng }}
-                      onCloseClick={() => setSelectedRadarLoad(null)}
-                    >
-                      <div className="p-1.5 text-xs space-y-1.5 max-w-[240px]">
-                        <div className="font-mono font-bold text-[#E83E83]">#{selectedRadarLoad.id}</div>
-                        <div className="font-bold text-[#171318]">
-                          {selectedRadarLoad.pickup.city} → {selectedRadarLoad.delivery.city}
-                        </div>
-                        <div className="text-gray-600 line-clamp-2">{selectedRadarLoad.goodsDescription}</div>
-                        <div className="flex items-center gap-1.5 pt-1">
-                          {selectedRadarLoad.assignedBookingId && (
-                            <button
-                              onClick={() => {
-                                const b = bookings.find((bk) => bk.id === selectedRadarLoad.assignedBookingId);
-                                if (b) setLiveTrackBooking(b);
-                                setSelectedRadarLoad(null);
-                              }}
-                              className="px-2.5 py-1 rounded-lg bg-[#171318] text-white font-bold cursor-pointer"
-                            >
-                              Live Track
-                            </button>
-                          )}
-                          <button
-                            onClick={() => {
-                              setPendingBlock({
-                                type: 'load',
-                                id: selectedRadarLoad.id,
-                                label: `${selectedRadarLoad.pickup.city} → ${selectedRadarLoad.delivery.city}`
-                              });
-                              setSelectedRadarLoad(null);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-[#DC3545] text-white font-bold cursor-pointer"
-                          >
-                            Block Load
-                          </button>
-                        </div>
-                      </div>
-                    </InfoWindow>
-                  )}
-                </GoogleMap>
-              </APIProvider>
-            ) : (
-              <LiveTelemetryFallbackMap
-                pickup={
-                  bookings[0]?.pickup || { lat: 27.4728, lng: 94.912, city: 'Dibrugarh', address: 'Dibrugarh Transport Hub' }
-                }
-                drop={
-                  bookings[0]?.delivery || { lat: 26.1445, lng: 91.7362, city: 'Guwahati', address: 'Guwahati ICD' }
-                }
-                currentLocation={
-                  vehicles.find((v) => v.currentLocation)?.currentLocation || { lat: 26.5821, lng: 93.9632 }
-                }
-                historyPings={vehicles
-                  .filter((v) => v.currentLocation)
-                  .map((v) => ({ lat: v.currentLocation!.lat, lng: v.currentLocation!.lng }))}
-                vehicleNumber={vehicles[0]?.registrationNumber || 'Fleet Radar'}
-                speedKmh={48}
-                heading={245}
-                reason={mapAuthError ? 'auth_error' : 'missing_key'}
-              />
-            )}
+            <AdminFleetRadarMap
+              vehicles={vehicles}
+              loads={loads}
+              bookings={bookings}
+              onUnblockVehicle={handleUnblockVehicle}
+              onRequestBlockVehicle={(v) =>
+                setPendingBlock({
+                  type: 'vehicle',
+                  id: v.id,
+                  label: v.registrationNumber
+                })
+              }
+              onRequestBlockLoad={(l) =>
+                setPendingBlock({
+                  type: 'load',
+                  id: l.id,
+                  label: `${l.pickup.city} → ${l.delivery.city}`
+                })
+              }
+              onOpenLiveTrack={(b) => setLiveTrackBooking(b)}
+            />
           </div>
 
           {/* Active Rides Watchlist */}

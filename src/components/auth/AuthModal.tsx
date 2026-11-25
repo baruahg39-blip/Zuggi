@@ -326,7 +326,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await fetch('/api/auth/send-otp', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone: clean, purpose: isResettingPasscode ? 'reset' : 'login' })
       });
@@ -367,7 +367,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await fetch('/api/auth/verify-otp', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone, otp: code })
       });
@@ -415,11 +415,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           : 'driver';
       const targetRole: UserRole = targetPortal === 'driver' ? resolvedPartnerRole : targetPortal;
 
-      const resolvedBaseUser = registered?.user || serverExistingUser || null;
+      const resolvedBaseUser =
+        serverExistingUser && registered?.user
+          ? { ...registered.user, ...serverExistingUser, id: serverExistingUser.id }
+          : serverExistingUser || registered?.user || null;
       if (resolvedBaseUser && resolvedBaseUser.name && resolvedBaseUser.name.trim().length > 0) {
         // Automatically restore their saved profile with the matching portal role
         const restoredUser: User = {
           ...resolvedBaseUser,
+          id: serverExistingUser?.id || resolvedBaseUser.id,
           role: targetRole,
           isBlocked: existingStoreUser?.isBlocked ?? resolvedBaseUser.isBlocked,
           blockedReason: existingStoreUser?.blockedReason ?? resolvedBaseUser.blockedReason,
@@ -527,7 +531,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       const res = await fetch('/api/auth/send-otp', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone: clean, purpose: 'reset_passcode' })
       });
@@ -566,7 +570,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       const res = await fetch('/api/auth/verify-otp', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone, otp: code })
       });

@@ -507,8 +507,32 @@ function sanitizeUserForClient(user: any) {
   return filterSelfUserFields(user);
 }
 
-// Authenticated self-profile hydration (keeps PII out of localStorage)
+// Authenticated self-profile hydration (keeps PII out of localStorage and refreshes in-memory session token)
 app.get('/api/auth/me', async (req, res) => {
+  if (verifyAdminTokenFromReq(req)) {
+    const ownerEmail = (process.env.SUPER_ADMIN_EMAIL || 'baruahg39@gmail.com').trim().toLowerCase();
+    const freshAdminToken = issueAdminSessionToken(ownerEmail);
+    setAdminSessionCookie(req, res, freshAdminToken);
+    const adminUser = (await findSupabaseUserById('owner_baruahg39')) || {
+      id: 'owner_baruahg39',
+      name: 'G. Baruah (Platform Owner)',
+      phone: '+91 94350 88219',
+      email: ownerEmail,
+      role: 'admin',
+      businessName: 'Zuggi Technologies India',
+      city: 'Guwahati',
+      state: 'Assam',
+      isVerified: true,
+      createdAt: '2026-01-01T00:00:00Z'
+    };
+    return res.json({
+      success: true,
+      isAdmin: true,
+      sessionToken: freshAdminToken,
+      user: sanitizeUserForClient(adminUser)
+    });
+  }
+
   const session = verifyUserTokenFromReq(req);
   if (!session) {
     return res.status(401).json({ success: false, message: 'Authentication required.' });
@@ -517,10 +541,33 @@ app.get('/api/auth/me', async (req, res) => {
     (session.phone10 ? passcodeUserStore.get(session.phone10) : null) ||
     (session.userId ? await findSupabaseUserById(session.userId) : null) ||
     (session.phone10 ? await findSupabaseUserByPhone(session.phone10) : null);
-  if (!userRecord) {
-    return res.status(404).json({ success: false, message: 'Account not found.' });
+
+  if (userRecord?.isBlocked) {
+    clearSessionCookies(req, res);
+    return res.status(403).json({
+      success: false,
+      message: `Account suspended: ${userRecord.blockedReason || 'Blocked by Super Admin'}.`
+    });
   }
-  return res.json({ success: true, user: sanitizeUserForClient(userRecord) });
+
+  const effectiveUser = userRecord || {
+    id: session.userId,
+    name: 'Zuggi Member',
+    phone: session.phone10 ? `+91 ${session.phone10}` : '',
+    role: session.role || 'customer',
+    city: 'Guwahati',
+    state: 'Assam',
+    isVerified: session.role === 'customer',
+    createdAt: new Date(session.issuedAt || Date.now()).toISOString()
+  };
+
+  const refreshedToken = issueUserSessionToken(effectiveUser);
+  setUserSessionCookie(req, res, refreshedToken);
+  return res.json({
+    success: true,
+    sessionToken: refreshedToken,
+    user: sanitizeUserForClient(effectiveUser)
+  });
 });
 
 // Authenticated logout: immediately blacklists caller's user/admin JWT on server & clears cookies
@@ -1684,23 +1731,21 @@ app.post('/api/payments/cashfree/webhook', (req, res) => {
   }
 });
 
-// --- GOOGLE MAPS PLATFORM SERVER PROXY (Reverse Geocode & Routes API) ---
+// --- OPENSTREETMAP FREE ROUTING & GEOCODING PROXY (Photon + Nominatim + OSRM) ---
+// 100% free, zero API keys required.
 
-function getGoogleMapsKey(): string {
-  return (process.env.GOOGLE_MAPS_API_KEY || process.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
-}
+const DEFAULT_ASSAM_CENTER = { lat: 26.1445, lng: 91.7362 };
 
-// Public browser config endpoint so setting VITE_GOOGLE_MAPS_API_KEY or GOOGLE_MAPS_API_KEY
-// in Render/Cloud environment variables takes effect immediately at runtime.
 app.get('/api/config/maps', (_req, res) => {
-  const browserKey = (process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '').trim();
   res.json({
-    apiKey: browserKey,
-    configured: Boolean(browserKey)
+    provider: 'openstreetmap',
+    tilesUrl: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    requiresApiKey: false,
+    configured: true
   });
 });
 
-// Known Northeast Logistics Hubs for smart regional fallback
+// Known Northeast Logistics Hubs for offline coordinate fallback
 const NE_LOGISTICS_HUBS = [
   { city: 'Guwahati', lat: 26.1445, lng: 91.7362, pincode: '781028', address: 'Beltola Wholesale Transport Yard, GS Road, Guwahati', state: 'Assam' },
   { city: 'Nagaon', lat: 26.3475, lng: 92.6845, pincode: '782001', address: 'Haibargaon Freight Transit Hub, Nagaon', state: 'Assam' },
@@ -1730,87 +1775,202 @@ function findNearestHub(lat: number, lng: number) {
   return nearest;
 }
 
-// 1. Endpoint: Reverse Geocode (Coordinates -> Structured Address)
+function haversineStraightKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function isValidLatLng(lat: number, lng: number): boolean {
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
+}
+
+// 0. Endpoint: Free Address Autocomplete via Photon (biased to Guwahati, Assam) with Nominatim fallback
+app.get('/api/maps/autocomplete', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 140);
+    if (q.length < 2) {
+      return res.json({ success: true, source: 'photon', results: [] });
+    }
+
+    const biasLat = Number.isFinite(Number(req.query.lat)) ? Number(req.query.lat) : DEFAULT_ASSAM_CENTER.lat;
+    const biasLon = Number.isFinite(Number(req.query.lon)) ? Number(req.query.lon) : DEFAULT_ASSAM_CENTER.lng;
+    const limit = Math.min(10, Math.max(1, Number(req.query.limit) || 6));
+
+    // Primary: Photon API biased toward Northeast India / Assam
+    try {
+      const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&lat=${biasLat}&lon=${biasLon}&limit=${limit}`;
+      const pRes = await fetch(photonUrl, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
+        },
+        signal: AbortSignal.timeout(5500)
+      });
+
+      if (pRes.ok) {
+        const data: any = await pRes.json();
+        const features = Array.isArray(data?.features) ? data.features : [];
+        const results = features
+          .map((f: any) => {
+            const coords = f?.geometry?.coordinates;
+            const props = f?.properties || {};
+            const lng = Number(coords?.[0]);
+            const lat = Number(coords?.[1]);
+            if (!isValidLatLng(lat, lng)) return null;
+
+            const name = props.name || props.street || '';
+            const locality = props.locality || props.district || props.suburb || '';
+            const city = props.city || props.town || props.village || props.county || locality || name || '';
+            const state = props.state || 'Assam';
+            const pincode = props.postcode || '';
+            const country = props.country || 'India';
+
+            const parts = [name, props.street, locality, city, state, pincode, country].filter(
+              (p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx
+            );
+            const labelParts = [name || locality, city, state].filter(
+              (p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx
+            );
+
+            return {
+              label: labelParts.join(', ') || parts.slice(0, 3).join(', '),
+              address: parts.join(', '),
+              city: city || name || 'Assam',
+              district: props.county || props.district || city || '',
+              state,
+              pincode,
+              countryCode: String(props.countrycode || '').toLowerCase(),
+              lat,
+              lng
+            };
+          })
+          .filter(Boolean);
+
+        // Prefer Indian locations when available
+        const indian = results.filter((r: any) => !r.countryCode || r.countryCode === 'in');
+        const finalResults = indian.length > 0 ? indian : results;
+        if (finalResults.length > 0) {
+          return res.json({ success: true, source: 'photon', results: finalResults.slice(0, limit) });
+        }
+      }
+    } catch {
+      console.warn('[Autocomplete Notice] Photon unreachable, trying Nominatim fallback.');
+    }
+
+    // Fallback: Nominatim search scoped to India
+    try {
+      const nomUrl = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=${limit}&q=${encodeURIComponent(q)}`;
+      const nRes = await fetch(nomUrl, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
+        },
+        signal: AbortSignal.timeout(5500)
+      });
+
+      if (nRes.ok) {
+        const items: any[] = await nRes.json();
+        const results = (Array.isArray(items) ? items : [])
+          .map((item: any) => {
+            const lat = Number(item.lat);
+            const lng = Number(item.lon);
+            if (!isValidLatLng(lat, lng)) return null;
+            const addr = item.address || {};
+            const city =
+              addr.city ||
+              addr.town ||
+              addr.village ||
+              addr.suburb ||
+              addr.state_district ||
+              addr.county ||
+              String(item.display_name || '').split(',')[0]?.trim() ||
+              '';
+            const state = addr.state || 'Assam';
+            const labelParts = [addr.road || addr.neighbourhood || addr.suburb, city, state].filter(
+              (p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx
+            );
+            return {
+              label:
+                labelParts.length >= 2
+                  ? labelParts.join(', ')
+                  : String(item.display_name || '').split(',').slice(0, 3).map((s: string) => s.trim()).join(', '),
+              address: String(item.display_name || ''),
+              city,
+              district: addr.state_district || addr.county || city,
+              state,
+              pincode: addr.postcode || '',
+              lat,
+              lng
+            };
+          })
+          .filter(Boolean);
+
+        return res.json({ success: true, source: 'nominatim', results });
+      }
+    } catch {
+      console.warn('[Autocomplete Notice] Nominatim fallback also unreachable.');
+    }
+
+    // Final local NE hubs filter fallback
+    const lowerQ = q.toLowerCase();
+    const matchedHubs = NE_LOGISTICS_HUBS.filter(
+      (h) => h.city.toLowerCase().includes(lowerQ) || h.address.toLowerCase().includes(lowerQ) || h.state.toLowerCase().includes(lowerQ)
+    ).map((h) => ({
+      label: `${h.city}, ${h.state}`,
+      address: h.address,
+      city: h.city,
+      district: h.city,
+      state: h.state,
+      pincode: h.pincode,
+      lat: h.lat,
+      lng: h.lng
+    }));
+
+    return res.json({ success: true, source: 'local_hubs', results: matchedHubs });
+  } catch (error: any) {
+    console.error('[Autocomplete Error]', error?.code || 'autocomplete_error');
+    res.status(500).json({ success: false, message: 'Address search service unavailable.' });
+  }
+});
+
+// 1. Endpoint: Free Reverse Geocode via Nominatim (Coordinates -> Structured Address)
 app.get('/api/maps/reverse-geocode', async (req, res) => {
   try {
     const lat = parseFloat(req.query.lat as string);
     const lng = parseFloat(req.query.lng as string);
 
-    if (isNaN(lat) || isNaN(lng)) {
+    if (!isValidLatLng(lat, lng)) {
       return res.status(400).json({ success: false, message: 'Valid lat and lng query params are required.' });
     }
 
     const nearest = findNearestHub(lat, lng);
 
-    const googleMapsKey = getGoogleMapsKey();
-    if (googleMapsKey) {
-      try {
-        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&region=in&key=${googleMapsKey}`;
-        const gRes = await fetch(url);
-        const data = await gRes.json();
-
-        if (data.status === 'OK' && data.results && data.results.length > 0) {
-          const first = data.results[0];
-          let street = '';
-          let area = '';
-          let city = '';
-          let pincode = '';
-          let state = 'Assam';
-
-          for (const comp of first.address_components || []) {
-            const types = comp.types || [];
-            if (types.includes('street_number') || types.includes('route')) {
-              street = street ? `${street}, ${comp.long_name}` : comp.long_name;
-            }
-            if (types.includes('sublocality') || types.includes('neighborhood') || types.includes('sublocality_level_1')) {
-              area = comp.long_name;
-            }
-            if (types.includes('locality')) {
-              city = comp.long_name;
-            } else if (!city && types.includes('administrative_area_level_2')) {
-              city = comp.long_name;
-            }
-            if (types.includes('administrative_area_level_1')) {
-              state = comp.long_name;
-            }
-            if (types.includes('postal_code')) {
-              pincode = comp.long_name;
-            }
-          }
-
-          return res.json({
-            success: true,
-            lat,
-            lng,
-            formatted_address: first.formatted_address || `${street || area}, ${city || nearest.city}, ${state} ${pincode || nearest.pincode}`,
-            street: street || area || 'Main Road',
-            area: area || city || nearest.city,
-            city: city || nearest.city,
-            pincode: pincode || nearest.pincode,
-            state: state || nearest.state,
-            place_id: first.place_id
-          });
-        }
-      } catch {
-        console.warn('[Reverse Geocode Notice] Live API fallback invoked.');
-      }
-    }
-
-    // All-India OpenStreetMap Nominatim reverse-geocoding fallback when Google Maps key is not configured
     try {
-      const osmUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&addressdetails=1`;
+      const osmUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&addressdetails=1`;
       const osmRes = await fetch(osmUrl, {
         headers: {
           Accept: 'application/json',
           'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
-        }
+        },
+        signal: AbortSignal.timeout(5500)
       });
       if (osmRes.ok) {
-        const osm = await osmRes.json();
+        const osm: any = await osmRes.json();
         const addr = osm?.address || {};
-        const road = addr.road || addr.pedestrian || addr.highway || '';
-        const area = addr.suburb || addr.neighbourhood || addr.locality || addr.quarter || addr.village || '';
-        const city = addr.city || addr.town || addr.village || addr.county || addr.state_district || nearest.city;
+        const road = addr.road || addr.pedestrian || addr.highway || addr.industrial || '';
+        const area =
+          addr.suburb || addr.neighbourhood || addr.locality || addr.quarter || addr.village || addr.hamlet || '';
+        const city =
+          addr.city || addr.town || addr.village || addr.county || addr.state_district || nearest.city;
         const state = addr.state || nearest.state;
         const pincode = addr.postcode || '';
         const formatted_address =
@@ -1819,6 +1979,7 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
         if (formatted_address) {
           return res.json({
             success: true,
+            source: 'nominatim',
             lat,
             lng,
             formatted_address,
@@ -1834,9 +1995,10 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
       console.warn('[Reverse Geocode OSM Notice] Fallback invoked.');
     }
 
-    // Final coordinate fallback if offline
+    // Final coordinate fallback if Nominatim is temporarily offline
     return res.json({
       success: true,
+      source: 'coordinate_fallback',
       lat,
       lng,
       formatted_address: `${nearest.city} Area (${lat.toFixed(4)}, ${lng.toFixed(4)}), ${nearest.state}`,
@@ -1852,92 +2014,81 @@ app.get('/api/maps/reverse-geocode', async (req, res) => {
   }
 });
 
-// 2. Endpoint: Compute Route & Metrics (Origin + Destination -> Distance, Duration, Polyline)
+// 2. Endpoint: Free Road Distance, ETA & GeoJSON Route Polyline via OSRM (with 1.3x Haversine fallback)
 app.post('/api/maps/compute-route', async (req, res) => {
   try {
-    const { origin, destination } = req.body;
-    if (!origin || !destination || isNaN(origin.lat) || isNaN(origin.lng) || isNaN(destination.lat) || isNaN(destination.lng)) {
+    const { origin, destination } = req.body || {};
+    const origLat = Number(origin?.lat);
+    const origLng = Number(origin?.lng);
+    const destLat = Number(destination?.lat);
+    const destLng = Number(destination?.lng);
+
+    if (!isValidLatLng(origLat, origLng) || !isValidLatLng(destLat, destLng)) {
       return res.status(400).json({ success: false, message: 'Valid origin and destination coordinates required.' });
     }
 
-    // Try Google Routes API (New)
-    const googleMapsKey = getGoogleMapsKey();
-    if (googleMapsKey) {
-      try {
-        const routesUrl = 'https://routes.googleapis.com/directions/v2:computeRoutes';
-        const routeReq = {
-          origin: {
-            location: {
-              latLng: {
-                latitude: origin.lat,
-                longitude: origin.lng
-              }
-            }
-          },
-          destination: {
-            location: {
-              latLng: {
-                latitude: destination.lat,
-                longitude: destination.lng
-              }
-            }
-          },
-          travelMode: 'DRIVE',
-          routingPreference: 'TRAFFIC_AWARE',
-          computeAlternativeRoutes: false
-        };
+    // Primary: Public OSRM driving route API with full GeoJSON road geometry
+    try {
+      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${origLng},${origLat};${destLng},${destLat}?overview=full&geometries=geojson`;
+      const osrmRes = await fetch(osrmUrl, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
+        },
+        signal: AbortSignal.timeout(7000)
+      });
 
-        const response = await fetch(routesUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': googleMapsKey,
-            'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.description,routes.viewport'
-          },
-          body: JSON.stringify(routeReq)
-        });
+      if (osrmRes.ok) {
+        const data: any = await osrmRes.json();
+        const route = data?.routes?.[0];
+        if (route && Number.isFinite(route.distance)) {
+          const distanceKm = Math.max(1, Math.round((Number(route.distance) / 1000) * 10) / 10);
+          // Commercial freight vehicles travel slightly slower than passenger cars on NE highways;
+          // use OSRM driving duration with a realistic minimum floor for heavy trucks
+          const rawDurationMins = Math.round(Number(route.duration || 0) / 60);
+          const durationMins = Math.max(5, rawDurationMins || Math.round((distanceKm / 45) * 60));
 
-        const data = await response.json();
-        if (data.routes && data.routes.length > 0) {
-          const r = data.routes[0];
-          const distanceKm = Math.round((r.distanceMeters || 0) / 1000);
-          const rawDuration = r.duration || '0s';
-          const durationSeconds = parseInt(rawDuration.replace('s', ''), 10) || (distanceKm * 75);
-          const durationMins = Math.round(durationSeconds / 60);
+          const rawCoords: Array<[number, number]> = Array.isArray(route.geometry?.coordinates)
+            ? route.geometry.coordinates
+            : [];
+          // Convert GeoJSON [lng, lat] -> Leaflet [lat, lng]
+          const routeCoordinates: Array<[number, number]> = rawCoords
+            .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+            .map((pt) => [pt[1], pt[0]]);
+
+          const legSummary = route.legs?.[0]?.summary || 'National Highway Commercial Corridor';
 
           return res.json({
             success: true,
+            source: 'osrm',
             distance_km: distanceKm,
             duration_mins: durationMins,
-            polyline: r.polyline?.encodedPolyline || '',
-            description: r.description || 'Fastest Route via Commercial Highway'
+            route_coordinates: routeCoordinates,
+            polyline: '',
+            description: `OSRM Road Route via ${legSummary}`
           });
         }
-      } catch {
-        console.warn('[Routes API Notice] Live API fallback invoked.');
       }
+    } catch {
+      console.warn('[OSRM Compute Route Notice] OSRM unreachable, using 1.3x Haversine fallback.');
     }
 
-    // Calculation fallback: Great-circle distance scaled by 1.28 for mountain & highway terrain
-    const R = 6371; // Earth radius in km
-    const dLat = (destination.lat - origin.lat) * Math.PI / 180;
-    const dLon = (destination.lng - origin.lng) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(origin.lat * Math.PI / 180) * Math.cos(destination.lat * Math.PI / 180) * 
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    const straightKm = R * c;
-    const highwayKm = Math.max(Math.round(straightKm * 1.28), 5);
-    // Average freight speed 45 km/h with terminal buffers
-    const durationMins = Math.round((highwayKm / 45) * 60);
+    // Graceful Haversine straight-line fallback multiplier (1.3x) ONLY if OSRM is unreachable
+    const straightKm = haversineStraightKm(origLat, origLng, destLat, destLng);
+    const highwayKm = Math.max(1, Math.round(straightKm * 1.3 * 10) / 10);
+    const durationMins = Math.max(5, Math.round((highwayKm / 44) * 60));
 
     return res.json({
       success: true,
+      source: 'haversine_fallback',
       distance_km: highwayKm,
       duration_mins: durationMins,
+      route_coordinates: [
+        [origLat, origLng],
+        [destLat, destLng]
+      ],
       polyline: '',
-      description: 'Calculated via National Highway Commercial Corridor'
+      description: 'Estimated Highway Corridor (1.3x Haversine fallback)'
     });
   } catch (error: any) {
     console.error('[Compute Route Error]', error?.code || 'route_error');
@@ -1945,8 +2096,7 @@ app.post('/api/maps/compute-route', async (req, res) => {
   }
 });
 
-// 3. Endpoint: Compute Route Matrix (Modern replacement for legacy Distance Matrix API)
-// Uses Google Maps Platform Routes API v2: https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix
+// 3. Endpoint: Free Live Route ETA & Remaining Road Distance via OSRM (with 1.3x Haversine fallback)
 app.post('/api/maps/route-matrix', async (req, res) => {
   try {
     const { origin, destination } = req.body || {};
@@ -1955,156 +2105,56 @@ app.post('/api/maps/route-matrix', async (req, res) => {
     const destLat = Number(destination?.lat);
     const destLng = Number(destination?.lng);
 
-    if (
-      !Number.isFinite(origLat) ||
-      !Number.isFinite(origLng) ||
-      !Number.isFinite(destLat) ||
-      !Number.isFinite(destLng) ||
-      origLat < -90 ||
-      origLat > 90 ||
-      destLat < -90 ||
-      destLat > 90 ||
-      origLng < -180 ||
-      origLng > 180 ||
-      destLng < -180 ||
-      destLng > 180
-    ) {
+    if (!isValidLatLng(origLat, origLng) || !isValidLatLng(destLat, destLng)) {
       return res.status(400).json({
         success: false,
         message: 'Valid origin and destination coordinates (lat/lng) are required.'
       });
     }
 
-    const parseDurationSeconds = (raw?: string): number => {
-      if (!raw || typeof raw !== 'string') return 0;
-      const matched = raw.match(/^(\d+(?:\.\d+)?)s$/);
-      return matched ? Math.round(Number(matched[1])) : 0;
-    };
+    // Primary: Public OSRM routing API for exact road distance & transit duration
+    try {
+      const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${origLng},${origLat};${destLng},${destLat}?overview=false`;
+      const osrmRes = await fetch(osrmUrl, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'ZuggiFreight/1.0 (https://zuggi.in)'
+        },
+        signal: AbortSignal.timeout(6000)
+      });
 
-    const googleMapsKey = getGoogleMapsKey();
-    if (googleMapsKey) {
-      try {
-        const matrixUrl = 'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix';
-        const matrixBody = {
-          origins: [
-            {
-              waypoint: {
-                location: {
-                  latLng: {
-                    latitude: origLat,
-                    longitude: origLng
-                  }
-                }
-              }
-            }
-          ],
-          destinations: [
-            {
-              waypoint: {
-                location: {
-                  latLng: {
-                    latitude: destLat,
-                    longitude: destLng
-                  }
-                }
-              }
-            }
-          ],
-          travelMode: 'DRIVE',
-          routingPreference: 'TRAFFIC_AWARE'
-        };
+      if (osrmRes.ok) {
+        const data: any = await osrmRes.json();
+        const route = data?.routes?.[0];
+        if (route && Number.isFinite(route.distance)) {
+          const distanceMeters = Math.max(0, Math.round(Number(route.distance)));
+          const distanceKm = Math.round((distanceMeters / 1000) * 10) / 10;
+          const durationSeconds = distanceMeters <= 250 ? 0 : Math.max(60, Math.round(Number(route.duration) || 0));
+          const calculatedAt = new Date().toISOString();
+          const etaIso = new Date(Date.now() + durationSeconds * 1000).toISOString();
 
-        const gRes = await fetch(matrixUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': googleMapsKey,
-            'X-Goog-FieldMask':
-              'originIndex,destinationIndex,duration,staticDuration,distanceMeters,status,condition',
-            'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio'
-          },
-          body: JSON.stringify(matrixBody)
-        });
-
-        const rawText = await gRes.text();
-        let parsed: any = null;
-        try {
-          parsed = rawText ? JSON.parse(rawText) : null;
-        } catch {
-          parsed = null;
-        }
-
-        // Propagate Demo/Quota exhaustion cleanly so client can trigger gmp-quota-exceeded fallback
-        if (
-          gRes.status === 429 ||
-          parsed?.error?.status === 'RESOURCE_EXHAUSTED' ||
-          parsed?.error?.code === 429
-        ) {
-          return res.status(429).json({
-            success: false,
-            quotaExceeded: true,
-            message: parsed?.error?.message || 'Google Maps Platform daily quota exceeded.'
+          return res.json({
+            success: true,
+            source: 'osrm_route',
+            distanceMeters,
+            distanceKm,
+            durationSeconds,
+            staticDurationSeconds: durationSeconds,
+            trafficDelayMinutes: 0,
+            trafficCondition: 'clear',
+            etaIso,
+            calculatedAt
           });
         }
-
-        if (gRes.ok && Array.isArray(parsed) && parsed.length > 0) {
-          const element =
-            parsed.find((el: any) => (el?.originIndex ?? 0) === 0 && (el?.destinationIndex ?? 0) === 0) ||
-            parsed[0];
-
-          const hasElementError = Boolean(element?.status && element.status.code && element.status.code !== 0);
-          if (element && !hasElementError && element.condition !== 'ROUTE_NOT_FOUND') {
-            const distanceMeters = Math.max(0, Number(element.distanceMeters) || 0);
-            const durationSeconds = parseDurationSeconds(element.duration);
-            const staticDurationSeconds = parseDurationSeconds(element.staticDuration) || durationSeconds;
-            const trafficDelaySeconds = Math.max(0, durationSeconds - staticDurationSeconds);
-            const trafficDelayMinutes = Math.round(trafficDelaySeconds / 60);
-            const delayRatio = staticDurationSeconds > 0 ? trafficDelaySeconds / staticDurationSeconds : 0;
-
-            let trafficCondition: 'clear' | 'moderate' | 'heavy' = 'clear';
-            if (trafficDelayMinutes >= 20 || delayRatio >= 0.25) {
-              trafficCondition = 'heavy';
-            } else if (trafficDelayMinutes >= 7 || delayRatio >= 0.1) {
-              trafficCondition = 'moderate';
-            }
-
-            const calculatedAt = new Date().toISOString();
-            const etaIso = new Date(Date.now() + durationSeconds * 1000).toISOString();
-
-            return res.json({
-              success: true,
-              source: 'google_routes_matrix',
-              distanceMeters,
-              distanceKm: Math.round((distanceMeters / 1000) * 10) / 10,
-              durationSeconds,
-              staticDurationSeconds,
-              trafficDelayMinutes,
-              trafficCondition,
-              etaIso,
-              calculatedAt
-            });
-          }
-        }
-      } catch {
-        console.warn('[Route Matrix API Notice] Falling back to GPS estimate.');
       }
+    } catch {
+      console.warn('[OSRM Route Matrix Notice] OSRM unreachable, using 1.3x Haversine fallback.');
     }
 
-    // Graceful road-distance estimation fallback if key unavailable or upstream unreachable
-    const R = 6371000;
-    const dLat = ((destLat - origLat) * Math.PI) / 180;
-    const dLon = ((destLng - origLng) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((origLat * Math.PI) / 180) *
-        Math.cos((destLat * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    const straightMeters = R * c;
-    const distanceMeters = Math.max(0, Math.round(straightMeters * 1.28));
+    // Graceful Haversine straight-line fallback multiplier (1.3x) ONLY if OSRM is unreachable
+    const straightKm = haversineStraightKm(origLat, origLng, destLat, destLng);
+    const distanceMeters = Math.max(0, Math.round(straightKm * 1000 * 1.3));
     const distanceKm = Math.round((distanceMeters / 1000) * 10) / 10;
-    // Average commercial freight highway speed ~ 44 km/h
     const durationSeconds = distanceMeters <= 250 ? 0 : Math.max(60, Math.round((distanceKm / 44) * 3600));
     const calculatedAt = new Date().toISOString();
     const etaIso = new Date(Date.now() + durationSeconds * 1000).toISOString();

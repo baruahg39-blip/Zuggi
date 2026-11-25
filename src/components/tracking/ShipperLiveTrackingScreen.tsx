@@ -1,10 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
 import {
   Truck,
   Phone,
   MessageSquare,
-  Navigation,
   ShieldCheck,
   Wifi,
   WifiOff,
@@ -14,18 +12,14 @@ import {
   CheckCircle2,
   AlertTriangle,
   Sparkles,
-  Crosshair,
-  Maximize2,
   Clock
 } from 'lucide-react';
 import { TripLiveTrackingResponse, TripLocationPing, TripStatus, GeofenceZoneConfig } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { calculateLiveDestinationEta, formatArrivalClock } from '../../services/routeMatrixEta';
 import { DEFAULT_GEOFENCE_CONFIG } from '../../utils/geofence';
-import { GeofenceOverlay } from '../maps/GeofenceOverlay';
 import { GeofenceMonitorPanel } from './GeofenceMonitorPanel';
 import { LiveTelemetryFallbackMap } from '../maps/LiveTelemetryFallbackMap';
-import { useGoogleMapsApiKey } from '../../hooks/useGoogleMapsApiKey';
 import { buildLocalTrackingFallback, syncLocalTripToServer } from '../../utils/trackingFallback';
 import { showToast } from '../shared/Toast';
 
@@ -44,154 +38,6 @@ const MILESTONES: { key: TripStatus; label: string; desc: string }[] = [
   { key: 'DELIVERED', label: 'Delivered', desc: 'Arrived at consignee depot' }
 ];
 
-// Subcomponent: Map Controller for Route Polylines and Reactive Live Camera Updates
-const MapRouteController: React.FC<{
-  tripKey: string;
-  pickup: { lat: number; lng: number };
-  drop: { lat: number; lng: number };
-  targetLocation: { lat: number; lng: number } | null;
-  historyPings: TripLocationPing[];
-  routePolyline?: string;
-  autoFollow: boolean;
-  fitRouteSignal: number;
-  focusVehicleSignal: number;
-}> = ({
-  tripKey,
-  pickup,
-  drop,
-  targetLocation,
-  historyPings,
-  routePolyline,
-  autoFollow,
-  fitRouteSignal,
-  focusVehicleSignal
-}) => {
-  const map = useMap();
-  const mapsLib = useMapsLibrary('maps');
-  const coreLib = useMapsLibrary('core');
-  const geometryLib = useMapsLibrary('geometry');
-
-  const polylineRef = useRef<google.maps.Polyline | null>(null);
-  const breadcrumbLineRef = useRef<google.maps.Polyline | null>(null);
-  const fittedTripKeyRef = useRef<string | null>(null);
-  const lastPannedKeyRef = useRef<string | null>(null);
-  const latestLocationRef = useRef<{ lat: number; lng: number } | null>(targetLocation);
-  latestLocationRef.current = targetLocation;
-
-  // Create polyline instances once per map instance
-  useEffect(() => {
-    if (!map || !mapsLib) return;
-
-    const plannedLine = new mapsLib.Polyline({
-      path: [],
-      geodesic: true,
-      strokeColor: '#E83E83',
-      strokeOpacity: 0.85,
-      strokeWeight: 5,
-      map
-    });
-
-    const breadcrumbLine = new mapsLib.Polyline({
-      path: [],
-      geodesic: true,
-      strokeColor: '#10B981',
-      strokeOpacity: 0.9,
-      strokeWeight: 4,
-      map
-    });
-
-    polylineRef.current = plannedLine;
-    breadcrumbLineRef.current = breadcrumbLine;
-
-    return () => {
-      plannedLine.setMap(null);
-      breadcrumbLine.setMap(null);
-      polylineRef.current = null;
-      breadcrumbLineRef.current = null;
-    };
-  }, [map, mapsLib]);
-
-  // Update planned corridor path in-place
-  useEffect(() => {
-    if (!polylineRef.current) return;
-    let pathCoordinates: google.maps.LatLngLiteral[] = [];
-
-    if (routePolyline && geometryLib?.encoding) {
-      try {
-        const decoded = geometryLib.encoding.decodePath(routePolyline);
-        pathCoordinates = decoded.map((p) => ({ lat: p.lat(), lng: p.lng() }));
-      } catch {
-        // fallback to corridor curve
-      }
-    }
-
-    if (pathCoordinates.length === 0) {
-      const midLat = (pickup.lat + drop.lat) / 2 + 0.08;
-      const midLng = (pickup.lng + drop.lng) / 2;
-      pathCoordinates = [
-        { lat: pickup.lat, lng: pickup.lng },
-        { lat: midLat, lng: midLng },
-        { lat: drop.lat, lng: drop.lng }
-      ];
-    }
-
-    polylineRef.current.setPath(pathCoordinates);
-  }, [map, mapsLib, geometryLib, pickup.lat, pickup.lng, drop.lat, drop.lng, routePolyline]);
-
-  // Update live traveled breadcrumb trail in-place without recreating polyline on every 3.5s poll
-  useEffect(() => {
-    if (!breadcrumbLineRef.current) return;
-    const historyCoords = (historyPings || []).map((p) => ({ lat: p.lat, lng: p.lng }));
-    if (
-      targetLocation &&
-      (historyCoords.length === 0 ||
-        historyCoords[historyCoords.length - 1].lat !== targetLocation.lat ||
-        historyCoords[historyCoords.length - 1].lng !== targetLocation.lng)
-    ) {
-      historyCoords.push({ lat: targetLocation.lat, lng: targetLocation.lng });
-    }
-    breadcrumbLineRef.current.setPath(historyCoords.length > 1 ? historyCoords : []);
-  }, [historyPings, targetLocation?.lat, targetLocation?.lng, map, mapsLib]);
-
-  // Fit bounds once initially per trip (or when user clicks Fit Route)
-  useEffect(() => {
-    if (!map || !coreLib) return;
-    if (fittedTripKeyRef.current === tripKey && fitRouteSignal === 0) return;
-
-    const bounds = new coreLib.LatLngBounds();
-    bounds.extend({ lat: pickup.lat, lng: pickup.lng });
-    bounds.extend({ lat: drop.lat, lng: drop.lng });
-    if (latestLocationRef.current) {
-      bounds.extend({ lat: latestLocationRef.current.lat, lng: latestLocationRef.current.lng });
-    }
-    map.fitBounds(bounds, { top: 80, right: 60, bottom: 60, left: 60 });
-    fittedTripKeyRef.current = tripKey;
-  }, [map, coreLib, tripKey, fitRouteSignal, pickup.lat, pickup.lng, drop.lat, drop.lng]);
-
-  // Smoothly pan camera whenever new live GPS coordinates arrive and auto-follow is enabled
-  useEffect(() => {
-    if (!map || !targetLocation || !autoFollow) return;
-    const coordKey = `${tripKey}:${targetLocation.lat.toFixed(6)},${targetLocation.lng.toFixed(6)}`;
-    if (lastPannedKeyRef.current === coordKey) return;
-    const hadPriorCoord = lastPannedKeyRef.current !== null && lastPannedKeyRef.current.startsWith(`${tripKey}:`);
-    lastPannedKeyRef.current = coordKey;
-    if (hadPriorCoord) {
-      map.panTo({ lat: targetLocation.lat, lng: targetLocation.lng });
-    }
-  }, [map, tripKey, targetLocation?.lat, targetLocation?.lng, autoFollow]);
-
-  // Focus camera directly onto the freshest live vehicle location when requested
-  useEffect(() => {
-    if (!map || focusVehicleSignal === 0) return;
-    const loc = latestLocationRef.current || { lat: pickup.lat, lng: pickup.lng };
-    map.panTo({ lat: loc.lat, lng: loc.lng });
-    const currentZoom = map.getZoom() || 8;
-    if (currentZoom < 12) map.setZoom(12);
-  }, [map, focusVehicleSignal, pickup.lat, pickup.lng]);
-
-  return null;
-};
-
 export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps> = ({
   tripId,
   loadId,
@@ -199,8 +45,6 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
   onBack,
   onOpenDriverSimulator
 }) => {
-  const { apiKey, canRenderGoogleMap, fallbackReason, reportMapError } = useGoogleMapsApiKey();
-
   const [trackingData, setTrackingData] = useState<TripLiveTrackingResponse | null>(() =>
     buildLocalTrackingFallback(tripId, loadId)
   );
@@ -209,22 +53,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
   const [isRefreshingEta, setIsRefreshingEta] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [autoFollow, setAutoFollow] = useState<boolean>(true);
-  const [fitRouteSignal, setFitRouteSignal] = useState<number>(0);
-  const [focusVehicleSignal, setFocusVehicleSignal] = useState<number>(0);
   const syncedToServerRef = useRef<boolean>(false);
-
-  // Stable initial map center per tripId so <GoogleMap defaultCenter> does not churn on live updates
-  const initialMapCenter = useMemo(() => {
-    const initial = buildLocalTrackingFallback(tripId, loadId);
-    if (initial?.latest_location) {
-      return { lat: initial.latest_location.lat, lng: initial.latest_location.lng };
-    }
-    if (initial?.pickup) {
-      return { lat: initial.pickup.lat, lng: initial.pickup.lng };
-    }
-    return { lat: 26.1445, lng: 91.7362 };
-  }, [tripId, loadId]);
 
   // Smooth Marker Animation State (LERP Interpolation)
   const [animatedCoord, setAnimatedCoord] = useState<{ lat: number; lng: number } | null>(null);
@@ -573,7 +402,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
           (trackingData.eta.eta_iso ? formatArrivalClock(trackingData.eta.eta_iso) : null);
         const trafficCond = trackingData.eta.traffic_condition || 'clear';
         const delayMins = trackingData.eta.traffic_delay_minutes || 0;
-        const isGoogleMatrix = trackingData.eta.source === 'google_routes_matrix';
+        const isOsrmRoute = trackingData.eta.source === 'osrm_route';
 
         return (
           <div className="bg-[#171318] text-white p-4 rounded-2xl border border-gray-800 shadow-sm flex flex-wrap items-center justify-between gap-4">
@@ -587,7 +416,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
                     Estimated Arrival at {trackingData.drop.city}
                   </span>
                   <span className="text-[10px] font-semibold text-emerald-400">
-                    • {isGoogleMatrix ? 'Google Live Traffic' : 'GPS Corridor Estimate'}
+                    • {isOsrmRoute ? 'OSRM Road Route' : 'GPS Corridor Estimate'}
                   </span>
                 </div>
                 <div className="flex flex-wrap items-baseline gap-2.5 mt-0.5">
@@ -693,141 +522,9 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
           </div>
         </div>
 
-        {/* GOOGLE MAPS INTERACTIVE VIEW WITH LIVE ROAD MAP FALLBACK */}
+        {/* OPENSTREETMAP + OSRM INTERACTIVE LIVE MAP */}
         <div className="flex-1 w-full h-full min-h-0 relative">
-          {canRenderGoogleMap ? (
-            <>
-              <APIProvider
-                apiKey={apiKey}
-                language="en"
-                region="IN"
-                libraries={['maps', 'marker', 'geometry']}
-                onError={reportMapError}
-              >
-                <GoogleMap
-                  mapId="DEMO_MAP_ID"
-                  colorScheme="LIGHT"
-                  mapTypeId="roadmap"
-                  style={{ width: '100%', height: '100%' }}
-                  defaultCenter={initialMapCenter}
-                  defaultZoom={8}
-                  gestureHandling="greedy"
-                  disableDefaultUI={false}
-                  onDragstart={() => setAutoFollow(false)}
-                  internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
-                >
-                  {/* Pickup Marker (Green Pin) */}
-                  {trackingData?.pickup && (
-                    <AdvancedMarker
-                      position={{ lat: trackingData.pickup.lat, lng: trackingData.pickup.lng }}
-                      title={`Pickup: ${trackingData.pickup.city}`}
-                    >
-                      <Pin background="#10B981" borderColor="#064E3B" glyphColor="#ffffff" scale={1.1} />
-                    </AdvancedMarker>
-                  )}
-
-                  {/* Drop Marker (Red Pin) */}
-                  {trackingData?.drop && (
-                    <AdvancedMarker
-                      position={{ lat: trackingData.drop.lat, lng: trackingData.drop.lng }}
-                      title={`Drop: ${trackingData.drop.city}`}
-                    >
-                      <Pin background="#EF4444" borderColor="#7F1D1D" glyphColor="#ffffff" scale={1.1} />
-                    </AdvancedMarker>
-                  )}
-
-                  {/* Live Animated Moving Truck Marker (Interpolated) */}
-                  {animatedCoord && (
-                    <AdvancedMarker
-                      position={animatedCoord}
-                      title={`${trackingData?.vehicle.vehicle_number} (Live)`}
-                    >
-                      <div className="relative flex items-center justify-center -translate-x-1/2 -translate-y-1/2 transition-transform">
-                        {/* Pulsing Ripple Effect */}
-                        <div className="w-12 h-12 rounded-full bg-[#E83E83]/30 animate-ping absolute"></div>
-                        {/* Truck Icon rotating according to heading bearing */}
-                        <div
-                          className="w-10 h-10 rounded-full bg-[#E83E83] border-2 border-white shadow-2xl flex items-center justify-center text-white font-bold transition-transform duration-300"
-                          style={{ transform: `rotate(${animatedHeading}deg)` }}
-                        >
-                          <Navigation className="w-5 h-5 fill-current text-white" />
-                        </div>
-                        {/* Callout Tag */}
-                        <div className="absolute -bottom-6 bg-[#171318] text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-700 whitespace-nowrap shadow-md flex items-center gap-1">
-                          <span>{trackingData?.vehicle.vehicle_number}</span>
-                          <span className="text-[#10B981]">•</span>
-                          <span>{trackingData?.latest_location?.speed || 0} km/h</span>
-                        </div>
-                      </div>
-                    </AdvancedMarker>
-                  )}
-
-                  {/* Geo-Fence Circular Zones Overlay */}
-                  {trackingData?.pickup && trackingData?.drop && (
-                    <GeofenceOverlay
-                      pickup={trackingData.pickup}
-                      delivery={trackingData.drop}
-                      pickupRadiusMeters={trackingData.geofence_config?.pickupRadiusMeters}
-                      deliveryRadiusMeters={trackingData.geofence_config?.deliveryRadiusMeters}
-                      insidePickup={trackingData.geofence_state?.insidePickup}
-                      insideDelivery={trackingData.geofence_state?.insideDelivery}
-                    />
-                  )}
-
-                  {/* Polyline and Reactive Live Camera Controller */}
-                  {trackingData && (
-                    <MapRouteController
-                      tripKey={trackingData.trip_id || tripId}
-                      pickup={trackingData.pickup}
-                      drop={trackingData.drop}
-                      targetLocation={
-                        trackingData.latest_location
-                          ? { lat: trackingData.latest_location.lat, lng: trackingData.latest_location.lng }
-                          : animatedCoord
-                      }
-                      historyPings={trackingData.location_history}
-                      routePolyline={trackingData.route_polyline}
-                      autoFollow={autoFollow}
-                      fitRouteSignal={fitRouteSignal}
-                      focusVehicleSignal={focusVehicleSignal}
-                    />
-                  )}
-                </GoogleMap>
-              </APIProvider>
-
-              {/* Floating Camera Controls on Google Map */}
-              <div className="absolute right-3 bottom-6 z-20 flex flex-col gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAutoFollow(true);
-                    setFocusVehicleSignal((n) => n + 1);
-                  }}
-                  className={`px-2.5 py-2 rounded-xl text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer transition ${
-                    autoFollow
-                      ? 'bg-[#E83E83] hover:bg-[#d62e73] text-white'
-                      : 'bg-[#171318]/90 hover:bg-[#241E26] text-white border border-gray-700'
-                  }`}
-                  title="Focus camera and auto-follow live vehicle coordinates"
-                >
-                  <Crosshair className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">{autoFollow ? 'Following Truck' : 'Focus Truck'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAutoFollow(false);
-                    setFitRouteSignal((n) => n + 1);
-                  }}
-                  className="px-2.5 py-2 rounded-xl bg-[#171318]/90 hover:bg-[#241E26] text-white border border-gray-700 text-[11px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer"
-                  title="Fit entire pickup-to-drop route"
-                >
-                  <Maximize2 className="w-3.5 h-3.5" />
-                  <span className="hidden sm:inline">Fit Route</span>
-                </button>
-              </div>
-            </>
-          ) : trackingData?.pickup && trackingData?.drop ? (
+          {trackingData?.pickup && trackingData?.drop ? (
             <LiveTelemetryFallbackMap
               pickup={trackingData.pickup}
               drop={trackingData.drop}
@@ -841,7 +538,7 @@ export const ShipperLiveTrackingScreen: React.FC<ShipperLiveTrackingScreenProps>
               deliveryRadiusMeters={trackingData.geofence_config?.deliveryRadiusMeters}
               insidePickup={trackingData.geofence_state?.insidePickup}
               insideDelivery={trackingData.geofence_state?.insideDelivery}
-              reason={fallbackReason}
+              autoFollowVehicle={true}
             />
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 text-xs gap-2 p-6 text-center">

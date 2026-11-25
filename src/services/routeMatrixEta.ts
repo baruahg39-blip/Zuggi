@@ -88,7 +88,8 @@ function buildLocalFallbackEta(req: RouteMatrixEtaRequest): BookingLiveEta {
     req.destination.lat,
     req.destination.lng
   );
-  const distanceMeters = Math.max(0, Math.round(straightMeters * 1.28));
+  // Graceful 1.3x Haversine road multiplier when OSRM is temporarily unreachable
+  const distanceMeters = Math.max(0, Math.round(straightMeters * 1.3));
   const distanceKm = Math.round((distanceMeters / 1000) * 10) / 10;
   const durationSeconds = distanceMeters <= 250 ? 0 : Math.max(60, Math.round((distanceKm / 44) * 3600));
   const calculatedAt = new Date().toISOString();
@@ -113,9 +114,8 @@ function buildLocalFallbackEta(req: RouteMatrixEtaRequest): BookingLiveEta {
 }
 
 /**
- * Computes live traffic-aware ETA to the destination via our server proxy to
- * Google Maps Platform Routes API v2 (Compute Route Matrix) — the modern
- * replacement for the legacy Distance Matrix API.
+ * Computes live road distance & ETA to the destination via public OSRM routing
+ * (via our /api/maps/route-matrix proxy, with 1.3x Haversine fallback if unreachable).
  */
 export async function calculateLiveDestinationEta(
   req: RouteMatrixEtaRequest
@@ -139,26 +139,12 @@ export async function calculateLiveDestinationEta(
       })
     });
 
-    if (res.status === 429) {
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(
-          new CustomEvent('gmp-quota-exceeded', { detail: { reason: 'quota_exceeded' } })
-        );
-      }
-      return buildLocalFallbackEta(req);
-    }
-
     if (!res.ok) {
       return buildLocalFallbackEta(req);
     }
 
     const data = await res.json();
     if (!data?.success) {
-      if (data?.quotaExceeded && typeof window !== 'undefined') {
-        window.dispatchEvent(
-          new CustomEvent('gmp-quota-exceeded', { detail: { reason: 'quota_exceeded' } })
-        );
-      }
       return buildLocalFallbackEta(req);
     }
 
@@ -176,8 +162,8 @@ export async function calculateLiveDestinationEta(
       data.trafficCondition === 'heavy' || data.trafficCondition === 'moderate'
         ? data.trafficCondition
         : 'clear';
-    const source: 'google_routes_matrix' | 'gps_estimate' =
-      data.source === 'google_routes_matrix' ? 'google_routes_matrix' : 'gps_estimate';
+    const source: 'osrm_route' | 'gps_estimate' =
+      data.source === 'osrm_route' ? 'osrm_route' : 'gps_estimate';
 
     return {
       distanceMeters,

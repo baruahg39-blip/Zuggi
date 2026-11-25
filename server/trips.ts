@@ -131,7 +131,7 @@ export interface TripRecord {
     formatted_arrival_time: string;
     traffic_condition: 'clear' | 'moderate' | 'heavy';
     traffic_delay_minutes: number;
-    source: 'google_routes_matrix' | 'gps_estimate';
+    source: 'osrm_route' | 'gps_estimate';
     calculated_at: string;
   };
 }
@@ -1401,8 +1401,8 @@ tripsRouter.post('/:id/live-eta', async (req, res) => {
       body.traffic_condition === 'heavy' || body.traffic_condition === 'moderate'
         ? body.traffic_condition
         : 'clear';
-    const source: 'google_routes_matrix' | 'gps_estimate' =
-      body.source === 'google_routes_matrix' ? 'google_routes_matrix' : 'gps_estimate';
+    const source: 'osrm_route' | 'gps_estimate' =
+      body.source === 'osrm_route' ? 'osrm_route' : 'gps_estimate';
 
     trip.live_eta = {
       minutes,

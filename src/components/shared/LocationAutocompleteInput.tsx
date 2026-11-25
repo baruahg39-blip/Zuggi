@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MapPin, Loader2, LocateFixed, X } from 'lucide-react';
+import {
+  GUWAHATI_DEFAULT_CENTER,
+  reverseGeocodeNominatim,
+  searchPlacesPhoton
+} from '../../services/osmMapService';
 
 export interface SelectedPlace {
   label: string;
@@ -20,64 +25,6 @@ interface LocationAutocompleteInputProps {
   theme?: 'light' | 'dark';
   showGpsButton?: boolean;
   cityOnly?: boolean;
-}
-
-interface NominatimItem {
-  place_id: number;
-  display_name: string;
-  lat: string;
-  lon: string;
-  address?: {
-    road?: string;
-    neighbourhood?: string;
-    suburb?: string;
-    village?: string;
-    town?: string;
-    city?: string;
-    county?: string;
-    state_district?: string;
-    state?: string;
-    postcode?: string;
-  };
-}
-
-function parseNominatimPlace(item: NominatimItem, cityOnly = false): SelectedPlace {
-  const addr = item.address || {};
-  const city =
-    addr.city ||
-    addr.town ||
-    addr.village ||
-    addr.suburb ||
-    addr.state_district ||
-    addr.county ||
-    item.display_name.split(',')[0]?.trim() ||
-    '';
-  const district = addr.state_district || addr.county || city;
-  const state = addr.state || 'Assam';
-  const pincode = addr.postcode || '';
-
-  const shortParts = [
-    addr.road || addr.neighbourhood || addr.suburb,
-    city,
-    state
-  ].filter((p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx);
-
-  const label = cityOnly
-    ? [city, state].filter(Boolean).join(', ')
-    : shortParts.length >= 2
-      ? shortParts.join(', ')
-      : item.display_name.split(',').slice(0, 3).map((s) => s.trim()).join(', ');
-
-  return {
-    label,
-    address: item.display_name,
-    city,
-    district,
-    state,
-    pincode,
-    lat: parseFloat(item.lat),
-    lng: parseFloat(item.lon)
-  };
 }
 
 export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps> = ({
@@ -107,7 +54,7 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Debounced live India-wide location search via OpenStreetMap Nominatim
+  // Debounced live address search via free Photon API biased to Guwahati, Assam (with Nominatim fallback)
   useEffect(() => {
     const q = value.trim();
     if (skipNextFetchRef.current) {
@@ -124,24 +71,21 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
     const timer = window.setTimeout(async () => {
       setIsSearching(true);
       try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=6&q=${encodeURIComponent(
-          q
-        )}`;
-        const res = await fetch(url, {
-          signal: controller.signal,
-          headers: { Accept: 'application/json' }
+        const results = await searchPlacesPhoton(q, {
+          lat: GUWAHATI_DEFAULT_CENTER.lat,
+          lon: GUWAHATI_DEFAULT_CENTER.lng,
+          limit: 6,
+          cityOnly,
+          signal: controller.signal
         });
-        if (!res.ok) return;
-        const data: NominatimItem[] = await res.json();
-        const parsed = (Array.isArray(data) ? data : []).map((item) => parseNominatimPlace(item, cityOnly));
-        setSuggestions(parsed);
-        if (parsed.length > 0) setIsOpen(true);
+        setSuggestions(results);
+        if (results.length > 0) setIsOpen(true);
       } catch {
         // Silent abort / offline fallback (user can still type any free-text location)
       } finally {
         setIsSearching(false);
       }
-    }, 320);
+    }, 280);
 
     return () => {
       window.clearTimeout(timer);
@@ -156,18 +100,28 @@ export const LocationAutocompleteInput: React.FC<LocationAutocompleteInputProps>
       async (pos) => {
         const { latitude, longitude } = pos.coords;
         try {
-          const url = `https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat=${latitude}&lon=${longitude}`;
-          const res = await fetch(url, { headers: { Accept: 'application/json' } });
-          if (res.ok) {
-            const item: NominatimItem = await res.json();
-            const parsed = parseNominatimPlace(item, cityOnly);
-            skipNextFetchRef.current = true;
-            onChangeText(parsed.label);
-            onSelectPlace(parsed);
-            setIsOpen(false);
-          }
+          const rev = await reverseGeocodeNominatim(latitude, longitude);
+          const label = cityOnly
+            ? [rev.city, rev.state].filter(Boolean).join(', ')
+            : [rev.street || rev.area, rev.city, rev.state]
+                .filter((p, idx, arr) => Boolean(p) && arr.indexOf(p) === idx)
+                .join(', ') || rev.formatted_address;
+
+          const parsed: SelectedPlace = {
+            label,
+            address: rev.formatted_address,
+            city: rev.city,
+            district: rev.area || rev.city,
+            state: rev.state,
+            pincode: rev.pincode,
+            lat: latitude,
+            lng: longitude
+          };
+          skipNextFetchRef.current = true;
+          onChangeText(parsed.label);
+          onSelectPlace(parsed);
+          setIsOpen(false);
         } catch {
-          // Fallback to coordinates if reverse geocoding is offline
           const fallback: SelectedPlace = {
             label: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
             address: `GPS Location (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`,

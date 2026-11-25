@@ -35,7 +35,7 @@ import { NotFoundView } from './components/landing/NotFoundView';
 import { isSeoLandingRoute } from './data/seoLandingPages';
 import { MobileAppInstallModal } from './components/mobile/MobileAppInstallModal';
 import { MobileBottomNav } from './components/mobile/MobileBottomNav';
-import { ToastContainer } from './components/shared/Toast';
+import { ToastContainer, showToast } from './components/shared/Toast';
 import { DriverWebTrackingPage } from './components/tracking/DriverWebTrackingPage';
 import { PartnerPermissionsModal } from './components/partner/PartnerPermissionsModal';
 import { ShieldAlert, LogIn, Lock, Truck, Building2, ArrowRight, ShieldCheck } from 'lucide-react';
@@ -83,7 +83,6 @@ export default function App() {
     typeof window !== 'undefined' ? window.location.pathname : '/'
   );
   const [currentUser, setCurrentUser] = useState<User | null>(() => logisticsStore.getCurrentUser());
-  const [quotaExceeded, setQuotaExceeded] = useState(false);
 
   // Zero-login Driver Link Web GPS route detection (/track/driver?token=...&trip_id=...)
   const [driverLinkParams, setDriverLinkParams] = useState<{ tripId: string; token: string } | null>(() => {
@@ -157,17 +156,6 @@ export default function App() {
   // Test Firestore Connection on boot per Skill constraint
   useEffect(() => {
     testFirestoreConnection();
-  }, []);
-
-  // Listen for Google Maps quota events per skill Section 8
-  useEffect(() => {
-    const handleQuotaExceeded = () => {
-      setQuotaExceeded(true);
-    };
-    window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
-    return () => {
-      window.removeEventListener('gmp-quota-exceeded', handleQuotaExceeded);
-    };
   }, []);
 
   // Track device network status for highway offline banner
@@ -355,24 +343,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#F8F6F8] text-[#171318] flex flex-col font-sans selection:bg-[#E83E83] selection:text-white w-full max-w-full overflow-x-hidden">
-      {/* Mandatory Google Maps Platform Quota Banner per Section 8 Case A */}
-      {quotaExceeded && (
-        <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
-          <span>
-            Google Maps Platform quota reached. If you are the app owner, visit{' '}
-            <a
-              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline font-semibold text-amber-950 hover:text-amber-800"
-            >
-              maps developer site
-            </a>{' '}
-            for instructions to update your account.
-          </span>
-        </div>
-      )}
-
       {/* Main Header */}
       <Header
         currentUser={currentUser}
@@ -700,6 +670,10 @@ export default function App() {
             setShowCreateLoadModal(false);
             setCustomerActiveLoadId(loadId);
           }}
+          onRequireAuth={() => {
+            setShowCreateLoadModal(false);
+            handleOpenAuthModal('customer');
+          }}
         />
       )}
 
@@ -763,6 +737,14 @@ export default function App() {
         onLoginSuccess={(user) => {
           setCurrentUser(user);
           setIsAuthOpen(false);
+          void logisticsStore.flushPendingCloudSyncLoads().then((count) => {
+            if (count > 0) {
+              showToast(
+                `${count} saved load${count > 1 ? 's' : ''} automatically published to transporters!`,
+                'success'
+              );
+            }
+          });
         }}
       />
 

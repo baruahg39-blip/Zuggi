@@ -657,7 +657,7 @@ class AuthService {
 
     const res = await fetch('/api/auth/set-passcode', {
       method: 'POST',
-      credentials: 'same-origin',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({
         phone: clean,
@@ -708,7 +708,7 @@ class AuthService {
     try {
       const res = await fetch('/api/auth/login-passcode', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({ phone: clean, passcode: cleanPasscode })
       });
@@ -819,7 +819,7 @@ class AuthService {
     try {
       const res = await fetch('/api/auth/reset-passcode', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: JSON.stringify({
           phone: clean,
@@ -948,7 +948,8 @@ class AuthService {
 
     const res = await fetch('/api/auth/admin-claim', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: cleanPasscode })
     });
 
@@ -972,7 +973,7 @@ class AuthService {
 
     const sessionRes = await fetch('/api/auth/admin-session', {
       method: 'POST',
-      credentials: 'same-origin',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       body: JSON.stringify({ email: SUPER_ADMIN_EMAIL, passcode: cleanPasscode })
     });
@@ -1021,7 +1022,7 @@ class AuthService {
       }
       const res = await fetch('/api/auth/request-account-deletion', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers,
         body: JSON.stringify({
           phone: cleanPhone || undefined,
@@ -1095,7 +1096,7 @@ class AuthService {
       const headers = logisticsStore.buildAuthHeaders(true);
       await fetch('/api/auth/logout', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers
       });
     } catch {

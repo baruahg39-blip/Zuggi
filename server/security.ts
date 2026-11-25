@@ -122,7 +122,6 @@ export function validateEnvironmentConfig(): EnvValidationReport {
     { name: 'MY_JIO_PHONE_NUMBER', label: 'SMS sender number (httpSMS)' },
     { name: 'CASHFREE_APP_ID', label: 'Cashfree payment gateway' },
     { name: 'CASHFREE_SECRET_KEY', label: 'Cashfree webhook & payout signing' },
-    { name: 'GOOGLE_MAPS_API_KEY', label: 'Server-side Maps routing & geocoding' },
     { name: 'GEMINI_API_KEY', label: 'Logistics intelligence summary API' }
   ];
 
@@ -267,7 +266,7 @@ export function globalErrorHandler(
  * - X-Content-Type-Options: nosniff
  * - Strict-Transport-Security: max-age=31536000; includeSubDomains; preload (1 year)
  * - X-Frame-Options: DENY (on all responses in production and all API routes in dev)
- * - Content-Security-Policy restricting scripts strictly to self & trusted Google Maps / Firebase origins
+ * - Content-Security-Policy restricting scripts strictly to self & trusted Firebase origins
  */
 export function applySecurityHeaders(app: express.Express): void {
   app.disable('x-powered-by');
@@ -275,16 +274,12 @@ export function applySecurityHeaders(app: express.Express): void {
   const scriptSrc = IS_PRODUCTION
     ? [
         "'self'",
-        'https://maps.googleapis.com',
-        'https://maps.gstatic.com',
         'https://apis.google.com',
         'https://www.gstatic.com'
       ]
     : [
         "'self'",
         "'unsafe-inline'",
-        'https://maps.googleapis.com',
-        'https://maps.gstatic.com',
         'https://apis.google.com',
         'https://www.gstatic.com'
       ];
@@ -309,7 +304,9 @@ export function applySecurityHeaders(app: express.Express): void {
             'https://*.firebaseio.com',
             'https://*.firebaseapp.com',
             'https://*.supabase.co',
+            'https://photon.komoot.io',
             'https://nominatim.openstreetmap.org',
+            'https://router.project-osrm.org',
             'https://api.cashfree.com',
             'https://sandbox.cashfree.com',
             'wss:'

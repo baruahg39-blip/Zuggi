@@ -12,6 +12,13 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { formatMetersOrKm } from '../../utils/geofence';
+import {
+  GUWAHATI_DEFAULT_CENTER,
+  OSM_TILE_ATTRIBUTION,
+  OSM_TILE_URL,
+  fetchOsrmRoute,
+  haversineDistanceKm
+} from '../../services/osmMapService';
 
 export interface TelemetryPoint {
   lat: number;
@@ -33,25 +40,19 @@ export interface LiveTelemetryFallbackMapProps {
   deliveryRadiusMeters?: number;
   insidePickup?: boolean;
   insideDelivery?: boolean;
-  reason?: 'missing_key' | 'auth_error' | 'quota_exceeded';
-  /** Optional interactive location picker mode for FreightLocationPicker */
+  /** Optional pre-computed OSRM road route coordinates [lat, lng][] */
+  routeCoordinates?: Array<[number, number]>;
+  /** Interactive location picker mode for FreightLocationPicker */
   pickerMode?: 'pickup' | 'drop' | 'preview';
+  /** Allow dragging pickup (green) and drop (red) markers directly on map */
+  draggablePins?: boolean;
+  onMapClick?: (lat: number, lng: number) => void;
+  onPickupDragEnd?: (lat: number, lng: number) => void;
+  onDropDragEnd?: (lat: number, lng: number) => void;
   onCenterChange?: (lat: number, lng: number) => void;
   flyToTarget?: { lat: number; lng: number; zoom?: number; seq: number } | null;
-}
-
-function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) *
-      Math.sin(dLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+  fitBoundsSeq?: number;
+  autoFollowVehicle?: boolean;
 }
 
 function escapeHtml(text: string): string {
@@ -63,25 +64,27 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function makePinIcon(label: string, color: string, subtitle?: string): L.DivIcon {
+function makePinIcon(label: string, color: string, subtitle?: string, isActive?: boolean): L.DivIcon {
   const safeLabel = escapeHtml(label);
-  const safeSub = subtitle ? escapeHtml(subtitle.slice(0, 18)) : '';
+  const safeSub = subtitle ? escapeHtml(subtitle.slice(0, 22)) : '';
+  const ring = isActive ? `0 0 0 6px ${color}33, 0 4px 12px rgba(0,0,0,0.35)` : '0 4px 10px rgba(0,0,0,0.32)';
   return L.divIcon({
     className: 'zuggi-osm-pin',
     html: `
       <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%);pointer-events:auto;">
         ${
           safeSub
-            ? `<div style="background:${color};color:#fff;font-size:10px;font-weight:800;padding:2px 7px;border-radius:9999px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.28);margin-bottom:3px;border:1.5px solid #fff;">${safeSub}</div>`
+            ? `<div style="background:${color};color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:9999px;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.28);margin-bottom:4px;border:1.5px solid #fff;">${safeSub}</div>`
             : ''
         }
-        <div style="width:28px;height:28px;border-radius:9999px;background:${color};border:2.5px solid #fff;box-shadow:0 4px 10px rgba(0,0,0,0.32);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:900;">
+        <div style="width:32px;height:32px;border-radius:9999px;background:${color};border:2.5px solid #fff;box-shadow:${ring};display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:900;">
           ${safeLabel}
         </div>
-        <div style="width:8px;height:4px;background:rgba(0,0,0,0.28);border-radius:9999px;margin-top:1px;"></div>
+        <div style="width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:7px solid ${color};margin-top:-1px;"></div>
+        <div style="width:8px;height:3px;background:rgba(0,0,0,0.28);border-radius:9999px;margin-top:1px;"></div>
       </div>
     `,
-    iconSize: [28, 28],
+    iconSize: [32, 42],
     iconAnchor: [0, 0]
   });
 }
@@ -92,27 +95,28 @@ function makeTruckIcon(vehicleNumber: string, speedKmh: number, heading: number)
     className: 'zuggi-osm-truck',
     html: `
       <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%);pointer-events:auto;">
-        <div style="width:36px;height:36px;border-radius:9999px;background:#E83E83;border:2.5px solid #fff;box-shadow:0 4px 14px rgba(232,62,131,0.5);display:flex;align-items:center;justify-content:center;">
+        <div style="width:38px;height:38px;border-radius:9999px;background:#E83E83;border:2.5px solid #fff;box-shadow:0 0 0 6px rgba(232,62,131,0.25), 0 4px 14px rgba(232,62,131,0.5);display:flex;align-items:center;justify-content:center;">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff" style="transform:rotate(${Math.round(heading)}deg);">
             <polygon points="12,2 20,21 12,17 4,21" />
           </svg>
         </div>
-        <div style="margin-top:3px;background:#171318;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:9999px;border:1px solid rgba(232,62,131,0.65);white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.35);font-family:ui-monospace,monospace;">
+        <div style="margin-top:4px;background:#171318;color:#fff;font-size:10px;font-weight:800;padding:2px 8px;border-radius:9999px;border:1px solid rgba(232,62,131,0.65);white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.35);font-family:ui-monospace,monospace;">
           ${safeVeh}${speedKmh > 0 ? ` • ${speedKmh} km/h` : ''}
         </div>
       </div>
     `,
-    iconSize: [36, 36],
+    iconSize: [38, 38],
     iconAnchor: [0, 0]
   });
 }
 
 /**
- * Interactive OpenStreetMap road map fallback powered by Leaflet.
- * Engages ONLY when Google Maps JavaScript API is unavailable (missing key,
- * domain referrer mismatch, or quota exceeded) using raw GPS/trip coordinates
- * so users always see real streets, highways, cities, pins, and geo-fences
- * instead of a blank dark screen.
+ * Interactive 100% Free OpenStreetMap + Leaflet + OSRM Freight Map.
+ * Default-centered on Guwahati, Assam (26.1445, 91.7362).
+ * Supports:
+ *  - Click-anywhere pin placement & draggable Green Pickup / Red Drop-off markers
+ *  - Real OSRM highway/road GeoJSON route polylines
+ *  - Live moving vehicle markers, GPS breadcrumb trails, and circular geo-fence overlays
  */
 export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> = ({
   pickup,
@@ -127,28 +131,44 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
   deliveryRadiusMeters = 500,
   insidePickup = false,
   insideDelivery = false,
-  reason = 'missing_key',
+  routeCoordinates,
   pickerMode,
+  draggablePins = false,
+  onMapClick,
+  onPickupDragEnd,
+  onDropDragEnd,
   onCenterChange,
-  flyToTarget
+  flyToTarget,
+  fitBoundsSeq = 0,
+  autoFollowVehicle = false
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const overlayLayerRef = useRef<L.LayerGroup | null>(null);
   const isProgrammaticRef = useRef(false);
   const hasFittedRef = useRef(false);
+  const lastFollowedCoordRef = useRef<string | null>(null);
+
   const onCenterChangeRef = useRef(onCenterChange);
   onCenterChangeRef.current = onCenterChange;
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
+  const onPickupDragEndRef = useRef(onPickupDragEnd);
+  onPickupDragEndRef.current = onPickupDragEnd;
+  const onDropDragEndRef = useRef(onDropDragEnd);
+  onDropDragEndRef.current = onDropDragEnd;
   const pickerModeRef = useRef(pickerMode);
   pickerModeRef.current = pickerMode;
 
   const [tilesLoaded, setTilesLoaded] = useState(false);
+  const [autoOsrmCoords, setAutoOsrmCoords] = useState<Array<[number, number]>>([]);
+  const [isFollowing, setIsFollowing] = useState(autoFollowVehicle);
 
   const safePickup = useMemo(
     () => ({
-      lat: Number.isFinite(pickup.lat) ? pickup.lat : 26.1445,
-      lng: Number.isFinite(pickup.lng) ? pickup.lng : 91.7362,
-      city: pickup.city || 'Pickup',
+      lat: Number.isFinite(pickup.lat) ? pickup.lat : GUWAHATI_DEFAULT_CENTER.lat,
+      lng: Number.isFinite(pickup.lng) ? pickup.lng : GUWAHATI_DEFAULT_CENTER.lng,
+      city: pickup.city || 'Guwahati',
       address: pickup.address || ''
     }),
     [pickup.lat, pickup.lng, pickup.city, pickup.address]
@@ -171,24 +191,59 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
     return { lat: safePickup.lat, lng: safePickup.lng };
   }, [currentLocation, safePickup.lat, safePickup.lng]);
 
+  // Automatically fetch real OSRM highway geometry in tracking mode when caller didn't pass routeCoordinates
+  useEffect(() => {
+    if (routeCoordinates && routeCoordinates.length >= 2) {
+      setAutoOsrmCoords([]);
+      return;
+    }
+    if (pickerMode && pickerMode !== 'preview') return;
+
+    const controller = new AbortController();
+    fetchOsrmRoute(
+      { lat: safePickup.lat, lng: safePickup.lng },
+      { lat: safeDrop.lat, lng: safeDrop.lng },
+      controller.signal
+    )
+      .then((res) => {
+        if (!controller.signal.aborted && res.coordinates.length >= 2) {
+          setAutoOsrmCoords(res.coordinates);
+        }
+      })
+      .catch(() => {
+        // Ignore abort / offline
+      });
+
+    return () => controller.abort();
+  }, [safePickup.lat, safePickup.lng, safeDrop.lat, safeDrop.lng, routeCoordinates, pickerMode]);
+
+  const effectiveRouteCoords = useMemo(() => {
+    if (routeCoordinates && routeCoordinates.length >= 2) return routeCoordinates;
+    if (autoOsrmCoords.length >= 2) return autoOsrmCoords;
+    return [];
+  }, [routeCoordinates, autoOsrmCoords]);
+
   const progressMetrics = useMemo(() => {
-    const totalStraightKm = Math.max(1, haversineKm(safePickup.lat, safePickup.lng, safeDrop.lat, safeDrop.lng) * 1.25);
+    const totalRoadKm = Math.max(
+      1,
+      haversineDistanceKm(safePickup.lat, safePickup.lng, safeDrop.lat, safeDrop.lng) * 1.3
+    );
     const computedRemKm =
       remainingKm !== undefined
         ? remainingKm
-        : Math.round(haversineKm(activeLocation.lat, activeLocation.lng, safeDrop.lat, safeDrop.lng) * 1.25 * 10) / 10;
-    const progressPct = Math.min(100, Math.max(4, Math.round(((totalStraightKm - computedRemKm) / totalStraightKm) * 100)));
-    return { totalStraightKm: Math.round(totalStraightKm), computedRemKm, progressPct };
+        : Math.round(haversineDistanceKm(activeLocation.lat, activeLocation.lng, safeDrop.lat, safeDrop.lng) * 1.3 * 10) / 10;
+    const progressPct = Math.min(100, Math.max(4, Math.round(((totalRoadKm - computedRemKm) / totalRoadKm) * 100)));
+    return { totalRoadKm: Math.round(totalRoadKm), computedRemKm, progressPct };
   }, [safePickup, safeDrop, activeLocation, remainingKm]);
 
-  // 1. Initialize Leaflet map with bright OpenStreetMap street/highway tiles
+  // 1. Initialize Leaflet map with free OpenStreetMap tiles (default Guwahati, Assam 26.1445, 91.7362)
   useEffect(() => {
     const el = containerRef.current;
     if (!el || mapRef.current) return;
 
-    const initialLat = pickerMode === 'drop' ? safeDrop.lat : activeLocation.lat;
-    const initialLng = pickerMode === 'drop' ? safeDrop.lng : activeLocation.lng;
-    const initialZoom = pickerMode && pickerMode !== 'preview' ? 14 : 9;
+    const initialLat = pickerMode === 'drop' ? safeDrop.lat : pickerMode === 'pickup' ? safePickup.lat : activeLocation.lat;
+    const initialLng = pickerMode === 'drop' ? safeDrop.lng : pickerMode === 'pickup' ? safePickup.lng : activeLocation.lng;
+    const initialZoom = pickerMode && pickerMode !== 'preview' ? 13 : 8;
 
     const map = L.map(el, {
       center: [initialLat, initialLng],
@@ -197,9 +252,9 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
       attributionControl: true
     });
 
-    const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    const tileLayer = L.tileLayer(OSM_TILE_URL, {
       maxZoom: 19,
-      attribution: '&copy; OpenStreetMap contributors'
+      attribution: OSM_TILE_ATTRIBUTION
     });
     tileLayer.on('load', () => setTilesLoaded(true));
     tileLayer.addTo(map);
@@ -208,7 +263,16 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
     mapRef.current = map;
     overlayLayerRef.current = layerGroup;
 
-    // Emit center changes in interactive location picker mode
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      if (onMapClickRef.current) {
+        onMapClickRef.current(e.latlng.lat, e.latlng.lng);
+      }
+    });
+
+    map.on('dragstart', () => {
+      setIsFollowing(false);
+    });
+
     map.on('moveend', () => {
       if (isProgrammaticRef.current) {
         isProgrammaticRef.current = false;
@@ -220,10 +284,9 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
       }
     });
 
-    // Ensure Leaflet recalculates size after modal/tab transitions
     const resizeTimer = setTimeout(() => {
       map.invalidateSize();
-    }, 180);
+    }, 160);
 
     const resizeObserver =
       typeof ResizeObserver !== 'undefined'
@@ -243,15 +306,48 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
     };
   }, []);
 
-  // 2. Programmatic fly-to when search result or step changes in FreightLocationPicker
+  // 2. Programmatic fly-to when search result or GPS triggers
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !flyToTarget) return;
     isProgrammaticRef.current = true;
-    map.setView([flyToTarget.lat, flyToTarget.lng], flyToTarget.zoom ?? 15, { animate: true });
+    map.setView([flyToTarget.lat, flyToTarget.lng], flyToTarget.zoom ?? 14, { animate: true });
   }, [flyToTarget]);
 
-  // 3. Render markers, route corridor line, GPS breadcrumb trail, and geo-fences
+  // 3. Programmatic fit bounds trigger
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || fitBoundsSeq === 0) return;
+    const pts: Array<[number, number]> =
+      effectiveRouteCoords.length >= 2
+        ? effectiveRouteCoords
+        : [
+            [safePickup.lat, safePickup.lng],
+            [safeDrop.lat, safeDrop.lng]
+          ];
+    const bounds = L.latLngBounds(pts);
+    if (!pickerMode) {
+      bounds.extend([activeLocation.lat, activeLocation.lng]);
+    }
+    isProgrammaticRef.current = true;
+    map.fitBounds(bounds, { padding: [55, 55], maxZoom: 14 });
+  }, [fitBoundsSeq]);
+
+  // 4. Smoothly pan camera to live vehicle when auto-follow is active
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || pickerMode || !isFollowing) return;
+    const key = `${activeLocation.lat.toFixed(5)},${activeLocation.lng.toFixed(5)}`;
+    if (lastFollowedCoordRef.current === key) return;
+    const hadPrior = lastFollowedCoordRef.current !== null;
+    lastFollowedCoordRef.current = key;
+    if (hadPrior) {
+      isProgrammaticRef.current = true;
+      map.panTo([activeLocation.lat, activeLocation.lng], { animate: true });
+    }
+  }, [activeLocation.lat, activeLocation.lng, pickerMode, isFollowing]);
+
+  // 5. Render markers (draggable in picker mode), OSRM highway polyline, GPS breadcrumb trail, and geo-fences
   useEffect(() => {
     const map = mapRef.current;
     const layer = overlayLayerRef.current;
@@ -259,23 +355,7 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
 
     layer.clearLayers();
 
-    const isPickingPin = pickerMode === 'pickup' || pickerMode === 'drop';
-
-    if (isPickingPin) {
-      // Show the opposite confirmed pin as a reference while user drags the center pin
-      if (pickerMode === 'drop') {
-        L.marker([safePickup.lat, safePickup.lng], {
-          icon: makePinIcon('A', '#16A34A', `Pickup: ${safePickup.city}`)
-        }).addTo(layer);
-      } else if (pickerMode === 'pickup' && drop.address) {
-        L.marker([safeDrop.lat, safeDrop.lng], {
-          icon: makePinIcon('B', '#DC2626', `Drop: ${safeDrop.city}`)
-        }).addTo(layer);
-      }
-      return;
-    }
-
-    // Geo-fence circular perimeters (only in tracking mode, not simple route preview)
+    // Geo-fence circular perimeters (only in tracking mode)
     if (!pickerMode) {
       L.circle([safePickup.lat, safePickup.lng], {
         radius: Math.max(150, pickupRadiusMeters),
@@ -296,55 +376,108 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
       }).addTo(layer);
     }
 
-    // Planned corridor path
-    const midLat = (safePickup.lat + safeDrop.lat) / 2 + 0.03;
-    const midLng = (safePickup.lng + safeDrop.lng) / 2;
-    L.polyline(
-      [
-        [safePickup.lat, safePickup.lng],
-        [midLat, midLng],
-        [safeDrop.lat, safeDrop.lng]
-      ],
-      {
+    // Highway Route Polyline (Real OSRM road route when available)
+    if (effectiveRouteCoords.length >= 2) {
+      // Soft outer casing for high contrast on OSM streets
+      L.polyline(effectiveRouteCoords, {
+        color: '#FFFFFF',
+        weight: 8,
+        opacity: 0.85,
+        lineJoin: 'round',
+        lineCap: 'round'
+      }).addTo(layer);
+
+      L.polyline(effectiveRouteCoords, {
         color: '#E83E83',
-        weight: 4,
-        opacity: 0.8,
-        dashArray: '8 6'
-      }
-    ).addTo(layer);
+        weight: 4.5,
+        opacity: 0.92,
+        lineJoin: 'round',
+        lineCap: 'round'
+      }).addTo(layer);
+    } else if (!pickerMode || pickerMode === 'preview') {
+      L.polyline(
+        [
+          [safePickup.lat, safePickup.lng],
+          [safeDrop.lat, safeDrop.lng]
+        ],
+        {
+          color: '#E83E83',
+          weight: 4,
+          opacity: 0.78,
+          dashArray: '8 6'
+        }
+      ).addTo(layer);
+    }
 
     // Actual traveled GPS breadcrumb trail
-    const trailPts = historyPings
-      .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng))
-      .map((p) => [p.lat, p.lng] as [number, number]);
-    if (!pickerMode && currentLocation && Number.isFinite(currentLocation.lat) && Number.isFinite(currentLocation.lng)) {
-      trailPts.push([currentLocation.lat, currentLocation.lng]);
+    if (!pickerMode) {
+      const trailPts = historyPings
+        .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng))
+        .map((p) => [p.lat, p.lng] as [number, number]);
+      if (currentLocation && Number.isFinite(currentLocation.lat) && Number.isFinite(currentLocation.lng)) {
+        trailPts.push([currentLocation.lat, currentLocation.lng]);
+      }
+      if (trailPts.length > 1) {
+        L.polyline(trailPts, {
+          color: '#10B981',
+          weight: 4,
+          opacity: 0.95
+        }).addTo(layer);
+      }
     }
-    if (trailPts.length > 1) {
-      L.polyline(trailPts, {
-        color: '#10B981',
-        weight: 4,
-        opacity: 0.92
+
+    // Pickup marker (Green Pin — draggable when draggablePins is enabled)
+    const pickupMarker = L.marker([safePickup.lat, safePickup.lng], {
+      icon: makePinIcon(
+        'A',
+        '#16A34A',
+        `Pickup: ${safePickup.city}`,
+        pickerMode === 'pickup'
+      ),
+      draggable: Boolean(draggablePins),
+      zIndexOffset: pickerMode === 'pickup' ? 300 : 150
+    }).addTo(layer);
+
+    if (draggablePins) {
+      pickupMarker.on('dragend', () => {
+        const ll = pickupMarker.getLatLng();
+        onPickupDragEndRef.current?.(ll.lat, ll.lng);
+      });
+    } else {
+      pickupMarker.bindPopup(
+        `<strong>Pickup: ${escapeHtml(safePickup.city)}</strong><br/>${escapeHtml(safePickup.address || '')}${
+          !pickerMode ? `<br/><small>Geo-fence: ${formatMetersOrKm(pickupRadiusMeters)}</small>` : ''
+        }`
+      );
+    }
+
+    // Drop marker (Red Pin — draggable when draggablePins is enabled)
+    const shouldRenderDrop = !pickerMode || pickerMode !== 'pickup' || Boolean(drop.address) || draggablePins;
+    if (shouldRenderDrop) {
+      const dropMarker = L.marker([safeDrop.lat, safeDrop.lng], {
+        icon: makePinIcon(
+          'B',
+          '#DC2626',
+          `Drop: ${safeDrop.city}`,
+          pickerMode === 'drop'
+        ),
+        draggable: Boolean(draggablePins),
+        zIndexOffset: pickerMode === 'drop' ? 300 : 150
       }).addTo(layer);
+
+      if (draggablePins) {
+        dropMarker.on('dragend', () => {
+          const ll = dropMarker.getLatLng();
+          onDropDragEndRef.current?.(ll.lat, ll.lng);
+        });
+      } else {
+        dropMarker.bindPopup(
+          `<strong>Drop: ${escapeHtml(safeDrop.city)}</strong><br/>${escapeHtml(safeDrop.address || '')}${
+            !pickerMode ? `<br/><small>Geo-fence: ${formatMetersOrKm(deliveryRadiusMeters)}</small>` : ''
+          }`
+        );
+      }
     }
-
-    // Pickup marker
-    L.marker([safePickup.lat, safePickup.lng], {
-      icon: makePinIcon('A', '#16A34A', `Pickup: ${safePickup.city}`)
-    })
-      .bindPopup(
-        `<strong>Pickup: ${escapeHtml(safePickup.city)}</strong><br/>${escapeHtml(safePickup.address || '')}<br/><small>Geo-fence: ${formatMetersOrKm(pickupRadiusMeters)}</small>`
-      )
-      .addTo(layer);
-
-    // Drop marker
-    L.marker([safeDrop.lat, safeDrop.lng], {
-      icon: makePinIcon('B', '#DC2626', `Drop: ${safeDrop.city}`)
-    })
-      .bindPopup(
-        `<strong>Drop: ${escapeHtml(safeDrop.city)}</strong><br/>${escapeHtml(safeDrop.address || '')}<br/><small>Geo-fence: ${formatMetersOrKm(deliveryRadiusMeters)}</small>`
-      )
-      .addTo(layer);
 
     // Live vehicle marker (in tracking mode)
     if (!pickerMode) {
@@ -359,11 +492,15 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
     }
 
     // Fit route bounds once on mount or when entering preview mode
-    if (!hasFittedRef.current || pickerMode === 'preview') {
-      const bounds = L.latLngBounds([
-        [safePickup.lat, safePickup.lng],
-        [safeDrop.lat, safeDrop.lng]
-      ]);
+    if (!hasFittedRef.current && (!pickerMode || pickerMode === 'preview')) {
+      const pts: Array<[number, number]> =
+        effectiveRouteCoords.length >= 2
+          ? effectiveRouteCoords
+          : [
+              [safePickup.lat, safePickup.lng],
+              [safeDrop.lat, safeDrop.lng]
+            ];
+      const bounds = L.latLngBounds(pts);
       if (!pickerMode) {
         bounds.extend([activeLocation.lat, activeLocation.lng]);
       }
@@ -385,7 +522,9 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
     deliveryRadiusMeters,
     insidePickup,
     insideDelivery,
-    pickerMode
+    effectiveRouteCoords,
+    pickerMode,
+    draggablePins
   ]);
 
   const handleZoomIn = () => mapRef.current?.zoomIn();
@@ -393,27 +532,35 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
 
   const handleCenterVehicle = () => {
     if (!mapRef.current) return;
+    setIsFollowing(true);
     isProgrammaticRef.current = true;
     mapRef.current.setView([activeLocation.lat, activeLocation.lng], 13, { animate: true });
   };
 
   const handleFitRoute = () => {
     if (!mapRef.current) return;
-    const bounds = L.latLngBounds([
-      [safePickup.lat, safePickup.lng],
-      [safeDrop.lat, safeDrop.lng],
-      [activeLocation.lat, activeLocation.lng]
-    ]);
+    setIsFollowing(false);
+    const pts: Array<[number, number]> =
+      effectiveRouteCoords.length >= 2
+        ? effectiveRouteCoords
+        : [
+            [safePickup.lat, safePickup.lng],
+            [safeDrop.lat, safeDrop.lng]
+          ];
+    const bounds = L.latLngBounds(pts);
+    if (!pickerMode) {
+      bounds.extend([activeLocation.lat, activeLocation.lng]);
+    }
     isProgrammaticRef.current = true;
     mapRef.current.fitBounds(bounds, { padding: [55, 55], maxZoom: 14 });
   };
 
-  const googleMapsVehicleUrl = `https://www.google.com/maps/search/?api=1&query=${activeLocation.lat},${activeLocation.lng}`;
-  const googleMapsRouteUrl = `https://www.google.com/maps/dir/?api=1&origin=${safePickup.lat},${safePickup.lng}&destination=${safeDrop.lat},${safeDrop.lng}&travelmode=driving`;
+  const osmVehicleUrl = `https://www.openstreetmap.org/?mlat=${activeLocation.lat}&mlon=${activeLocation.lng}#map=14/${activeLocation.lat}/${activeLocation.lng}`;
+  const osmRouteUrl = `https://www.openstreetmap.org/directions?engine=fossgis_osrm_car&route=${safePickup.lat}%2C${safePickup.lng}%3B${safeDrop.lat}%2C${safeDrop.lng}`;
 
   return (
     <div className="relative w-full h-full bg-[#E8EEF4] text-[#171318] overflow-hidden select-none flex flex-col">
-      {/* Real Interactive Road Map Canvas (OpenStreetMap via Leaflet) */}
+      {/* Real Interactive Road Map Canvas (OpenStreetMap + OSRM via Leaflet) */}
       <div className="relative flex-1 w-full h-full min-h-0 overflow-hidden">
         <div
           ref={containerRef}
@@ -424,13 +571,13 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
         {!tilesLoaded && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#E8EEF4]/60 z-[5]">
             <div className="px-3 py-1.5 rounded-full bg-white/95 border border-gray-200 shadow-sm text-[11px] font-bold text-[#171318]">
-              Loading live street & highway map...
+              Loading OpenStreetMap road map...
             </div>
           </div>
         )}
 
         {/* Right Floating Map Controls */}
-        <div className={`absolute right-3 ${pickerMode ? 'bottom-24' : 'bottom-4'} z-[400] flex flex-col gap-1.5`}>
+        <div className={`absolute right-3 ${pickerMode ? 'bottom-4' : 'bottom-4'} z-[400] flex flex-col gap-1.5`}>
           <button
             type="button"
             onClick={handleZoomIn}
@@ -452,8 +599,12 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
               <button
                 type="button"
                 onClick={handleCenterVehicle}
-                className="w-8 h-8 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] border border-pink-400/50 flex items-center justify-center text-white shadow-md cursor-pointer"
-                title="Focus on Live Vehicle"
+                className={`w-8 h-8 rounded-lg border flex items-center justify-center shadow-md cursor-pointer transition ${
+                  isFollowing
+                    ? 'bg-[#E83E83] hover:bg-[#d62e73] border-pink-400/50 text-white'
+                    : 'bg-white/95 hover:bg-white border-gray-300 text-[#E83E83]'
+                }`}
+                title="Focus & Follow Live Vehicle"
               >
                 <Crosshair className="w-4 h-4" />
               </button>
@@ -461,22 +612,32 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
                 type="button"
                 onClick={handleFitRoute}
                 className="w-8 h-8 rounded-lg bg-white/95 hover:bg-white border border-gray-300 flex items-center justify-center text-[#171318] shadow-md cursor-pointer"
-                title="Fit Entire Corridor"
+                title="Fit Entire Highway Route"
               >
                 <Maximize2 className="w-4 h-4" />
               </button>
             </>
           )}
+          {pickerMode && (
+            <button
+              type="button"
+              onClick={handleFitRoute}
+              className="w-8 h-8 rounded-lg bg-white/95 hover:bg-white border border-gray-300 flex items-center justify-center text-[#171318] shadow-md cursor-pointer"
+              title="Fit Pickup & Drop Route"
+            >
+              <Maximize2 className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Bottom Live Corridor Bar (hidden in compact picker mode so FreightLocationPicker bar isn't covered) */}
+      {/* Bottom Live Corridor Bar (hidden in compact picker mode) */}
       {!pickerMode && (
         <div className="bg-[#171318]/95 border-t border-gray-800 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-white z-[410]">
           <div className="flex items-center gap-3 min-w-0">
             <span className="inline-flex items-center gap-1.5 text-emerald-400 font-bold shrink-0">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Live Road Map</span>
+              <span>OpenStreetMap • OSRM Live</span>
             </span>
             <span className="text-gray-300 font-mono truncate hidden sm:inline">
               {activeLocation.lat.toFixed(4)}°N, {activeLocation.lng.toFixed(4)}°E
@@ -494,32 +655,25 @@ export const LiveTelemetryFallbackMap: React.FC<LiveTelemetryFallbackMapProps> =
 
           <div className="flex items-center gap-2">
             <a
-              href={googleMapsVehicleUrl}
+              href={osmVehicleUrl}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#E83E83] hover:bg-[#d62e73] text-white font-bold transition"
             >
               <Navigation className="w-3 h-3" />
-              <span>Navigate in Google Maps</span>
+              <span>Open Map</span>
               <ExternalLink className="w-3 h-3" />
             </a>
             <a
-              href={googleMapsRouteUrl}
+              href={osmRouteUrl}
               target="_blank"
               rel="noreferrer"
               className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 font-semibold transition"
             >
               <Compass className="w-3 h-3 text-emerald-400" />
-              <span>Route</span>
+              <span>OSRM Route</span>
             </a>
           </div>
-        </div>
-      )}
-
-      {/* Subtle status cue only when quota reached */}
-      {!pickerMode && reason === 'quota_exceeded' && (
-        <div className="bg-amber-50 border-t border-amber-200 px-3 py-1 text-[10px] text-amber-900 text-center font-medium">
-          OpenStreetMap road view active while Google Maps quota resets.
         </div>
       )}
     </div>

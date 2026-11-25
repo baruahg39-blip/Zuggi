@@ -271,7 +271,7 @@ export interface BookingLiveEta {
   originLng: number;
   destinationCity: string;
   calculatedAt: string;
-  source: 'google_routes_matrix' | 'gps_estimate';
+  source: 'osrm_route' | 'gps_estimate';
 }
 
 export interface Booking {
@@ -522,7 +522,7 @@ export interface TripLiveTrackingResponse {
     formatted_arrival_time?: string;
     traffic_condition?: 'clear' | 'moderate' | 'heavy';
     traffic_delay_minutes?: number;
-    source?: 'google_routes_matrix' | 'gps_estimate';
+    source?: 'osrm_route' | 'gps_estimate';
     calculated_at?: string;
   };
   tracking_token?: string;

@@ -634,8 +634,6 @@ const BOT_RECORD_IDS = new Set([
   'test_shipper_9911',
   'test_driver_9922',
   'test_driver_9933',
-  'user_driver_9678944132',
-  'user_shipper_9678944132',
   'veh_01',
   'veh_02',
   'veh_03',

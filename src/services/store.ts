@@ -57,9 +57,7 @@ const BOT_USER_IDS = new Set([
   'user_applicant_03',
   'test_shipper_9911',
   'test_driver_9922',
-  'test_driver_9933',
-  'user_driver_9678944132',
-  'user_shipper_9678944132'
+  'test_driver_9933'
 ]);
 
 const BOT_PHONES_10 = new Set([

@@ -19,6 +19,12 @@ import {
 import { Booking, BusinessPaymentSettings, Settlement, User } from '../../types';
 import { logisticsStore } from '../../services/store';
 import { exportDriverEarningsToCsv } from '../../utils/csvExport';
+import {
+  escrowClient,
+  formatInrExact,
+  type VendorWalletResponse
+} from '../../services/escrowClient';
+import { FleetEscrowTimelineCard } from '../escrow/FleetEscrowTimelineCard';
 
 interface DriverEarningsProps {
   currentUser: User;
@@ -50,6 +56,47 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
     pan: currentUser.pan || ''
   });
   const [bankSavedMsg, setBankSavedMsg] = useState<string | null>(null);
+  const [escrowWallet, setEscrowWallet] = useState<VendorWalletResponse | null>(null);
+  const [registeringVendor, setRegisteringVendor] = useState<boolean>(false);
+  const [vendorSyncMsg, setVendorSyncMsg] = useState<string | null>(null);
+
+  const loadEscrowWallet = () => {
+    escrowClient
+      .getVendorWallet()
+      .then((res) => {
+        if (res.success) setEscrowWallet(res);
+      })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadEscrowWallet();
+  }, [currentUser.id]);
+
+  const handleSyncCashfreeVendor = async () => {
+    setRegisteringVendor(true);
+    setVendorSyncMsg(null);
+    try {
+      const resp = await escrowClient.registerFleetVendor({
+        name: liveUser.name || currentUser.name || 'Fleet Partner',
+        email: liveUser.email || currentUser.email,
+        phone: liveUser.phone || currentUser.phone || '',
+        bankAccountNumber: bankForm.accountNumber || liveUser.bankDetails?.accountNumber,
+        bankIfsc: bankForm.ifscCode || liveUser.bankDetails?.ifscCode,
+        upiId: bankForm.upiId || liveUser.bankDetails?.upiId
+      });
+      if (resp.success) {
+        setVendorSyncMsg('Cashfree Easy Split Vendor verified & linked for automated 70/30 escrow payouts.');
+        loadEscrowWallet();
+      } else {
+        setVendorSyncMsg(resp.message || 'Add a UPI ID or Bank Account + IFSC below first.');
+      }
+    } catch {
+      setVendorSyncMsg('Network error syncing Cashfree Easy Split vendor.');
+    } finally {
+      setRegisteringVendor(false);
+    }
+  };
 
   const handleSaveBankDetails = (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,6 +106,18 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
       setEditingBank(false);
       setBankSavedMsg('Bank & UPI payout details saved and synced!');
       setTimeout(() => setBankSavedMsg(null), 4000);
+      // Also register / update Cashfree Easy Split vendor record
+      void escrowClient
+        .registerFleetVendor({
+          name: updated.name || currentUser.name,
+          email: updated.email || currentUser.email,
+          phone: updated.phone || currentUser.phone,
+          bankAccountNumber: bankForm.accountNumber || undefined,
+          bankIfsc: bankForm.ifscCode || undefined,
+          upiId: bankForm.upiId || undefined
+        })
+        .then(() => loadEscrowWallet())
+        .catch(() => {});
     }
   };
 
@@ -203,9 +262,117 @@ export const DriverEarnings: React.FC<DriverEarningsProps> = ({
           <h2 className="text-lg sm:text-xl font-extrabold text-[#171318]">Fleet Earnings &amp; Payouts</h2>
         </div>
         <p className="text-xs text-[#77717A] mt-1">
-          Simple 2-step payouts: 90% at pickup and 10% after delivery — paid to your saved UPI / Bank account or collected directly from the customer.
+          Automated 70/30 Cashfree Easy Split escrow: 70% loading advance released on Digital LR and 30% balance released on Proof of Delivery.
         </p>
       </div>
+
+      {/* LIVE 70/30 CASHFREE ESCROW WALLET */}
+      <section className="rounded-xl bg-white border border-slate-200 shadow-xs overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Cashfree 70/30 Live Escrow Wallet
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {escrowWallet?.vendor
+                  ? `Vendor ${escrowWallet.vendor.cashfree_vendor_id} · KYC ${escrowWallet.vendor.kyc_status}${
+                      escrowWallet.vendor.upi_id
+                        ? ` · UPI ${escrowWallet.vendor.upi_id}`
+                        : escrowWallet.vendor.bank_account_last4
+                          ? ` · Bank ****${escrowWallet.vendor.bank_account_last4}`
+                          : ''
+                    }`
+                  : 'Link your UPI or Bank Account to receive automated Cashfree Easy Split tranches'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleSyncCashfreeVendor}
+            disabled={registeringVendor}
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
+          >
+            {registeringVendor
+              ? 'Verifying Cashfree Vendor...'
+              : escrowWallet?.vendor?.kyc_status === 'VERIFIED'
+                ? 'Re-sync Cashfree KYC'
+                : 'Verify & Link Easy Split Payout'}
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {vendorSyncMsg && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+              {vendorSyncMsg}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5">
+              <span className="text-xs text-slate-500 block">Locked in Escrow</span>
+              <span className="mt-1 block text-xl font-bold text-slate-900 font-mono tabular-nums">
+                {formatInrExact(escrowWallet?.summary.lockedInEscrowInr || 0)}
+              </span>
+              <span className="text-[11px] text-slate-500 block mt-0.5">Releases on loading / POD</span>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5">
+              <span className="text-xs text-slate-500 block">70% Advances Released</span>
+              <span className="mt-1 block text-xl font-bold text-emerald-700 font-mono tabular-nums">
+                {formatInrExact(escrowWallet?.summary.releasedAdvanceInr || 0)}
+              </span>
+              <span className="text-[11px] text-slate-500 block mt-0.5">Loading tranche payouts</span>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5">
+              <span className="text-xs text-slate-500 block">30% Queued (POD Timer)</span>
+              <span className="mt-1 block text-xl font-bold text-amber-700 font-mono tabular-nums">
+                {formatInrExact(escrowWallet?.summary.queuedBalanceInr || 0)}
+              </span>
+              <span className="text-[11px] text-slate-500 block mt-0.5">2-hour auto-release queue</span>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5">
+              <span className="text-xs text-slate-500 block">Total Settled (70+30)</span>
+              <span className="mt-1 block text-xl font-bold text-slate-900 font-mono tabular-nums">
+                {formatInrExact(escrowWallet?.summary.settledTotalInr || 0)}
+              </span>
+              <span className="text-[11px] text-slate-500 block mt-0.5">
+                {(escrowWallet?.summary.disputeHoldInr || 0) > 0
+                  ? `Dispute Hold: ${formatInrExact(escrowWallet?.summary.disputeHoldInr || 0)}`
+                  : `${escrowWallet?.summary.totalTrips || 0} escrow trip(s)`}
+              </span>
+            </div>
+          </div>
+
+          {escrowWallet && escrowWallet.trips.length > 0 && (
+            <div className="space-y-3 pt-1">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Active &amp; Recent Trip Payout Timelines
+              </h4>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {escrowWallet.trips.slice(0, 6).map(({ ledger, tranches }) => (
+                  <FleetEscrowTimelineCard
+                    key={ledger.id}
+                    tripId={ledger.external_trip_id}
+                    totalFreightInr={ledger.total_freight_inr}
+                    ledger={ledger}
+                    tranches={tranches}
+                    vendor={escrowWallet.vendor}
+                    onLedgerUpdated={() => loadEscrowWallet()}
+                    compact
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* Financial Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">

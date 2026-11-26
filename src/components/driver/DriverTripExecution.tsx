@@ -46,6 +46,13 @@ import {
 import { LiveTrackingMap } from '../maps/LiveTrackingMap';
 import { GeofenceMonitorPanel } from '../tracking/GeofenceMonitorPanel';
 import { showToast } from '../shared/Toast';
+import {
+  escrowClient,
+  type TripEscrowLedger,
+  type EscrowPayoutTranche,
+  type FleetVendorSummary
+} from '../../services/escrowClient';
+import { FleetEscrowTimelineCard } from '../escrow/FleetEscrowTimelineCard';
 
 interface DriverTripExecutionProps {
   bookingId: string | null;
@@ -118,6 +125,9 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
   const [podPhotoDataUrl, setPodPhotoDataUrl] = useState<string | null>(null);
   const [uploadingPhotoType, setUploadingPhotoType] = useState<'loading' | 'pod' | null>(null);
   const [statusFeedback, setStatusFeedback] = useState<{ text: string; error?: boolean } | null>(null);
+  const [escrowLedger, setEscrowLedger] = useState<TripEscrowLedger | null>(null);
+  const [escrowTranches, setEscrowTranches] = useState<EscrowPayoutTranche[]>([]);
+  const [escrowVendor, setEscrowVendor] = useState<FleetVendorSummary | null>(null);
   const [simStep, setSimStep] = useState(5);
   const [autoGpsEnabled, setAutoGpsEnabled] = useState<boolean>(false);
   const [lastGpsPingTime, setLastGpsPingTime] = useState<string | null>(null);
@@ -188,6 +198,28 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     update();
     const unsub = logisticsStore.subscribe(update);
     return unsub;
+  }, [bookingId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!bookingId) {
+      setEscrowLedger(null);
+      setEscrowTranches([]);
+      setEscrowVendor(null);
+      return;
+    }
+    escrowClient
+      .getTripEscrowLedger(bookingId)
+      .then((res) => {
+        if (!active || !res.success) return;
+        setEscrowLedger(res.ledger || null);
+        setEscrowTranches(res.tranches || []);
+        setEscrowVendor(res.vendor || null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, [bookingId]);
 
   // Reset 500m geofence entry flags whenever the active booking changes
@@ -754,6 +786,19 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
       if (nextStatus === 'en_route_pickup' || nextStatus === 'in_transit') {
         setAutoGpsEnabled(true);
       }
+      // Automatically trigger 70% Loading Advance release once loading is verified (IN_TRANSIT)
+      if (nextStatus === 'in_transit' && escrowLedger?.escrow_state === 'FUNDED_LOCKED') {
+        escrowClient
+          .releaseLoadingAdvance(booking.id, 'Loading verified & trip marked IN_TRANSIT')
+          .then((escrowRes) => {
+            if (escrowRes.success && escrowRes.ledger) {
+              setEscrowLedger(escrowRes.ledger);
+              setEscrowTranches(escrowRes.tranches || []);
+              showToast('70% Loading Advance released to your payout account!', 'success');
+            }
+          })
+          .catch(() => {});
+      }
       setTimeout(() => setStatusFeedback(null), 4000);
     } else {
       setStatusFeedback({ text: res.message, error: true });
@@ -777,7 +822,19 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
     if (res.success) {
       setAutoGpsEnabled(false);
       void syncStatusToServer(booking, 'completed');
-      const msg = 'Trip verified & successfully completed! Payout settled.';
+      // Automatically start 2-hour POD auto-release countdown for 30% Delivery Balance
+      if (escrowLedger && escrowLedger.escrow_state !== 'AWAITING_PAYMENT' && escrowLedger.escrow_state !== 'FULLY_SETTLED') {
+        escrowClient
+          .triggerPodBalance(booking.id, 'pod_uploaded')
+          .then((escrowRes) => {
+            if (escrowRes.success && escrowRes.ledger) {
+              setEscrowLedger(escrowRes.ledger);
+              setEscrowTranches(escrowRes.tranches || []);
+            }
+          })
+          .catch(() => {});
+      }
+      const msg = 'Trip verified & POD uploaded! 30% balance queued for auto-release.';
       setStatusFeedback({ text: msg });
       showToast(msg, 'success');
       setTimeout(() => {
@@ -1225,6 +1282,33 @@ export const DriverTripExecution: React.FC<DriverTripExecutionProps> = ({
                   Tip: Add your UPI ID or Bank Account in <strong>Earnings → Bank / UPI</strong> so Zuggi Admin can transfer your payouts immediately.
                 </p>
               )}
+
+              {/* LIVE 70% LOADING ADVANCE + 30% POD BALANCE ESCROW TIMELINE */}
+              <div className="pt-2">
+                <FleetEscrowTimelineCard
+                  tripId={booking.id}
+                  totalFreightInr={Number(booking.totalAgreedAmountInr) || 0}
+                  ledger={escrowLedger}
+                  tranches={escrowTranches}
+                  vendor={escrowVendor}
+                  tripLoaded={
+                    booking.status === 'in_transit' ||
+                    booking.status === 'at_destination' ||
+                    booking.status === 'delivered' ||
+                    booking.status === 'completed'
+                  }
+                  tripDelivered={
+                    Boolean(podPhotoDataUrl) ||
+                    booking.status === 'delivered' ||
+                    booking.status === 'completed'
+                  }
+                  onLedgerUpdated={(nextLedger, nextTranches) => {
+                    setEscrowLedger(nextLedger);
+                    setEscrowTranches(nextTranches);
+                  }}
+                  compact
+                />
+              </div>
             </div>
           );
         })()}

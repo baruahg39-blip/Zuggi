@@ -6,6 +6,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { cashfreeServer } from './server/cashfree.js';
+import {
+  escrowRouter,
+  cashfreeEscrowWebhookHandler,
+  startEscrowAutoReleaseWorker
+} from './server/escrow.js';
 import { tripsRouter, anonymizeDriverDataByPhone } from './server/trips.js';
 import {
   supabaseRouter,
@@ -1731,6 +1736,10 @@ app.post('/api/payments/cashfree/webhook', (req, res) => {
   }
 });
 
+// --- 70% LOADING ADVANCE + 30% POD BALANCE CASHFREE EASY SPLIT ESCROW ENGINE ---
+app.post('/api/webhooks/cashfree', cashfreeEscrowWebhookHandler);
+app.use('/api', escrowRouter);
+
 // --- OPENSTREETMAP FREE ROUTING & GEOCODING PROXY (Photon + Nominatim + OSRM) ---
 // 100% free, zero API keys required.
 
@@ -2412,5 +2421,6 @@ if (process.env.NODE_ENV !== 'production') {
 app.use(globalErrorHandler);
 
 app.listen(port, '0.0.0.0', () => {
+  startEscrowAutoReleaseWorker();
   console.info(`Zuggi Freight Server listening on port ${port} (${IS_PRODUCTION ? 'production' : 'development'})`);
 });

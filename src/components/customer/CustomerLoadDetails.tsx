@@ -34,6 +34,14 @@ import { RaiseDisputeModal } from '../payments/RaiseDisputeModal';
 import { showToast } from '../shared/Toast';
 import { PaymentReceiptModal } from '../payments/PaymentReceiptModal';
 import {
+  escrowClient,
+  type TripEscrowLedger,
+  type EscrowPayoutTranche,
+  type FleetVendorSummary
+} from '../../services/escrowClient';
+import { ShipperCheckoutBreakdownCard } from '../escrow/ShipperCheckoutBreakdownCard';
+import { ShipperPodApprovalBanner } from '../escrow/ShipperPodApprovalBanner';
+import {
   applyClientSeo,
   buildClientFreightListingJsonLd,
   loadItemToPublicFreight
@@ -69,6 +77,9 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
   const [simulatorTripId, setSimulatorTripId] = useState<string>('');
   const [simulatorToken, setSimulatorToken] = useState<string>('');
   const [confirmCancel, setConfirmCancel] = useState<boolean>(false);
+  const [escrowLedger, setEscrowLedger] = useState<TripEscrowLedger | null>(null);
+  const [escrowTranches, setEscrowTranches] = useState<EscrowPayoutTranche[]>([]);
+  const [escrowVendor, setEscrowVendor] = useState<FleetVendorSummary | null>(null);
   const currentUser = logisticsStore.getCurrentUser();
 
   const assignedQuote = quotations.find((q) => q.id === booking?.quotationId);
@@ -98,6 +109,28 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
     const unsub = logisticsStore.subscribe(update);
     return unsub;
   }, [loadId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!booking?.id) {
+      setEscrowLedger(null);
+      setEscrowTranches([]);
+      setEscrowVendor(null);
+      return;
+    }
+    escrowClient
+      .getTripEscrowLedger(booking.id)
+      .then((res) => {
+        if (!active || !res.success) return;
+        setEscrowLedger(res.ledger || null);
+        setEscrowTranches(res.tranches || []);
+        setEscrowVendor(res.vendor || null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [booking?.id]);
 
   // Inject dynamic meta tags & Schema.org Structured Data for this individual freight listing
   useEffect(() => {
@@ -583,6 +616,41 @@ export const CustomerLoadDetails: React.FC<CustomerLoadDetailsProps> = ({
                     ₹{(Number(booking.totalAgreedAmountInr) || 0).toLocaleString('en-IN')}
                   </span>
                 </div>
+
+                {/* SHIPPER POD APPROVAL & 2-HOUR AUTO-RELEASE BANNER */}
+                <ShipperPodApprovalBanner
+                  tripId={booking.id}
+                  ledger={escrowLedger}
+                  tranches={escrowTranches}
+                  podUploadedFallback={Boolean(
+                    booking.podDocumentUrl ||
+                      booking.status === 'delivered' ||
+                      booking.status === 'completed'
+                  )}
+                  onLedgerUpdated={(nextLedger, nextTranches) => {
+                    setEscrowLedger(nextLedger);
+                    setEscrowTranches(nextTranches);
+                  }}
+                />
+
+                {/* CASHFREE 70% LOADING ADVANCE + 30% POD BALANCE ESCROW BREAKDOWN */}
+                <ShipperCheckoutBreakdownCard
+                  tripId={booking.id}
+                  totalFreightInr={Number(booking.totalAgreedAmountInr) || 0}
+                  driverId={booking.driverId}
+                  vendorName={assignedTransporterName}
+                  customerName={currentUser?.name}
+                  customerPhone={currentUser?.phone}
+                  customerEmail={currentUser?.email}
+                  ledger={escrowLedger}
+                  tranches={escrowTranches}
+                  vendor={escrowVendor}
+                  onLedgerUpdated={(nextLedger, nextTranches) => {
+                    setEscrowLedger(nextLedger);
+                    setEscrowTranches(nextTranches);
+                  }}
+                  compact
+                />
 
                 {/* PRACTICAL 2-STEP FREIGHT PAYMENT CARD */}
                 <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">

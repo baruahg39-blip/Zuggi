@@ -11,6 +11,7 @@ import {
   cashfreeEscrowWebhookHandler,
   startEscrowAutoReleaseWorker
 } from './server/escrow.js';
+import { businessRouter } from './server/business.js';
 import { tripsRouter, anonymizeDriverDataByPhone } from './server/trips.js';
 import {
   supabaseRouter,
@@ -1739,6 +1740,7 @@ app.post('/api/payments/cashfree/webhook', (req, res) => {
 // --- 70% LOADING ADVANCE + 30% POD BALANCE CASHFREE EASY SPLIT ESCROW ENGINE ---
 app.post('/api/webhooks/cashfree', cashfreeEscrowWebhookHandler);
 app.use('/api', escrowRouter);
+app.use('/api', businessRouter);
 
 // --- OPENSTREETMAP FREE ROUTING & GEOCODING PROXY (Photon + Nominatim + OSRM) ---
 // 100% free, zero API keys required.

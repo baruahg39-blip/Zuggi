@@ -14,6 +14,8 @@ import { CustomerHome } from './components/customer/CustomerHome';
 import { CustomerLoadDetails } from './components/customer/CustomerLoadDetails';
 import { CreateLoadModal } from './components/customer/CreateLoadModal';
 import { CustomerProfileModal } from './components/customer/CustomerProfileModal';
+import { BusinessDashboard } from './components/business/BusinessDashboard';
+import type { RebookTripPrefill } from './services/businessClient';
 import { DriverHome } from './components/driver/DriverHome';
 import { FindLoads } from './components/driver/FindLoads';
 import { DriverTripExecution } from './components/driver/DriverTripExecution';
@@ -45,7 +47,12 @@ import {
   getDevicePermissionsSnapshot,
   hasAcknowledgedPartnerPermissions
 } from './utils/devicePermissions';
-import { applyClientSeo } from './utils/seo';
+import { applyClientSeo, navigateSpa } from './utils/seo';
+
+function isBusinessDashboardRoute(pathname: string): boolean {
+  const clean = (pathname || '/').replace(/\/+$/, '').toLowerCase();
+  return clean === '/business/dashboard';
+}
 
 function isPublicCatalogRoute(pathname: string): boolean {
   const clean = (pathname || '/').replace(/\/+$/, '') || '/';
@@ -71,6 +78,7 @@ function isKnownSignedOutRoute(pathname: string): boolean {
     clean === '/about' ||
     clean === '/contact' ||
     clean === '/partner' ||
+    isBusinessDashboardRoute(clean) ||
     isLegalRoute(clean) ||
     isPublicCatalogRoute(clean) ||
     isSeoLandingRoute(clean)
@@ -108,6 +116,7 @@ export default function App() {
   // Customer Navigation State
   const [customerActiveLoadId, setCustomerActiveLoadId] = useState<string | null>(null);
   const [showCreateLoadModal, setShowCreateLoadModal] = useState(false);
+  const [rebookPrefill, setRebookPrefill] = useState<RebookTripPrefill | null>(null);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showKycModal, setShowKycModal] = useState(false);
   const [showSupportModal, setShowSupportModal] = useState(false);
@@ -366,7 +375,27 @@ export default function App() {
         {isLegalRoute(currentPath) ? (
           <LegalPagesView pathname={currentPath} isSignedIn={Boolean(currentUser)} />
         ) : !currentUser ? (
-          isPublicCatalogRoute(currentPath) ? (
+          isBusinessDashboardRoute(currentPath) ? (
+            <div className="min-h-[60vh] flex flex-col items-center justify-center text-center p-6 sm:p-10 space-y-4 bg-white rounded-3xl border border-slate-200 shadow-sm max-w-lg mx-auto my-10">
+              <div className="w-14 h-14 rounded-2xl bg-[#FFF0F6] border border-[#E83E83]/25 flex items-center justify-center text-[#E83E83]">
+                <Building2 className="w-7 h-7" />
+              </div>
+              <h1 className="text-xl sm:text-2xl font-black text-[#171318]">
+                Customer Business Dashboard
+              </h1>
+              <p className="text-xs sm:text-sm text-[#77717A] leading-relaxed">
+                Sign in with your business shipper account to track active shipments, inspect your 70/30 escrow ledger, download Digital LRs, GST Tax Invoices, and PODs, and manage saved warehouse locations.
+              </p>
+              <button
+                type="button"
+                onClick={() => handleOpenAuthModal('customer')}
+                className="w-full sm:w-auto px-6 py-3 rounded-xl bg-[#E83E83] hover:bg-[#d62e73] text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 shadow-md cursor-pointer"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Sign In to Business Dashboard</span>
+              </button>
+            </div>
+          ) : isPublicCatalogRoute(currentPath) ? (
             <PublicRouteView
               pathname={currentPath}
               onOpenAuth={handleOpenAuthModal}
@@ -476,7 +505,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* VIEW 1: SHIPPER / CUSTOMER DASHBOARD */}
+            {/* VIEW 1: SHIPPER / CUSTOMER DASHBOARD & ISOLATED /business/dashboard */}
             {currentUser.role === 'customer' && (
               <>
                 {customerActiveLoadId ? (
@@ -486,13 +515,31 @@ export default function App() {
                     onViewInvoice={(bookingId) => setActiveInvoiceBookingId(bookingId)}
                     onOpenSupport={handleOpenSupport}
                   />
+                ) : isBusinessDashboardRoute(currentPath) ? (
+                  <BusinessDashboard
+                    currentUser={currentUser}
+                    onBackToShipperHome={() => navigateSpa('/')}
+                    onCreateNewBooking={() => {
+                      setRebookPrefill(null);
+                      setShowCreateLoadModal(true);
+                    }}
+                    onRebookTrip={(prefill) => {
+                      setRebookPrefill(prefill);
+                      setShowCreateLoadModal(true);
+                    }}
+                    onOpenLoadDetails={handleOpenLoadDetails}
+                  />
                 ) : (
                   <CustomerHome
                     currentUser={currentUser}
-                    onCreateLoadClick={() => setShowCreateLoadModal(true)}
+                    onCreateLoadClick={() => {
+                      setRebookPrefill(null);
+                      setShowCreateLoadModal(true);
+                    }}
                     onSelectLoad={handleOpenLoadDetails}
                     onViewInvoice={(bookingId) => setActiveInvoiceBookingId(bookingId)}
                     onOpenSupport={handleOpenSupport}
+                    onOpenBusinessDashboard={() => navigateSpa('/business/dashboard')}
                   />
                 )}
               </>
@@ -665,9 +712,14 @@ export default function App() {
       {showCreateLoadModal && (
         <CreateLoadModal
           isOpen={showCreateLoadModal}
-          onClose={() => setShowCreateLoadModal(false)}
+          rebookPrefill={rebookPrefill}
+          onClose={() => {
+            setShowCreateLoadModal(false);
+            setRebookPrefill(null);
+          }}
           onLoadCreated={(loadId) => {
             setShowCreateLoadModal(false);
+            setRebookPrefill(null);
             setCustomerActiveLoadId(loadId);
           }}
           onRequireAuth={() => {

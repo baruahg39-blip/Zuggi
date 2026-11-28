@@ -21,12 +21,19 @@ import { fetchOsrmRoute } from '../../services/osmMapService';
 import { showToast } from '../shared/Toast';
 import { FreightLocationPicker, FreightLocationPayload } from '../maps/FreightLocationPicker';
 import { LocationAutocompleteInput, SelectedPlace } from '../shared/LocationAutocompleteInput';
+import {
+  businessClient,
+  type BusinessProfile,
+  type RebookTripPrefill,
+  type SavedBusinessAddress
+} from '../../services/businessClient';
 
 interface CreateLoadModalProps {
   isOpen: boolean;
   onClose: () => void;
   onLoadCreated: (loadId: string) => void;
   onRequireAuth?: () => void;
+  rebookPrefill?: RebookTripPrefill | null;
 }
 
 const GOODS_CATEGORIES: { id: GoodsCategory; label: string; icon: string }[] = [
@@ -46,13 +53,22 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   isOpen,
   onClose,
   onLoadCreated,
-  onRequireAuth
+  onRequireAuth,
+  rebookPrefill = null
 }) => {
   const vehicleCategories = useMemo(() => logisticsStore.getVehicleCategories(), []);
   const currentUser = logisticsStore.getCurrentUser();
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
-  const [locationInputMode, setLocationInputMode] = useState<'map' | 'manual'>('map');
+  const [locationInputMode, setLocationInputMode] = useState<'map' | 'manual'>(
+    rebookPrefill ? 'manual' : 'map'
+  );
+  const [savedAddresses, setSavedAddresses] = useState<SavedBusinessAddress[]>(() =>
+    currentUser ? businessClient.getCachedAddresses(currentUser.id) : []
+  );
+  const [businessProfile, setBusinessProfile] = useState<BusinessProfile | null>(() =>
+    currentUser ? businessClient.getCachedProfile(currentUser.id) : null
+  );
 
   // Exact coordinates and structured details from map picker or live address search
   const [pickupPointState, setPickupPointState] = useState<LocationPoint | null>(null);
@@ -104,6 +120,95 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
   // Default map center fallback (Guwahati, Assam) only when user hasn't picked a pin yet
   const defaultPickupCoord = { lat: 26.1445, lng: 91.7362 };
   const defaultDropCoord = { lat: 26.7509, lng: 94.2037 };
+
+  // Fetch saved business locations & GST profile for optional 1-click auto-fill
+  useEffect(() => {
+    if (!isOpen || !currentUser) return;
+    let active = true;
+    businessClient.listSavedAddresses(currentUser.id).then((res) => {
+      if (active && res.success) setSavedAddresses(res.addresses);
+    });
+    businessClient.getProfile(currentUser.id).then((res) => {
+      if (active && res.success && res.profile) {
+        setBusinessProfile(res.profile);
+        if (!pickupContactName && res.profile.contact_person) {
+          setPickupContactName(res.profile.contact_person);
+        }
+        if (!pickupContactPhone && res.profile.contact_phone) {
+          setPickupContactPhone(res.profile.contact_phone);
+        }
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, currentUser?.id]);
+
+  // Apply 1-click Re-book prefill from Past Trips cleanly
+  useEffect(() => {
+    if (!isOpen || !rebookPrefill) return;
+    setLocationInputMode('manual');
+    setPickupSearchText(rebookPrefill.pickup.city || rebookPrefill.pickup.address);
+    setPickupCustomAddress(rebookPrefill.pickup.address || '');
+    setPickupCity(rebookPrefill.pickup.city || '');
+    setPickupState(rebookPrefill.pickup.state || 'Assam');
+    setPickupPincode(rebookPrefill.pickup.pincode || '');
+    if (rebookPrefill.pickup.contactName) setPickupContactName(rebookPrefill.pickup.contactName);
+    if (rebookPrefill.pickup.contactPhone) setPickupContactPhone(rebookPrefill.pickup.contactPhone);
+    setPickupPointState(rebookPrefill.pickup);
+
+    setDeliverySearchText(rebookPrefill.delivery.city || rebookPrefill.delivery.address);
+    setDeliveryCustomAddress(rebookPrefill.delivery.address || '');
+    setDeliveryCity(rebookPrefill.delivery.city || '');
+    setDeliveryState(rebookPrefill.delivery.state || 'Assam');
+    setDeliveryPincode(rebookPrefill.delivery.pincode || '');
+    if (rebookPrefill.delivery.contactName) setDeliveryContactName(rebookPrefill.delivery.contactName);
+    if (rebookPrefill.delivery.contactPhone) setDeliveryContactPhone(rebookPrefill.delivery.contactPhone);
+    setDeliveryPointState(rebookPrefill.delivery);
+
+    setRequiredVehicleCategory(rebookPrefill.requiredVehicleCategory);
+    setGoodsCategory(rebookPrefill.goodsCategory);
+    setGoodsDescription(rebookPrefill.goodsDescription || '');
+    setWeightKg(rebookPrefill.weightKg || 1000);
+    setPackageCount(rebookPrefill.packageCount || 10);
+  }, [isOpen, rebookPrefill]);
+
+  const applySavedAddress = (target: 'pickup' | 'drop', addressId: string) => {
+    const found = savedAddresses.find((a) => a.id === addressId);
+    if (!found) return;
+    const point: LocationPoint = {
+      address: found.formatted_address,
+      city: found.city,
+      district: found.city,
+      state: found.state || 'Assam',
+      pincode: found.pincode || '',
+      lat: found.lat ?? (target === 'pickup' ? defaultPickupCoord.lat : defaultDropCoord.lat),
+      lng: found.lng ?? (target === 'pickup' ? defaultPickupCoord.lng : defaultDropCoord.lng),
+      contactName: found.contact_name || (target === 'pickup' ? pickupContactName : deliveryContactName),
+      contactPhone: found.contact_phone || (target === 'pickup' ? pickupContactPhone : deliveryContactPhone)
+    };
+    if (target === 'pickup') {
+      setPickupSearchText(`${found.label} (${found.city})`);
+      setPickupCustomAddress(found.formatted_address);
+      setPickupCity(found.city);
+      setPickupState(found.state || 'Assam');
+      setPickupPincode(found.pincode || '');
+      if (found.contact_name) setPickupContactName(found.contact_name);
+      if (found.contact_phone) setPickupContactPhone(found.contact_phone);
+      setPickupPointState(point);
+    } else {
+      setDeliverySearchText(`${found.label} (${found.city})`);
+      setDeliveryCustomAddress(found.formatted_address);
+      setDeliveryCity(found.city);
+      setDeliveryState(found.state || 'Assam');
+      setDeliveryPincode(found.pincode || '');
+      if (found.contact_name) setDeliveryContactName(found.contact_name);
+      if (found.contact_phone) setDeliveryContactPhone(found.contact_phone);
+      setDeliveryPointState(point);
+    }
+    setLocationInputMode('manual');
+    showToast(`Auto-filled ${target === 'pickup' ? 'Pickup' : 'Drop'}: ${found.label}`, 'success');
+  };
 
   // Live sync helper from FreightLocationPicker (keeps CreateLoadModal synced for both "Save & Apply" and "Next Step")
   const syncMapLocationPayload = (payload: FreightLocationPayload, advanceToNextStep: boolean) => {
@@ -437,6 +542,66 @@ export const CreateLoadModal: React.FC<CreateLoadModalProps> = ({
           {/* STEP 1: ROUTE & TIMING */}
           {step === 1 && (
             <div className="space-y-4">
+              {rebookPrefill && (
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200 flex items-center justify-between gap-2">
+                  <span>
+                    <strong className="text-emerald-300">Re-booking Trip {rebookPrefill.sourceTripId}:</strong> Pickup, Drop, Vehicle &amp; Cargo details pre-filled. Review or adjust below.
+                  </span>
+                </div>
+              )}
+
+              {/* Optional Saved Business Locations & GST Auto-Fill Bar */}
+              {(savedAddresses.length > 0 || businessProfile?.gstin) && (
+                <div className="p-3.5 rounded-xl bg-slate-800/70 border border-slate-700/80 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-white">
+                      Quick Auto-Fill from Business Profile
+                    </span>
+                    {businessProfile?.gstin && (
+                      <span className="text-[11px] font-mono text-emerald-300">
+                        {businessProfile.company_legal_name} · GSTIN {businessProfile.gstin}
+                      </span>
+                    )}
+                  </div>
+                  {savedAddresses.length > 0 && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <select
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (e.target.value) applySavedAddress('pickup', e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200"
+                      >
+                        <option value="">Select Saved Pickup Location (Optional)</option>
+                        {savedAddresses
+                          .filter((a) => a.address_type === 'pickup' || a.address_type === 'both')
+                          .map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.label} — {a.city}
+                            </option>
+                          ))}
+                      </select>
+                      <select
+                        defaultValue=""
+                        onChange={(e) => {
+                          if (e.target.value) applySavedAddress('drop', e.target.value);
+                        }}
+                        className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-200"
+                      >
+                        <option value="">Select Saved Drop Location (Optional)</option>
+                        {savedAddresses
+                          .filter((a) => a.address_type === 'drop' || a.address_type === 'both')
+                          .map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.label} — {a.city}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Mode Toggle: Interactive Map vs Search Any Address */}
               <div className="flex items-center justify-between p-1 bg-slate-900 border border-slate-800 rounded-2xl">
                 <button

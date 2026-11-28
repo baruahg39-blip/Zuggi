@@ -1688,6 +1688,22 @@ export function resolveRouteSeo(
     };
   }
 
+  // 10b. Customer Business Dashboard (/business/dashboard)
+  if (pathname === '/business/dashboard' || pathname.startsWith('/business/')) {
+    return {
+      title: 'Business Dashboard — Trips, 70/30 Ledger & GST Vault | Zuggi Freight',
+      description:
+        'Manage active commercial shipments, 70% advance & 30% POD escrow ledger, Digital LR, GST tax invoices, and saved warehouse addresses on Zuggi.',
+      canonicalUrl: `${cleanBase}/business/dashboard`,
+      ogType: 'website',
+      ogImage: defaultImage,
+      robots: 'noindex, nofollow',
+      httpStatus: 200,
+      jsonLd: null,
+      prerenderHtml: null
+    };
+  }
+
   // 11. Explicit Homepage (/)
   if (pathname === '/') {
     return {

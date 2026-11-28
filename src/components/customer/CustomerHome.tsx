@@ -40,6 +40,7 @@ interface CustomerHomeProps {
   onSelectLoad: (loadId: string) => void;
   onViewInvoice: (bookingId: string) => void;
   onOpenSupport?: (loadId?: string) => void;
+  onOpenBusinessDashboard?: () => void;
 }
 
 export const CustomerHome: React.FC<CustomerHomeProps> = ({
@@ -47,7 +48,8 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
   onCreateLoadClick,
   onSelectLoad,
   onViewInvoice,
-  onOpenSupport
+  onOpenSupport,
+  onOpenBusinessDashboard
 }) => {
   // Tabs: 'overview' | 'my_loads' | 'find_vehicles' | 'track' | 'history' | 'payments'
   const [activeTab, setActiveTab] = useState<'overview' | 'my_loads' | 'find_vehicles' | 'track' | 'history' | 'payments'>('overview');
@@ -206,13 +208,25 @@ export const CustomerHome: React.FC<CustomerHomeProps> = ({
             </p>
           </div>
 
-          <button
-            onClick={onCreateLoadClick}
-            className="w-full sm:w-auto px-6 py-3.5 bg-[#E83E83] hover:bg-[#d62e73] text-white text-sm font-black rounded-2xl shadow-lg shadow-[#E83E83]/30 transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
-          >
-            <PackagePlus className="w-5 h-5" />
-            <span>+ Post a Load Now</span>
-          </button>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full md:w-auto">
+            {onOpenBusinessDashboard && (
+              <button
+                type="button"
+                onClick={onOpenBusinessDashboard}
+                className="w-full sm:w-auto px-5 py-3.5 bg-white/10 hover:bg-white/15 border border-white/15 text-white text-sm font-bold rounded-2xl transition flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-[#FF85B7]" />
+                <span>Business Dashboard</span>
+              </button>
+            )}
+            <button
+              onClick={onCreateLoadClick}
+              className="w-full sm:w-auto px-6 py-3.5 bg-[#E83E83] hover:bg-[#d62e73] text-white text-sm font-black rounded-2xl shadow-lg shadow-[#E83E83]/30 transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+            >
+              <PackagePlus className="w-5 h-5" />
+              <span>+ Post a Load Now</span>
+            </button>
+          </div>
         </div>
 
         {/* SHIPPER 6 NAVIGATION TABS */}

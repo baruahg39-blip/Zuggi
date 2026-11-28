@@ -188,10 +188,17 @@ export const Header: React.FC<HeaderProps> = ({
             {currentUser && (
               <div className="hidden sm:flex items-center">
                 {currentUser.role === 'customer' && (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-950/80 text-blue-300 border border-blue-800/80 text-[11px] font-bold">
+                  <a
+                    href="/business/dashboard"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigateSpa('/business/dashboard');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-950/80 hover:bg-blue-900/90 text-blue-200 border border-blue-800/80 text-[11px] font-bold transition cursor-pointer"
+                  >
                     <Building2 className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Book a Truck</span>
-                  </span>
+                    <span>Business Dashboard</span>
+                  </a>
                 )}
                 {(currentUser.role === 'driver' || currentUser.role === 'vehicle_owner' || currentUser.role === 'fleet_partner' || currentUser.role === 'transporter') && (
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 text-[11px] font-bold">
